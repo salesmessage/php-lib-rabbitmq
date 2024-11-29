@@ -1,5 +1,5 @@
 {
-    "name": "salesmessage/php-lib-rabbitmq",
+    "name": "vladimir-yuldashev/laravel-queue-rabbitmq",
     "description": "RabbitMQ driver for Laravel Queue. Supports Laravel Horizon.",
     "license": "MIT",
     "authors": [
@@ -34,7 +34,7 @@
     },
     "extra": {
         "branch-alias": {
-            "dev-master": "14.0-dev"
+            "dev-master": "13.0-dev"
         },
         "laravel": {
             "providers": [
