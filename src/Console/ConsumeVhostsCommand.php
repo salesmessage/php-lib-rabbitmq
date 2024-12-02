@@ -14,7 +14,7 @@ class ConsumeVhostsCommand extends WorkCommand
     protected $signature = 'rabbitmq:consume-vhosts
                             {connection? : The name of the queue connection to work}
                             {--name=default : The name of the consumer}
-                            {--queue= : The names of the queues to work}
+                            {--queue= : The name of the queue to work. Please notice that there is no support for multiple queues}
                             {--once : Only process the next job on the queue}
                             {--stop-when-empty : Stop when the queue is empty}
                             {--delay=0 : The number of seconds to delay failed jobs (Deprecated)}
@@ -36,13 +36,14 @@ class ConsumeVhostsCommand extends WorkCommand
 
     protected $description = 'Consume messages';
 
-    public function handle()
+    public function handle(): void
     {
         /** @var VhostsConsumer $consumer */
         $consumer = $this->worker;
 
-        $consumer->setContainer($this->laravel);
         $consumer->setOutput($this->getOutput());
+
+        $consumer->setContainer($this->laravel);
         $consumer->setName($this->option('name'));
         $consumer->setConsumerTag($this->consumerTag());
         $consumer->setMaxPriority((int) $this->option('max-priority'));
@@ -50,7 +51,8 @@ class ConsumeVhostsCommand extends WorkCommand
         $consumer->setPrefetchCount((int) $this->option('prefetch-count'));
 
         if ($this->downForMaintenance() && $this->option('once')) {
-            return $consumer->sleep($this->option('sleep'));
+            $consumer->sleep($this->option('sleep'));
+            return;
         }
 
         // We'll listen to the processed and failed events so we can write information
@@ -72,7 +74,7 @@ class ConsumeVhostsCommand extends WorkCommand
             );
         }
 
-        return $this->runWorker(
+        $this->runWorker(
             $connection,
             $queue
         );
@@ -93,4 +95,5 @@ class ConsumeVhostsCommand extends WorkCommand
         return Str::substr($consumerTag, 0, 255);
     }
 }
+
 

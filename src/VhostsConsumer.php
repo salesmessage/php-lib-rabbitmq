@@ -14,6 +14,8 @@ use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\RabbitMQQueueBatchable;
 
 class VhostsConsumer extends Consumer
 {
+    protected const MAIN_HANDLER_LOCK = 'main_handler';
+
     private ?OutputStyle $output = null;
 
     private string $configConnectionName = '';
@@ -53,13 +55,13 @@ class VhostsConsumer extends Consumer
         $this->channel = $connection->getChannel();
         $this->connectionMutex = new Mutex(false);
 
-        $this->connectionMutex->lock(static::MAIN_HANDLER_LOCK);
+        $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
         $this->channel->basic_qos(
             $this->prefetchSize,
             $this->prefetchCount,
             false
         );
-        $this->connectionMutex->unlock(static::MAIN_HANDLER_LOCK);
+        $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
 
         $this->startConsuming();
 
@@ -77,9 +79,9 @@ class VhostsConsumer extends Consumer
 
             // If the daemon should run (not in maintenance mode, etc.), then we can wait for a job.
             try {
-                $this->connectionMutex->lock(static::MAIN_HANDLER_LOCK);
+                $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
                 $this->channel->wait(null, true, (int) $this->workerOptions->timeout);
-                $this->connectionMutex->unlock(static::MAIN_HANDLER_LOCK);
+                $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
             } catch (AMQPRuntimeException $exception) {
                 $this->output->info(['Consuming AMQP Runtime exception...', $exception->getMessage()]);
 
@@ -176,7 +178,7 @@ class VhostsConsumer extends Consumer
             }
         };
 
-        $this->connectionMutex->lock(static::MAIN_HANDLER_LOCK);
+        $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
         $this->channel->basic_consume(
             $this->currentQueueName,
             $this->consumerTag,
@@ -188,16 +190,16 @@ class VhostsConsumer extends Consumer
             null,
             $arguments
         );
-        $this->connectionMutex->unlock(static::MAIN_HANDLER_LOCK);
+        $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
     }
 
     private function stopConsuming()
     {
         $this->output->info(['Stop consuming...', $this->currentVhostName, $this->currentQueueName]);
 
-        $this->connectionMutex->lock(static::MAIN_HANDLER_LOCK);
+        $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
         $this->channel->basic_cancel($this->consumerTag, true);
-        $this->connectionMutex->unlock(static::MAIN_HANDLER_LOCK);
+        $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
     }
 
     private function setNextQueue(): void
