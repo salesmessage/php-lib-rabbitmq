@@ -1,6 +1,6 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Jobs;
+namespace VladimirYuldashev\LaravelQueueRabbitMQ\Queue;
 
 use PhpAmqpLib\Connection\AbstractConnection;
 use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\RabbitMQQueue as BaseRabbitMQQueue;
