@@ -2,6 +2,8 @@
 
 namespace VladimirYuldashev\LaravelQueueRabbitMQ;
 
+use GuzzleHttp\Client;
+use GuzzleHttp\Exception\RequestException;
 use Illuminate\Console\OutputStyle;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Events\Dispatcher;
@@ -14,7 +16,7 @@ use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\RabbitMQQueueBatchable;
 
 class VhostsConsumer extends Consumer
 {
-    protected const MAIN_HANDLER_LOCK = 'main_handler';
+    protected const MAIN_HANDLER_LOCK = 'vhost_handler';
 
     private ?OutputStyle $output = null;
 
@@ -204,6 +206,17 @@ class VhostsConsumer extends Consumer
 
     private function setNextQueue(): void
     {
+        $this->makeApiGetRequest('/api/queues/%2F', [
+            'page' => 1,
+            'page_size' => 10,
+            //   'columns' => 'name,vhost,idle_since,messages,messages_ready,messages_unacknowledged',
+            //    'sort' => 'idle_since',
+
+            'disable_stats' => 'true',
+            'enable_queue_totals' => 'true',
+        ]);
+
+
         if ('local-vshcherbyna.notes.666' === $this->currentQueueName) {
             $this->currentQueueName = 'local-vshcherbyna.notes.777';
             $this->currentVhostName = '/';
@@ -240,6 +253,50 @@ class VhostsConsumer extends Consumer
         $this->setNextQueue();
 
         $this->startConsuming();
+    }
+
+
+    private function makeApiGetRequest(string $url = '/api/queues/%2F', array $queryParams = [])
+    {
+        $client = new Client();
+
+        $config = $this->container['config']['queue']['connections'][$this->configConnectionName] ?? [];
+
+        $host = $config['hosts'][0]['host'];
+        $port = $config['hosts'][0]['api_port'];
+        $username = $config['hosts'][0]['user'];
+        $password = $config['hosts'][0]['password'];
+
+        $scheme = $config['secure'] ? 'https://' : 'http://';
+
+        $baseUrl = $scheme . $host . ':' . $port;
+
+        try {
+            $options = [
+                'headers' => [
+                    'Authorization' => 'Basic ' . base64_encode(
+                            $username . ':' . $password
+                        ),
+                ],
+            ];
+            if (!empty($queryParams)) {
+                $options['query'] = $queryParams;
+            }
+
+            $response = $client->get($baseUrl . $url, $options);
+        } catch (\Throwable $exception) {
+            // @todo
+            $this->output->error('Make Api Request error: ' . $exception->getMessage());
+
+            throw $exception;
+        }
+
+        $data = json_decode($response->getBody());
+
+        echo '<pre>';
+        print_r($data);
+        echo '</pre>';
+        exit;
     }
 }
 

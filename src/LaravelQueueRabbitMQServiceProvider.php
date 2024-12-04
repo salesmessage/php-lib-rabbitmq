@@ -13,8 +13,11 @@ use Illuminate\Queue\QueueManager;
 use Illuminate\Support\ServiceProvider;
 use VladimirYuldashev\LaravelQueueRabbitMQ\Console\ConsumeCommand;
 use VladimirYuldashev\LaravelQueueRabbitMQ\Console\ConsumeVhostsCommand;
+use VladimirYuldashev\LaravelQueueRabbitMQ\Console\ScanVhostsCommand;
 use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Connectors\RabbitMQConnector;
 use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\QueueManager as RabbitMQQueueManager;
+use VladimirYuldashev\LaravelQueueRabbitMQ\Services\Api\RabbitApiClient;
+use VladimirYuldashev\LaravelQueueRabbitMQ\Services\InternalStorageManager;
 
 class LaravelQueueRabbitMQServiceProvider extends ServiceProvider
 {
@@ -85,8 +88,7 @@ class LaravelQueueRabbitMQServiceProvider extends ServiceProvider
                     $this->app['events'],
                     $this->app[ExceptionHandler::class],
                     $isDownForMaintenance,
-                    null,
-                    $this->app['config']['queue']['connections']['rabbitmq']
+                    null
                 );
             });
 
@@ -97,10 +99,18 @@ class LaravelQueueRabbitMQServiceProvider extends ServiceProvider
                 );
             });
 
+            $this->app->singleton(ScanVhostsCommand::class, static function ($app) {
+                return new ScanVhostsCommand(
+                    $app[RabbitApiClient::class],
+                    $app[InternalStorageManager::class]
+                );
+            });
+
             $this->commands([
                 Console\ConsumeCommand::class,
 
                 Console\ConsumeVhostsCommand::class,
+                Console\ScanVhostsCommand::class,
             ]);
         }
 
