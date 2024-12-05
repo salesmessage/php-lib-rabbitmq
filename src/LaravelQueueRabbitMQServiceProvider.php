@@ -84,6 +84,7 @@ class LaravelQueueRabbitMQServiceProvider extends ServiceProvider
                 };
 
                 return new VhostsConsumer(
+                    $this->app[InternalStorageManager::class],
                     $this->app['rabbitmq_queue'],
                     $this->app['events'],
                     $this->app[ExceptionHandler::class],

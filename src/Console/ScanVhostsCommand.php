@@ -42,9 +42,6 @@ class ScanVhostsCommand extends Command
      */
     public function handle()
     {
-        $this->internalStorageManager->getVhostQueues('/');
-
-
         $connectionName = (string) ($this->argument('connection') ?: $this->laravel['config']['queue.default']);
 
         $connectionConfig = $this->laravel['config']['queue']['connections'][$connectionName] ?? [];
@@ -57,13 +54,25 @@ class ScanVhostsCommand extends Command
 
         $this->loadVhosts();
 
+        $oldVhosts = $this->internalStorageManager->getVhosts();
+
         if ($this->vhosts->isNotEmpty()) {
             foreach ($this->vhosts as $vhost) {
-                $this->processVhost($vhost);
+                $vhostDto = $this->processVhost($vhost);
+                if (null === $vhostDto) {
+                    continue;
+                }
+
+                $oldVhostIndex = array_search($vhostDto->getName(), $oldVhosts, true);
+                if (false !== $oldVhostIndex) {
+                    unset($oldVhosts[$oldVhostIndex]);
+                }
             }
         } else {
             $this->warn(sprintf('Vhosts for connection "%s" not found.', $connectionName));
         }
+
+        $this->removeOldsVhosts($oldVhosts);
 
         return Command::SUCCESS;
     }
@@ -104,42 +113,81 @@ class ScanVhostsCommand extends Command
 
     /**
      * @param array $vhostApiData
-     * @return void
+     * @return VhostApiDto|null
      */
-    private function processVhost(array $vhostApiData): void
+    private function processVhost(array $vhostApiData): ?VhostApiDto
     {
         $vhostDto = new VhostApiDto($vhostApiData);
         if ('' === $vhostDto->getName()) {
-            return;
+            return null;
         }
 
         $indexedSuccessfully = $this->internalStorageManager->indexVhost($vhostDto);
         if (!$indexedSuccessfully) {
             $this->warn(sprintf(
-                'Skip processing vhost: "%s". Messages ready: %d.',
+                'Skip indexation vhost: "%s". Messages ready: %d.',
                 $vhostDto->getName(),
                 $vhostDto->getMessagesReady()
             ));
 
-            return;
+            return null;
         }
 
         $this->info(sprintf(
-            'Start processing vhost: "%s". Messages ready: %d.',
+            'Successfully indexed vhost: "%s". Messages ready: %d.',
             $vhostDto->getName(),
             $vhostDto->getMessagesReady()
         ));
 
         $this->vhostQueues = new Collection();
+
         $this->loadVhostQueues($vhostDto);
+
+        $oldVhostQueues = $this->internalStorageManager->getVhostQueues($vhostDto->getName());
 
         if ($this->vhostQueues->isNotEmpty()) {
             foreach ($this->vhostQueues as $queueApiData) {
-                $this->processVhostQueue($queueApiData);
+                $processQueueDto = $this->processVhostQueue($queueApiData);
+                if (null === $processQueueDto) {
+                    continue;
+                }
+
+                $oldVhostQueueIndex = array_search($processQueueDto->getName(), $oldVhostQueues, true);
+                if (false !== $oldVhostQueueIndex) {
+                    unset($oldVhostQueues[$oldVhostQueueIndex]);
+                }
             }
         } else {
             $this->warn(sprintf(
                 'Queues for vhost "%s" not found.',
+                $vhostDto->getName()
+            ));
+        }
+
+        $this->removeOldVhostQueues($vhostDto, $oldVhostQueues);
+
+        return $vhostDto;
+    }
+
+    /**
+     * @param array $oldVhosts
+     * @return void
+     */
+    private function removeOldsVhosts(array $oldVhosts): void
+    {
+        if (empty($oldVhosts)) {
+            return;
+        }
+
+        foreach ($oldVhosts as $oldVhostName) {
+            $vhostDto = new VhostApiDto([
+                'name' => $oldVhostName,
+            ]);
+
+            $this->internalStorageManager->removeVhost($vhostDto);
+
+            $this->warn(sprintf(
+                'Removed from index vhost: "%s".',
                 $vhostDto->getName()
             ));
         }
@@ -190,31 +238,60 @@ class ScanVhostsCommand extends Command
      * @param array $queueApiData
      * @return void
      */
-    private function processVhostQueue(array $queueApiData): void
+    private function processVhostQueue(array $queueApiData): ?QueueApiDto
     {
         $queueApiDto = new QueueApiDto($queueApiData);
         if ('' === $queueApiDto->getName()) {
-            return;
+            return null;
         }
 
         $indexedSuccessfully = $this->internalStorageManager->indexQueue($queueApiDto);
         if (!$indexedSuccessfully) {
             $this->warn(sprintf(
-                'Skip processing queue: "%s". Vhost: %s. Messages ready: %d.',
+                'Skip indexation queue: "%s". Vhost: %s. Messages ready: %d.',
                 $queueApiDto->getName(),
                 $queueApiDto->getVhostName(),
                 $queueApiDto->getMessagesReady()
             ));
 
-            return;
+            return null;
         }
 
         $this->info(sprintf(
-            'Start processing queue: "%s". Vhost: %s. Messages ready: %d.',
+            'Successfully indexed queue: "%s". Vhost: %s. Messages ready: %d.',
             $queueApiDto->getName(),
             $queueApiDto->getVhostName(),
             $queueApiDto->getMessagesReady()
         ));
+
+        return $queueApiDto;
+    }
+
+    /**
+     * @param VhostApiDto $vhostDto
+     * @param array $oldVhostQueues
+     * @return void
+     */
+    private function removeOldVhostQueues(VhostApiDto $vhostDto, array $oldVhostQueues): void
+    {
+        if (empty($oldVhostQueues)) {
+            return;
+        }
+
+        foreach ($oldVhostQueues as $oldQueueName) {
+            $queueApiDto = new QueueApiDto([
+                'name' => $oldQueueName,
+                'vhost' => $vhostDto->getName(),
+            ]);
+
+            $this->internalStorageManager->removeQueue($queueApiDto);
+
+            $this->warn(sprintf(
+                'Removed from index queue: "%s". Vhost: %s.',
+                $queueApiDto->getName(),
+                $queueApiDto->getVhostName()
+            ));
+        }
     }
 }
 

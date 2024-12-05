@@ -12,6 +12,8 @@ class VhostApiDto
 
     private int $messagesUnacknowledged = 0;
 
+    private int $lastProcessedAt = 0;
+
     /**
      * @param array $data
      */
@@ -65,16 +67,39 @@ class VhostApiDto
     }
 
     /**
+     * @return int
+     */
+    public function getLastProcessedAt(): int
+    {
+        return $this->lastProcessedAt;
+    }
+
+    /**
+     * @param int $lastProcessedAt
+     * @return $this
+     */
+    public function setLastProcessedAt(int $lastProcessedAt): self
+    {
+        $this->lastProcessedAt = $lastProcessedAt;
+        return $this;
+    }
+
+    /**
      * @return array
      */
-    public function toInternalData(): array
+    public function toInternalData(bool $withLastProcessedAt = false): array
     {
-        return [
+        $data = [
             'name' => $this->getName(),
             'messages' => $this->getMessages(),
             'messages_ready' => $this->getMessagesReady(),
             'messages_unacknowledged' => $this->getMessagesUnacknowledged(),
         ];
+        if ($withLastProcessedAt) {
+            $data['last_processed_at'] = $this->getLastProcessedAt();
+        }
+
+        return $data;
     }
 }
 

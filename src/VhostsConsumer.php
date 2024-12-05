@@ -7,12 +7,16 @@ use GuzzleHttp\Exception\RequestException;
 use Illuminate\Console\OutputStyle;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Events\Dispatcher;
+use Illuminate\Contracts\Queue\Factory as QueueManager;
 use Illuminate\Queue\WorkerOptions;
 use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Message\AMQPMessage;
+use VladimirYuldashev\LaravelQueueRabbitMQ\Dto\QueueApiDto;
+use VladimirYuldashev\LaravelQueueRabbitMQ\Dto\VhostApiDto;
 use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\QueueManager as RabbitMQQueueManager;
 use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\RabbitMQQueue;
 use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\RabbitMQQueueBatchable;
+use VladimirYuldashev\LaravelQueueRabbitMQ\Services\InternalStorageManager;
 
 class VhostsConsumer extends Consumer
 {
@@ -24,12 +28,35 @@ class VhostsConsumer extends Consumer
 
     private string $currentConnectionName = '';
 
-    private string $currentVhostName = '/';
+    private array $vhosts = [];
+
+    private ?string $currentVhostName = null;
+
+    private array $vhostQueues = [];
 
     private ?string $currentQueueName = null;
 
     private ?WorkerOptions $workerOptions = null;
 
+    /**
+     * @param InternalStorageManager $internalStorageManager
+     * @param QueueManager $manager
+     * @param Dispatcher $events
+     * @param ExceptionHandler $exceptions
+     * @param callable $isDownForMaintenance
+     * @param callable|null $resetScope
+     */
+    public function __construct(
+        private InternalStorageManager $internalStorageManager,
+        QueueManager $manager,
+        Dispatcher $events,
+        ExceptionHandler $exceptions,
+        callable $isDownForMaintenance,
+        callable $resetScope = null
+    )
+    {
+        parent::__construct($manager, $events, $exceptions, $isDownForMaintenance, $resetScope);
+    }
 
     public function setOutput(OutputStyle $output)
     {
@@ -38,8 +65,15 @@ class VhostsConsumer extends Consumer
 
     public function daemon($connectionName, $queue, WorkerOptions $options)
     {
+        $this->loadVhosts();
+        if (false === $this->switchToNextVhost()) {
+            // @todo load vhosts again
+            $this->output->warning('No active vhosts....');
+
+            return;
+        }
+
         $this->configConnectionName = (string) $connectionName;
-        $this->currentQueueName = $queue;
         $this->workerOptions = $options;
 
         if ($this->supportsAsyncSignals()) {
@@ -72,7 +106,7 @@ class VhostsConsumer extends Consumer
             // if it is we will just pause this worker for a given amount of time and
             // make sure we do not need to kill this worker process off completely.
             if (! $this->daemonShouldRun($this->workerOptions, $this->configConnectionName, $this->currentQueueName)) {
-                $this->output->info(['Consuming pause worker...', $this->currentQueueName]);
+                $this->output->info('Consuming pause worker...');
 
                 $this->pauseWorker($this->workerOptions, $lastRestart);
 
@@ -85,13 +119,13 @@ class VhostsConsumer extends Consumer
                 $this->channel->wait(null, true, (int) $this->workerOptions->timeout);
                 $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
             } catch (AMQPRuntimeException $exception) {
-                $this->output->info(['Consuming AMQP Runtime exception...', $exception->getMessage()]);
+                $this->output->error('Consuming AMQP Runtime exception. Error: ' . $exception->getMessage());
 
                 $this->exceptions->report($exception);
 
                 $this->kill(self::EXIT_ERROR, $this->workerOptions);
             } catch (Exception|Throwable $exception) {
-                $this->output->info(['Consuming exception...', $exception->getMessage()]);
+                $this->output->error('Consuming exception. Error: ' . $exception->getMessage());
 
                 $this->exceptions->report($exception);
 
@@ -100,9 +134,11 @@ class VhostsConsumer extends Consumer
 
             // If no job is got off the queue, we will need to sleep the worker.
             if ($this->currentJob === null) {
-                $this->output->info(['Consuming sleep. No job...', $this->workerOptions->sleep]);
+                $this->output->info('Consuming sleep. No job...');
 
-                $this->switchToNextQueue();
+                $this->stopConsuming();
+                $this->goAhead();
+                $this->startConsuming();
 
                 $this->sleep($this->workerOptions->sleep);
             }
@@ -130,7 +166,11 @@ class VhostsConsumer extends Consumer
 
     private function startConsuming()
     {
-        $this->output->info(['Start consuming...', $this->currentVhostName, $this->currentQueueName]);
+        $this->output->info(sprintf(
+            'Start consuming. Vhost: "%s". Queue: "%s"',
+            $this->currentVhostName,
+            $this->currentQueueName
+        ));
 
         $arguments = [];
         if ($this->maxPriority) {
@@ -155,7 +195,12 @@ class VhostsConsumer extends Consumer
                 $this->currentQueueName
             );
 
-            $this->output->info(['Consume message...', $this->currentQueueName, $jobsProcessed]);
+            $this->output->info(sprintf(
+                'Consume message. Vhost: "%s". Queue: "%s". Num: %s',
+                $this->currentVhostName,
+                $this->currentQueueName,
+                $jobsProcessed
+            ));
 
             $this->currentJob = $job;
 
@@ -166,13 +211,16 @@ class VhostsConsumer extends Consumer
             $jobsProcessed++;
 
             $this->runJob($job, $this->currentConnectionName, $this->workerOptions);
+            $this->updateLastProcessedAt();
 
             if ($this->supportsAsyncSignals()) {
                 $this->resetTimeoutHandler();
             }
 
             if ($jobsProcessed >= 5) {
-                $this->switchToNextQueue();
+                $this->stopConsuming();
+                $this->goAhead();
+                $this->startConsuming();
             }
 
             if ($this->workerOptions->rest > 0) {
@@ -193,110 +241,154 @@ class VhostsConsumer extends Consumer
             $arguments
         );
         $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
+
+        $this->updateLastProcessedAt();
     }
 
+    /**
+     * @return void
+     * @throws Exceptions\MutexTimeout
+     */
     private function stopConsuming()
     {
-        $this->output->info(['Stop consuming...', $this->currentVhostName, $this->currentQueueName]);
-
         $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
         $this->channel->basic_cancel($this->consumerTag, true);
         $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
     }
 
-    private function setNextQueue(): void
+    /**
+     * @return void
+     */
+    private function loadVhosts(): void
     {
-        $this->makeApiGetRequest('/api/queues/%2F', [
-            'page' => 1,
-            'page_size' => 10,
-            //   'columns' => 'name,vhost,idle_since,messages,messages_ready,messages_unacknowledged',
-            //    'sort' => 'idle_since',
+        $this->vhosts = $this->internalStorageManager->getVhosts();
 
-            'disable_stats' => 'true',
-            'enable_queue_totals' => 'true',
+        $this->currentVhostName = null;
+        $this->currentQueueName = null;
+    }
+
+    /**
+     * @return bool
+     */
+    private function switchToNextVhost(): bool
+    {
+        $nextVhost = $this->getNextVhost();
+        if (null === $nextVhost) {
+            return false;
+        }
+
+        $this->currentVhostName = $nextVhost;
+        $this->loadVhostQueues();
+
+        $nextQueue = $this->getNextQueue();
+        if (null === $nextQueue) {
+            return $this->switchToNextVhost();
+        }
+
+        $this->currentQueueName = $nextQueue;
+        return true;
+    }
+
+    /**
+     * @return string|null
+     */
+    private function getNextVhost(): ?string
+    {
+        if (null === $this->currentVhostName) {
+            return (string) reset($this->vhosts);
+        }
+
+        $currentIndex = array_search($this->currentVhostName, $this->vhosts, true);
+        if ((false !== $currentIndex) && isset($this->vhosts[(int) $currentIndex + 1])) {
+            return (string) $this->vhosts[(int) $currentIndex + 1];
+        }
+
+        return null;
+    }
+
+    /**
+     * @return void
+     */
+    private function loadVhostQueues(): void
+    {
+        $this->vhostQueues = (null !== $this->currentVhostName)
+            ? $this->internalStorageManager->getVhostQueues($this->currentVhostName)
+            : [];
+
+        $this->currentQueueName = null;
+    }
+
+    /**
+     * @return bool
+     */
+    private function switchToNextQueue(): bool
+    {
+        $nextQueue = $this->getNextQueue();
+        if (null === $nextQueue) {
+            return false;
+        }
+
+        $this->currentQueueName = $nextQueue;
+        return true;
+    }
+
+    /**
+     * @return string|null
+     */
+    private function getNextQueue(): ?string
+    {
+        if (null === $this->currentQueueName) {
+            return (string) reset($this->vhostQueues);
+        }
+
+        $currentIndex = array_search($this->currentQueueName, $this->vhostQueues, true);
+        if ((false !== $currentIndex) && isset($this->vhostQueues[(int) $currentIndex + 1])) {
+            return (string) $this->vhostQueues[(int) $currentIndex + 1];
+        }
+
+        return null;
+    }
+
+    /**
+     * @return bool
+     */
+    private function goAhead(): bool
+    {
+        if ($this->switchToNextQueue()) {
+            return true;
+        }
+
+        if ($this->switchToNextVhost()) {
+            return true;
+        }
+
+        $this->loadVhosts();
+        return $this->switchToNextVhost();
+    }
+
+    /**
+     * @return void
+     */
+    private function updateLastProcessedAt()
+    {
+        if ((null === $this->currentVhostName) || (null === $this->currentQueueName)) {
+            return;
+        }
+
+        $timestamp = time();
+
+        $queueDto = new QueueApiDto([
+            'name' => $this->currentQueueName,
+            'vhost' => $this->currentVhostName,
         ]);
+        $queueDto->setLastProcessedAt($timestamp);
+        $this->internalStorageManager->updateQueueLastProcessedAt($queueDto);
 
-
-        if ('local-vshcherbyna.notes.666' === $this->currentQueueName) {
-            $this->currentQueueName = 'local-vshcherbyna.notes.777';
-            $this->currentVhostName = '/';
-
-            return;
-        }
-
-        if ('local-vshcherbyna.notes.777' === $this->currentQueueName) {
-            $this->currentQueueName = 'local-vshcherbyna.notes.333';
-            $this->currentVhostName = 'foo';
-
-            return;
-        }
-
-        if ('local-vshcherbyna.notes.333' === $this->currentQueueName) {
-            $this->currentQueueName = 'local-vshcherbyna.notes.555';
-            $this->currentVhostName = 'foo';
-
-            return;
-        }
-
-        if ('local-vshcherbyna.notes.555' === $this->currentQueueName) {
-            $this->currentQueueName = 'local-vshcherbyna.notes.666';
-            $this->currentVhostName = '/';
-
-            return;
-        }
-    }
-
-    private function switchToNextQueue()
-    {
-        $this->stopConsuming();
-
-        $this->setNextQueue();
-
-        $this->startConsuming();
-    }
-
-
-    private function makeApiGetRequest(string $url = '/api/queues/%2F', array $queryParams = [])
-    {
-        $client = new Client();
-
-        $config = $this->container['config']['queue']['connections'][$this->configConnectionName] ?? [];
-
-        $host = $config['hosts'][0]['host'];
-        $port = $config['hosts'][0]['api_port'];
-        $username = $config['hosts'][0]['user'];
-        $password = $config['hosts'][0]['password'];
-
-        $scheme = $config['secure'] ? 'https://' : 'http://';
-
-        $baseUrl = $scheme . $host . ':' . $port;
-
-        try {
-            $options = [
-                'headers' => [
-                    'Authorization' => 'Basic ' . base64_encode(
-                            $username . ':' . $password
-                        ),
-                ],
-            ];
-            if (!empty($queryParams)) {
-                $options['query'] = $queryParams;
-            }
-
-            $response = $client->get($baseUrl . $url, $options);
-        } catch (\Throwable $exception) {
-            // @todo
-            $this->output->error('Make Api Request error: ' . $exception->getMessage());
-
-            throw $exception;
-        }
-
-        $data = json_decode($response->getBody());
-
-        echo '<pre>';
-        print_r($data);
-        echo '</pre>';
-        exit;
+        $vhostDto = new VhostApiDto([
+            'name' => $queueDto->getVhostName()
+        ]);
+        $vhostDto->setLastProcessedAt($timestamp);
+        $this->internalStorageManager->updateVhostLastProcessedAt($vhostDto);
     }
 }
 

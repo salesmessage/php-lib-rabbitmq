@@ -26,26 +26,20 @@ class InternalStorageManager
     }
 
     /**
-     * @return void
-     */
-    public function removeVhostsIndex(): void
-    {
-        if ($this->redis->exists(self::INDEX_KEY_VHOSTS)) {
-            $this->redis->del(self::INDEX_KEY_VHOSTS);
-        }
-    }
-
-    /**
      * @return array
      */
     public function getVhosts(): array
     {
         $vhosts = $this->redis->sort(self::INDEX_KEY_VHOSTS, [
-            'by' => '*->messages_ready',
-            'sort' => 'desc',
+            'by' => '*->last_processed_at',
+            'sort' => 'asc',
         ]);
 
-        return $vhosts;
+        return array_map(fn($value): string => str_replace_first(
+            $this->getVhostStorageKeyPrefix(),
+            '',
+            $value
+        ), $vhosts);
     }
 
     /**
@@ -57,12 +51,15 @@ class InternalStorageManager
         $indexKey = $this->getQueueIndexKey($vhostName);
 
         $queues = $this->redis->sort($indexKey, [
-            'by' => '*->messages_ready',
-           // 'limit' => [0, 100],
-            'sort' => 'desc',
+            'by' => '*->last_processed_at',
+            'sort' => 'asc',
         ]);
 
-        return $queues;
+        return array_map(fn($value): string => str_replace_first(
+            $this->getQueueStorageKeyPrefix($vhostName),
+            '',
+            $value
+        ), $queues);
     }
 
     /**
@@ -72,19 +69,17 @@ class InternalStorageManager
     public function indexVhost(VhostApiDto $vhostDto): bool
     {
         if ($vhostDto->getMessagesReady() > 0) {
-            $this->addVhost($vhostDto);
-            return true;
+            return $this->addVhost($vhostDto);
         }
 
-        $this->removeVhost($vhostDto);
-        return true;
+        return $this->removeVhost($vhostDto);
     }
 
     /**
      * @param VhostApiDto $vhostDto
-     * @return void
+     * @return bool
      */
-    private function addVhost(VhostApiDto $vhostDto): void
+    private function addVhost(VhostApiDto $vhostDto): bool
     {
         $storageKey = $this->getVhostStorageKey($vhostDto);
 
@@ -92,14 +87,16 @@ class InternalStorageManager
             $this->redis->sadd(self::INDEX_KEY_VHOSTS, $storageKey);
         }
 
-        $this->redis->hmset($storageKey, $vhostDto->toInternalData());
+        $this->redis->hmset($storageKey, $vhostDto->toInternalData(!$this->redis->exists($storageKey)));
+
+        return true;
     }
 
     /**
      * @param VhostApiDto $vhostDto
-     * @return void
+     * @return bool
      */
-    private function removeVhost(VhostApiDto $vhostDto): void
+    public function removeVhost(VhostApiDto $vhostDto): bool
     {
         $storageKey = $this->getVhostStorageKey($vhostDto);
 
@@ -110,6 +107,24 @@ class InternalStorageManager
         if ($this->redis->exists($storageKey)) {
             $this->redis->del($storageKey);
         }
+
+        return true;
+    }
+
+    /**
+     * @param VhostApiDto $vhostDto
+     * @return bool
+     */
+    public function updateVhostLastProcessedAt(VhostApiDto $vhostDto): bool
+    {
+        $storageKey = $this->getVhostStorageKey($vhostDto);
+        if (!$this->redis->exists($storageKey)) {
+            return false;
+        }
+
+        $this->redis->hset($storageKey, 'last_processed_at', $vhostDto->getLastProcessedAt());
+
+        return true;
     }
 
     /**
@@ -118,7 +133,15 @@ class InternalStorageManager
      */
     private function getVhostStorageKey(VhostApiDto $vhostDto): string
     {
-        return sprintf('rabbitmq_vhost|%s', $vhostDto->getName());
+        return $this->getVhostStorageKeyPrefix() . $vhostDto->getName();
+    }
+
+    /**
+     * @return string
+     */
+    private function getVhostStorageKeyPrefix(): string
+    {
+        return 'rabbitmq_vhost|';
     }
 
     /**
@@ -128,19 +151,17 @@ class InternalStorageManager
     public function indexQueue(QueueApiDto $queueDto): bool
     {
         if ($queueDto->getMessagesReady() > 0) {
-            $this->addQueue($queueDto);
-            return true;
+            return $this->addQueue($queueDto);
         }
 
-        $this->removeQueue($queueDto);
-        return true;
+        return $this->removeQueue($queueDto);
     }
 
     /**
      * @param QueueApiDto $queueDto
-     * @return void
+     * @return bool
      */
-    private function addQueue(QueueApiDto $queueDto): void
+    private function addQueue(QueueApiDto $queueDto): bool
     {
         $storageKey = $this->getQueueStorageKey($queueDto);
         $indexKey = $this->getQueueIndexKey($queueDto->getVhostName());
@@ -149,14 +170,16 @@ class InternalStorageManager
             $this->redis->sadd($indexKey, $storageKey);
         }
 
-        $this->redis->hmset($storageKey, $queueDto->toInternalData());
+        $this->redis->hmset($storageKey, $queueDto->toInternalData(!$this->redis->exists($storageKey)));
+
+        return true;
     }
 
     /**
      * @param QueueApiDto $queueDto
-     * @return void
+     * @return bool
      */
-    private function removeQueue(QueueApiDto $queueDto): void
+    public function removeQueue(QueueApiDto $queueDto): bool
     {
         $storageKey = $this->getQueueStorageKey($queueDto);
         $indexKey = $this->getQueueIndexKey($queueDto->getVhostName());
@@ -168,6 +191,24 @@ class InternalStorageManager
         if ($this->redis->exists($storageKey)) {
             $this->redis->del($storageKey);
         }
+
+        return true;
+    }
+
+    /**
+     * @param VhostApiDto $vhostDto
+     * @return bool
+     */
+    public function updateQueueLastProcessedAt(QueueApiDto $queueDto): bool
+    {
+        $storageKey = $this->getQueueStorageKey($queueDto);
+        if (!$this->redis->exists($storageKey)) {
+            return false;
+        }
+
+        $this->redis->hset($storageKey, 'last_processed_at', $queueDto->getLastProcessedAt());
+
+        return true;
     }
 
     /**
@@ -196,60 +237,5 @@ class InternalStorageManager
     {
         return sprintf('%s:%s', self::INDEX_KEY_QUEUES, $vhostName);
     }
-
-
- //   public function test()
-  //  {
-        //        $this->redis->hset('vhost:1', 'name', 'Test 1');
-//        $this->redis->hset('vhost:1', 'message_count', 100);
-//        $this->redis->hset('vhost:1', 'queues', json_encode(['foo1', 'bar1', 'baz1']));
-//
-//        $this->redis->hmset('vhost:2', [
-//            'name' => 'Test 2',
-//            'message_count' => 200,
-//            'queues' =>  json_encode(['foo2', 'bar2', 'baz2'])
-//        ]);
-
-        // https://github.com/phpredis/phpredis
-        // get
-        // $this->redis->hmget('vhost:2', ['name', 'message_count']);
-        // $this->redis->hgetall('vhost:2');
-        // $this->redis->hget('vhost:2', 'name');
-
-        // keys
-        // $this->redis->keys('vhost:*');
-
-
-
-
-        //        $this->redis->del('indices');
-//        $this->redis->sAdd('indices', 'h1');
-//        $this->redis->sAdd('indices', 'h2');
-//        $this->redis->sAdd('indices', 'h3');
-//        $this->redis->sAdd('indices', 'h4');
-//
-//        $this->redis->hset('h1', 'score', 2);
-//        $this->redis->hset('h2', 'score', 1);
-//        $this->redis->hset('h3', 'score', 3);
-//        $this->redis->hset('h4', 'score', 4);
-//
-//      //  $this->redis->sMembers('indices');
-//
-//        echo '<pre>';
-//        print_r( $this->redis->sort('indices', ['by' => '*->score'])    ) ;
-//        echo '</pre>';
-//        exit;
-
-
-        //  $this->redis->del('vhosts');
-
-//        echo '<pre>';
-//        print_r( $this->redis->sort('vhosts', ['by' => '*->messages_ready']) );
-//        echo '</pre>';
-//        exit;
-
-//    }
-
-
 }
 
