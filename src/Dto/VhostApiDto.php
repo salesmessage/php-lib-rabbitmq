@@ -1,6 +1,6 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Dto;
+namespace Salesmessage\LibRabbitMQ\Dto;
 
 class VhostApiDto
 {

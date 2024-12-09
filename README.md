@@ -18,7 +18,7 @@ Only the latest version will get new features. Bug fixes will be provided using 
 You can install this package via composer using this command:
 
 ```
-composer require vladimir-yuldashev/laravel-queue-rabbitmq
+composer require salesmessage/php-lib-rabbitmq
 ```
 
 The package will automatically register itself.
@@ -212,7 +212,7 @@ An example of your own job class:
 
 namespace App\Queue\Jobs;
 
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Jobs\RabbitMQJob as BaseJob;
+use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob as BaseJob;
 
 class RabbitMQJob extends BaseJob
 {
@@ -244,7 +244,7 @@ Or maybe you want to add extra properties to the payload:
 
 namespace App\Queue\Jobs;
 
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Jobs\RabbitMQJob as BaseJob;
+use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob as BaseJob;
 
 class RabbitMQJob extends BaseJob
 {
@@ -272,7 +272,7 @@ you should add stub for `getName` method:
 namespace App\Queue\Jobs;
 
 use Illuminate\Support\Facades\Log;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Jobs\RabbitMQJob as BaseJob;
+use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob as BaseJob;
 
 class RabbitMQJob extends BaseJob
 {
@@ -316,10 +316,10 @@ An example for the config:
 ### Use your own Worker class
 
 If you want to use your own `RabbitMQQueue::class` this is possible by
-extending `VladimirYuldashev\LaravelQueueRabbitMQ\Queue\RabbitMQQueue`.
+extending `Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue`.
 and inform laravel to use your class by setting `RABBITMQ_WORKER` to `\App\Queue\RabbitMQQueue::class`.
 
-> Note: Worker classes **must** extend `VladimirYuldashev\LaravelQueueRabbitMQ\Queue\RabbitMQQueue`
+> Note: Worker classes **must** extend `Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue`
 
 ```php
 'connections' => [
@@ -341,7 +341,7 @@ and inform laravel to use your class by setting `RABBITMQ_WORKER` to `\App\Queue
 
 namespace App\Queue;
 
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\RabbitMQQueue as BaseRabbitMQQueue;
+use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue as BaseRabbitMQQueue;
 
 class RabbitMQQueue extends BaseRabbitMQQueue
 {
@@ -363,7 +363,7 @@ namespace App\Queue;
 
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
 use PhpAmqpLib\Exception\AMQPConnectionClosedException;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\RabbitMQQueue as BaseRabbitMQQueue;
+use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue as BaseRabbitMQQueue;
 
 class RabbitMQQueue extends BaseRabbitMQQueue
 {
@@ -546,7 +546,7 @@ documentation: http://laravel.com/docs/queues
 For Lumen usage the service provider should be registered manually as follow in `bootstrap/app.php`:
 
 ```php
-$app->register(VladimirYuldashev\LaravelQueueRabbitMQ\LaravelQueueRabbitMQServiceProvider::class);
+$app->register(Salesmessage\LibRabbitMQ\LaravelLibRabbitMQServiceProvider::class);
 ```
 
 ## Consuming Messages

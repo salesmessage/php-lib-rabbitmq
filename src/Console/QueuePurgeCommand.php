@@ -1,17 +1,17 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Console;
+namespace Salesmessage\LibRabbitMQ\Console;
 
 use Exception;
 use Illuminate\Console\Command;
 use Illuminate\Console\ConfirmableTrait;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Connectors\RabbitMQConnector;
+use Salesmessage\LibRabbitMQ\Queue\Connectors\RabbitMQConnector;
 
 class QueuePurgeCommand extends Command
 {
     use ConfirmableTrait;
 
-    protected $signature = 'rabbitmq:queue-purge
+    protected $signature = 'lib-rabbitmq:queue-purge
                            {queue}
                            {connection=rabbitmq : The name of the queue connection to use}
                            {--force : Force the operation to run when in production}';

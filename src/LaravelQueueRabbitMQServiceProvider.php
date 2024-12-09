@@ -1,6 +1,6 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ;
+namespace Salesmessage\LibRabbitMQ;
 
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Queue\Connectors\BeanstalkdConnector;
@@ -11,15 +11,15 @@ use Illuminate\Queue\Connectors\SqsConnector;
 use Illuminate\Queue\Connectors\SyncConnector;
 use Illuminate\Queue\QueueManager;
 use Illuminate\Support\ServiceProvider;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Console\ConsumeCommand;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Console\ConsumeVhostsCommand;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Console\ScanVhostsCommand;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Connectors\RabbitMQConnector;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\QueueManager as RabbitMQQueueManager;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Services\Api\RabbitApiClient;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Services\InternalStorageManager;
+use Salesmessage\LibRabbitMQ\Console\ConsumeCommand;
+use Salesmessage\LibRabbitMQ\Console\ConsumeVhostsCommand;
+use Salesmessage\LibRabbitMQ\Console\ScanVhostsCommand;
+use Salesmessage\LibRabbitMQ\Queue\Connectors\RabbitMQConnector;
+use Salesmessage\LibRabbitMQ\Queue\QueueManager as RabbitMQQueueManager;
+use Salesmessage\LibRabbitMQ\Services\Api\RabbitApiClient;
+use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 
-class LaravelQueueRabbitMQServiceProvider extends ServiceProvider
+class LaravelLibRabbitMQServiceProvider extends ServiceProvider
 {
     /**
      * Register the service provider.

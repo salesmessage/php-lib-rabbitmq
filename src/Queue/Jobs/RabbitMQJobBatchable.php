@@ -1,10 +1,10 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Jobs;
+namespace Salesmessage\LibRabbitMQ\Queue\Jobs;
 
 use Illuminate\Contracts\Encryption\Encrypter;
 use Illuminate\Queue\Jobs\JobName;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Jobs\RabbitMQJob as BaseJob;
+use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob as BaseJob;
 
 /**
  * SQS Job wrapper for RabbitMQ

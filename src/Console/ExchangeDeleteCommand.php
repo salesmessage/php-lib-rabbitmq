@@ -1,14 +1,14 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Console;
+namespace Salesmessage\LibRabbitMQ\Console;
 
 use Exception;
 use Illuminate\Console\Command;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Connectors\RabbitMQConnector;
+use Salesmessage\LibRabbitMQ\Queue\Connectors\RabbitMQConnector;
 
 class ExchangeDeleteCommand extends Command
 {
-    protected $signature = 'rabbitmq:exchange-delete
+    protected $signature = 'lib-rabbitmq:exchange-delete
                             {name : The name of the exchange to delete}
                             {connection=rabbitmq : The name of the queue connection to use}
                             {--unused=0 : Check if exchange is unused}';

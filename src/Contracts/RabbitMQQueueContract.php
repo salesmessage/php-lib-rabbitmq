@@ -1,10 +1,10 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Contracts;
+namespace Salesmessage\LibRabbitMQ\Contracts;
 
 use PhpAmqpLib\Connection\AbstractConnection;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\QueueConfig;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\RabbitMQQueue;
+use Salesmessage\LibRabbitMQ\Queue\QueueConfig;
+use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
 
 interface RabbitMQQueueContract
 {

@@ -1,20 +1,20 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Console;
+namespace Salesmessage\LibRabbitMQ\Console;
 
 use Illuminate\Console\Command;
 use Illuminate\Redis\Connections\PredisConnection;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Redis;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Dto\QueueApiDto;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Dto\VhostApiDto;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Services\Api\RabbitApiClient;
+use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
+use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
+use Salesmessage\LibRabbitMQ\Services\Api\RabbitApiClient;
 use Throwable;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Services\InternalStorageManager;
+use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 
 class ScanVhostsCommand extends Command
 {
-    protected $signature = 'rabbitmq:scan-vhosts
+    protected $signature = 'lib-rabbitmq:scan-vhosts
                             {connection? : The name of the queue connection to work}';
 
     protected $description = 'Scan and index vhosts';

@@ -1,6 +1,6 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Interfaces;
+namespace Salesmessage\LibRabbitMQ\Interfaces;
 
 interface RabbitMQBatchable
 {

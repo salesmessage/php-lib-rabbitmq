@@ -1,6 +1,6 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Queue;
+namespace Salesmessage\LibRabbitMQ\Queue;
 
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Queue\QueueManager as BaseQueueManager;

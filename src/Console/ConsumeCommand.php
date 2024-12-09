@@ -1,14 +1,14 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Console;
+namespace Salesmessage\LibRabbitMQ\Console;
 
 use Illuminate\Queue\Console\WorkCommand;
 use Illuminate\Support\Str;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Consumer;
+use Salesmessage\LibRabbitMQ\Consumer;
 
 class ConsumeCommand extends WorkCommand
 {
-    protected $signature = 'rabbitmq:consume
+    protected $signature = 'lib-rabbitmq:consume
                             {connection? : The name of the queue connection to work}
                             {--name=default : The name of the consumer}
                             {--queue= : The name of the queue to work. Please notice that there is no support for multiple queues}

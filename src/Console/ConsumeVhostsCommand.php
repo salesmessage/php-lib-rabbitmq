@@ -1,17 +1,17 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Console;
+namespace Salesmessage\LibRabbitMQ\Console;
 
 use Illuminate\Contracts\Cache\Repository as Cache;
 use Illuminate\Queue\Console\WorkCommand;
 use Illuminate\Queue\Worker;
 use Illuminate\Support\Str;
 use Symfony\Component\Console\Terminal;
-use VladimirYuldashev\LaravelQueueRabbitMQ\VhostsConsumer;
+use Salesmessage\LibRabbitMQ\VhostsConsumer;
 
 class ConsumeVhostsCommand extends WorkCommand
 {
-    protected $signature = 'rabbitmq:consume-vhosts
+    protected $signature = 'lib-rabbitmq:consume-vhosts
                             {connection? : The name of the queue connection to work}
                             {--name=default : The name of the consumer}
                             {--queue= : The name of the queue to work. Please notice that there is no support for multiple queues}

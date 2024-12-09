@@ -1,14 +1,14 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Console;
+namespace Salesmessage\LibRabbitMQ\Console;
 
 use Exception;
 use Illuminate\Console\Command;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Connectors\RabbitMQConnector;
+use Salesmessage\LibRabbitMQ\Queue\Connectors\RabbitMQConnector;
 
 class QueueDeleteCommand extends Command
 {
-    protected $signature = 'rabbitmq:queue-delete
+    protected $signature = 'lib-rabbitmq:queue-delete
                            {name : The name of the queue to delete}
                            {connection=rabbitmq : The name of the queue connection to use}
                            {--unused=0 : Check if queue has no consumers}

@@ -1,6 +1,6 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ;
+namespace Salesmessage\LibRabbitMQ;
 
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\RequestException;
@@ -11,15 +11,15 @@ use Illuminate\Contracts\Queue\Factory as QueueManager;
 use Illuminate\Queue\WorkerOptions;
 use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Message\AMQPMessage;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Dto\QueueApiDto;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Dto\VhostApiDto;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Interfaces\RabbitMQBatchable;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Jobs\RabbitMQJob;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Jobs\RabbitMQJobBatchable;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\QueueManager as RabbitMQQueueManager;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\RabbitMQQueue;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\RabbitMQQueueBatchable;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Services\InternalStorageManager;
+use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
+use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
+use Salesmessage\LibRabbitMQ\Interfaces\RabbitMQBatchable;
+use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
+use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJobBatchable;
+use Salesmessage\LibRabbitMQ\Queue\QueueManager as RabbitMQQueueManager;
+use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
+use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueueBatchable;
+use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Throwable;
 
 class VhostsConsumer extends Consumer

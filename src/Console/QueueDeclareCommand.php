@@ -1,14 +1,14 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Console;
+namespace Salesmessage\LibRabbitMQ\Console;
 
 use Exception;
 use Illuminate\Console\Command;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Connectors\RabbitMQConnector;
+use Salesmessage\LibRabbitMQ\Queue\Connectors\RabbitMQConnector;
 
 class QueueDeclareCommand extends Command
 {
-    protected $signature = 'rabbitmq:queue-declare
+    protected $signature = 'lib-rabbitmq:queue-declare
                            {name : The name of the queue to declare}
                            {connection=rabbitmq : The name of the queue connection to use}
                            {--max-priority}

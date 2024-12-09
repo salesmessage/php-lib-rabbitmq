@@ -1,19 +1,19 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Tests;
+namespace Salesmessage\LibRabbitMQ\Tests;
 
 use Illuminate\Support\Facades\Queue;
 use Orchestra\Testbench\TestCase as BaseTestCase;
 use PhpAmqpLib\Connection\AMQPLazyConnection;
-use VladimirYuldashev\LaravelQueueRabbitMQ\LaravelQueueRabbitMQServiceProvider;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\RabbitMQQueue;
+use Salesmessage\LibRabbitMQ\LaravelLibRabbitMQServiceProvider;
+use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
 
 abstract class TestCase extends BaseTestCase
 {
     protected function getPackageProviders($app): array
     {
         return [
-            LaravelQueueRabbitMQServiceProvider::class,
+            LaravelLibRabbitMQServiceProvider::class,
         ];
     }
 

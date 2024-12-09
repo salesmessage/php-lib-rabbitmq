@@ -1,16 +1,16 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Tests\Feature;
+namespace Salesmessage\LibRabbitMQ\Tests\Feature;
 
 use Illuminate\Queue\QueueManager;
 use PhpAmqpLib\Connection\AMQPConnectionConfig;
 use PhpAmqpLib\Connection\AMQPLazyConnection;
 use PhpAmqpLib\Connection\AMQPSSLConnection;
 use PhpAmqpLib\Connection\AMQPStreamConnection;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\RabbitMQQueue;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Tests\Mocks\TestSSLConnection;
+use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
+use Salesmessage\LibRabbitMQ\Tests\Mocks\TestSSLConnection;
 
-class ConnectorTest extends \VladimirYuldashev\LaravelQueueRabbitMQ\Tests\TestCase
+class ConnectorTest extends \Salesmessage\LibRabbitMQ\Tests\TestCase
 {
     public function testLazyConnection(): void
     {

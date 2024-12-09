@@ -1,11 +1,11 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Services;
+namespace Salesmessage\LibRabbitMQ\Services;
 
 use Illuminate\Redis\Connections\PredisConnection;
 use Illuminate\Support\Facades\Redis;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Dto\QueueApiDto;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Dto\VhostApiDto;
+use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
+use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 
 /**
  * https://github.com/phpredis/phpredis

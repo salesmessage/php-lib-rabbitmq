@@ -1,11 +1,11 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Services\Api;
+namespace Salesmessage\LibRabbitMQ\Services\Api;
 
 use GuzzleHttp\Client as HttpClient;
 use GuzzleHttp\Exception\ClientException;
 use GuzzleHttp\RequestOptions;
-use VladimirYuldashev\LaravelQueueRabbitMQ\Exceptions\RabbitApiClientException;
+use Salesmessage\LibRabbitMQ\Exceptions\RabbitApiClientException;
 
 class RabbitApiClient
 {

@@ -1,6 +1,6 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Exceptions;
+namespace Salesmessage\LibRabbitMQ\Exceptions;
 
 class RabbitApiClientException extends \Exception
 {

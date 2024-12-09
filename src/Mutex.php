@@ -1,8 +1,8 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ;
+namespace Salesmessage\LibRabbitMQ;
 
-use VladimirYuldashev\LaravelQueueRabbitMQ\Exceptions\MutexTimeout;
+use Salesmessage\LibRabbitMQ\Exceptions\MutexTimeout;
 
 final class Mutex
 {

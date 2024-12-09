@@ -1,6 +1,6 @@
 <?php
 
-namespace VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Connection;
+namespace Salesmessage\LibRabbitMQ\Queue\Connection;
 
 use Exception;
 use Illuminate\Support\Arr;
