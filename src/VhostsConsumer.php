@@ -373,6 +373,7 @@ class VhostsConsumer extends Consumer
             }
             $this->connectionMutex->unlock(static::MAIN_HANDLER_LOCK);
         }
+        $this->updateLastProcessedAt();
 
         $this->batchMessages = [];
     }
