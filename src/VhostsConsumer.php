@@ -17,7 +17,7 @@ use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Interfaces\RabbitMQBatchable;
 use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
 use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJobBatchable;
-use Salesmessage\LibRabbitMQ\Queue\QueueManager as RabbitMQQueueManager;
+use Salesmessage\LibRabbitMQ\Queue\VhostsQueueManager as RabbitMQQueueManager;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueueBatchable;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;

@@ -15,7 +15,7 @@ use Salesmessage\LibRabbitMQ\Console\ConsumeCommand;
 use Salesmessage\LibRabbitMQ\Console\ConsumeVhostsCommand;
 use Salesmessage\LibRabbitMQ\Console\ScanVhostsCommand;
 use Salesmessage\LibRabbitMQ\Queue\Connectors\RabbitMQConnector;
-use Salesmessage\LibRabbitMQ\Queue\QueueManager as RabbitMQQueueManager;
+use Salesmessage\LibRabbitMQ\Queue\VhostsQueueManager as RabbitMQVhostsQueueManager;
 use Salesmessage\LibRabbitMQ\Services\Api\RabbitApiClient;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 
@@ -52,8 +52,8 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
                 );
             });
 
-            $this->app->singleton('rabbitmq_queue', function ($app) {
-                return tap(new RabbitMQQueueManager($app), function (RabbitMQQueueManager $manager) {
+            $this->app->singleton('rabbitmq_vhosts_manager', function ($app) {
+                return tap(new RabbitMQVhostsQueueManager($app), function (RabbitMQVhostsQueueManager $manager) {
                     $manager->addConnector('null', function () {
                         return new NullConnector;
                     });
@@ -85,7 +85,7 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
 
                 return new VhostsConsumer(
                     $this->app[InternalStorageManager::class],
-                    $this->app['rabbitmq_queue'],
+                    $this->app['rabbitmq_vhosts_manager'],
                     $this->app['events'],
                     $this->app[ExceptionHandler::class],
                     $isDownForMaintenance,

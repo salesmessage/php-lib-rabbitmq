@@ -5,7 +5,7 @@ namespace Salesmessage\LibRabbitMQ\Queue;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Queue\QueueManager as BaseQueueManager;
 
-class QueueManager extends BaseQueueManager
+class VhostsQueueManager extends BaseQueueManager
 {
     public function __construct(Application $app)
     {
