@@ -6,6 +6,7 @@ use Illuminate\Contracts\Cache\Repository as Cache;
 use Illuminate\Queue\Console\WorkCommand;
 use Illuminate\Queue\Worker;
 use Illuminate\Support\Str;
+use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
 use Symfony\Component\Console\Terminal;
 use Salesmessage\LibRabbitMQ\VhostsConsumer;
 
@@ -14,7 +15,8 @@ class ConsumeVhostsCommand extends WorkCommand
     protected $signature = 'lib-rabbitmq:consume-vhosts
                             {connection? : The name of the queue connection to work}
                             {--name=default : The name of the consumer}
-                            {--queue= : The name of the queue to work. Please notice that there is no support for multiple queues}
+                            {--vhosts= : The list of the vhosts to work}
+                            {--queues= : The list of the queues to work}
                             {--once : Only process the next job on the queue}
                             {--stop-when-empty : Stop when the queue is empty}
                             {--delay=0 : The number of seconds to delay failed jobs (Deprecated)}
@@ -50,6 +52,12 @@ class ConsumeVhostsCommand extends WorkCommand
         $consumer->setPrefetchSize((int) $this->option('prefetch-size'));
         $consumer->setPrefetchCount((int) $this->option('prefetch-count'));
 
+        $filtersDto = new ConsumeVhostsFiltersDto(
+            trim($this->option('vhosts', '')),
+            trim($this->option('queues', ''))
+        );
+        $consumer->setFiltersDto($filtersDto);
+
         if ($this->downForMaintenance() && $this->option('once')) {
             $consumer->sleep($this->option('sleep'));
             return;
@@ -63,20 +71,17 @@ class ConsumeVhostsCommand extends WorkCommand
         $connection = $this->argument('connection')
             ?: $this->laravel['config']['queue.default'];
 
-        // We need to get the right queue for the connection which is set in the queue
-        // configuration file for the application. We will pull it based on the set
-        // connection being run for the queue operation currently being executed.
-        $queue = $this->getQueue($connection);
-
         if (Terminal::hasSttyAvailable()) {
-            $this->components->info(
-                sprintf('Processing jobs from the [%s] %s.', $queue, str('queue')->plural(explode(',', $queue)))
-            );
+            $this->components->info(sprintf(
+                'Processing vhosts: [%s]. Queues: [%s].',
+                ($filtersDto->hasVhosts() ? implode(', ', $filtersDto->getVhosts()) : 'all'),
+                ($filtersDto->hasQueues() ? implode(', ', $filtersDto->getQueues()) : 'all')
+            ));
         }
 
         $this->runWorker(
             $connection,
-            $queue
+            ''
         );
     }
 

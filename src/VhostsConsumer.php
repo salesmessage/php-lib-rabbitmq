@@ -11,6 +11,7 @@ use Illuminate\Contracts\Queue\Factory as QueueManager;
 use Illuminate\Queue\WorkerOptions;
 use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Message\AMQPMessage;
+use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
 use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Interfaces\RabbitMQBatchable;
@@ -29,6 +30,8 @@ class VhostsConsumer extends Consumer
     protected const CONSUME_BATCH_SIZE = 5;
 
     private ?OutputStyle $output = null;
+
+    private ?ConsumeVhostsFiltersDto $filtersDto = null;
 
     private string $configConnectionName = '';
 
@@ -70,11 +73,22 @@ class VhostsConsumer extends Consumer
 
     /**
      * @param OutputStyle $output
-     * @return void
+     * @return $this
      */
-    public function setOutput(OutputStyle $output)
+    public function setOutput(OutputStyle $output): self
     {
         $this->output = $output;
+        return $this;
+    }
+
+    /**
+     * @param ConsumeVhostsFiltersDto $filtersDto
+     * @return $this
+     */
+    public function setFiltersDto(ConsumeVhostsFiltersDto $filtersDto): self
+    {
+        $this->filtersDto = $filtersDto;
+        return $this;
     }
 
     public function daemon($connectionName, $queue, WorkerOptions $options)
@@ -82,7 +96,7 @@ class VhostsConsumer extends Consumer
         $this->loadVhosts();
         if (false === $this->switchToNextVhost()) {
             // @todo load vhosts again
-            $this->output->warning('No active vhosts....');
+            $this->output->warning('No active vhosts... Exit');
 
             return;
         }
@@ -99,7 +113,7 @@ class VhostsConsumer extends Consumer
         [$startTime, $jobsProcessed] = [hrtime(true) / 1e9, 0];
 
         /** @var RabbitMQQueue $connection */
-        $connection = $this->manager->rabbitConnectionByVhost('/', $this->configConnectionName);
+        $connection = $this->manager->rabbitConnectionByVhost($this->currentVhostName, $this->configConnectionName);
         $this->currentConnectionName = $connection->getConnectionName();
 
         $this->channel = $connection->getChannel();
@@ -153,7 +167,7 @@ class VhostsConsumer extends Consumer
                 $this->processBatch($connection);
 
                 $this->stopConsuming();
-                $this->goAhead();
+                $this->goAheadOrWait();
                 $this->startConsuming();
 
                 $this->sleep($this->workerOptions->sleep);
@@ -249,7 +263,7 @@ class VhostsConsumer extends Consumer
                 $this->processBatch($connection);
 
                 $this->stopConsuming();
-                $this->goAhead();
+                $this->goAheadOrWait();
                 $this->startConsuming();
             }
 
@@ -431,7 +445,15 @@ class VhostsConsumer extends Consumer
      */
     private function loadVhosts(): void
     {
-        $this->vhosts = $this->internalStorageManager->getVhosts();
+        $vhosts = $this->internalStorageManager->getVhosts();
+
+        // filter vhosts
+        $filterVhosts = $this->filtersDto->getVhosts();
+        if (!empty($filterVhosts)) {
+            $vhosts = array_filter($vhosts, fn($value) => in_array($value, $filterVhosts, true));
+        }
+        $this->vhosts = $vhosts;
+        $this->vhostQueues = [];
 
         $this->currentVhostName = null;
         $this->currentQueueName = null;
@@ -444,6 +466,8 @@ class VhostsConsumer extends Consumer
     {
         $nextVhost = $this->getNextVhost();
         if (null === $nextVhost) {
+            $this->currentVhostName = null;
+            $this->currentQueueName = null;
             return false;
         }
 
@@ -452,6 +476,7 @@ class VhostsConsumer extends Consumer
 
         $nextQueue = $this->getNextQueue();
         if (null === $nextQueue) {
+            $this->currentQueueName = null;
             return $this->switchToNextVhost();
         }
 
@@ -465,7 +490,7 @@ class VhostsConsumer extends Consumer
     private function getNextVhost(): ?string
     {
         if (null === $this->currentVhostName) {
-            return (string) reset($this->vhosts);
+            return !empty($this->vhosts) ? (string) reset($this->vhosts) : null;
         }
 
         $currentIndex = array_search($this->currentVhostName, $this->vhosts, true);
@@ -481,9 +506,17 @@ class VhostsConsumer extends Consumer
      */
     private function loadVhostQueues(): void
     {
-        $this->vhostQueues = (null !== $this->currentVhostName)
+        $vhostQueues = (null !== $this->currentVhostName)
             ? $this->internalStorageManager->getVhostQueues($this->currentVhostName)
             : [];
+
+        // filter queues
+        $filterQueues = $this->filtersDto->getQueues();
+        if (!empty($vhostQueues) && !empty($filterQueues)) {
+            $vhostQueues = array_filter($vhostQueues, fn($value) => in_array($value, $filterQueues, true));
+        }
+
+        $this->vhostQueues = $vhostQueues;
 
         $this->currentQueueName = null;
     }
@@ -495,6 +528,7 @@ class VhostsConsumer extends Consumer
     {
         $nextQueue = $this->getNextQueue();
         if (null === $nextQueue) {
+            $this->currentQueueName = null;
             return false;
         }
 
@@ -508,7 +542,7 @@ class VhostsConsumer extends Consumer
     private function getNextQueue(): ?string
     {
         if (null === $this->currentQueueName) {
-            return (string) reset($this->vhostQueues);
+            return !empty($this->vhostQueues) ? (string) reset($this->vhostQueues) : null;
         }
 
         $currentIndex = array_search($this->currentQueueName, $this->vhostQueues, true);
@@ -517,6 +551,28 @@ class VhostsConsumer extends Consumer
         }
 
         return null;
+    }
+
+    /**
+     * @param int $waitSeconds
+     * @return bool
+     */
+    private function goAheadOrWait(int $waitSeconds = 3): bool
+    {
+        if (false === $this->goAhead()) {
+            $this->loadVhosts();
+            if (empty($this->vhosts)) {
+                $this->output->warning(sprintf('No active vhosts. Wait %d seconds...', $waitSeconds));
+                $this->sleep($waitSeconds);
+
+                return $this->goAheadOrWait($waitSeconds);
+            }
+
+            $this->output->info('Starting from the first vhost...');
+            return $this->goAheadOrWait($waitSeconds);
+        }
+
+        return true;
     }
 
     /**
@@ -532,8 +588,7 @@ class VhostsConsumer extends Consumer
             return true;
         }
 
-        $this->loadVhosts();
-        return $this->switchToNextVhost();
+        return false;
     }
 
     /**
