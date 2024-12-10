@@ -7,6 +7,8 @@ use Illuminate\Queue\QueueManager as BaseQueueManager;
 
 class VhostsQueueManager extends BaseQueueManager
 {
+    public const VHOST_CONNECTION_PREFIX = ':vhost:';
+
     public function __construct(Application $app)
     {
         parent::__construct($app);
@@ -28,7 +30,7 @@ class VhostsQueueManager extends BaseQueueManager
 
         $config['hosts'][0]['vhost'] = $vhost;
 
-        $connectionName = $configName . '_' . ('/' === $vhost ? 'default' : $vhost);
+        $connectionName = $configName . self::VHOST_CONNECTION_PREFIX . $vhost;
 
         if (!isset($this->connections[$connectionName])) {
             $this->connections[$connectionName] = $this->getConnector($config['driver'])
