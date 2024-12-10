@@ -562,7 +562,7 @@ class VhostsConsumer extends Consumer
      * @param int $waitSeconds
      * @return bool
      */
-    private function goAheadOrWait(int $waitSeconds = 3): bool
+    private function goAheadOrWait(int $waitSeconds = 1): bool
     {
         if (false === $this->goAhead()) {
             $this->loadVhosts();
