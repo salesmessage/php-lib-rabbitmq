@@ -27,11 +27,11 @@ class VhostsConsumer extends Consumer
 {
     protected const MAIN_HANDLER_LOCK = 'vhost_handler';
 
-    protected const CONSUME_BATCH_SIZE = 5;
-
     private ?OutputStyle $output = null;
 
     private ?ConsumeVhostsFiltersDto $filtersDto = null;
+
+    private int $batchSize = 100;
 
     private string $configConnectionName = '';
 
@@ -91,15 +91,19 @@ class VhostsConsumer extends Consumer
         return $this;
     }
 
+    /**
+     * @param int $batchSize
+     * @return $this
+     */
+    public function setBatchSize(int $batchSize): self
+    {
+        $this->batchSize = $batchSize;
+        return $this;
+    }
+
     public function daemon($connectionName, $queue, WorkerOptions $options)
     {
-        $this->loadVhosts();
-        if (false === $this->switchToNextVhost()) {
-            // @todo load vhosts again
-            $this->output->warning('No active vhosts... Exit');
-
-            return;
-        }
+        $this->goAheadOrWait();
 
         $this->configConnectionName = (string) $connectionName;
         $this->workerOptions = $options;
@@ -259,7 +263,7 @@ class VhostsConsumer extends Consumer
                 $jobsProcessed
             ));
 
-            if ($jobsProcessed >= self::CONSUME_BATCH_SIZE) {
+            if ($jobsProcessed >= $this->batchSize) {
                 $this->processBatch($connection);
 
                 $this->stopConsuming();

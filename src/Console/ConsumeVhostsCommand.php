@@ -17,6 +17,7 @@ class ConsumeVhostsCommand extends WorkCommand
                             {--name=default : The name of the consumer}
                             {--vhosts= : The list of the vhosts to work}
                             {--queues= : The list of the queues to work}
+                            {--batch-size=100 : The number of jobs for batch}
                             {--once : Only process the next job on the queue}
                             {--stop-when-empty : Stop when the queue is empty}
                             {--delay=0 : The number of seconds to delay failed jobs (Deprecated)}
@@ -51,6 +52,7 @@ class ConsumeVhostsCommand extends WorkCommand
         $consumer->setMaxPriority((int) $this->option('max-priority'));
         $consumer->setPrefetchSize((int) $this->option('prefetch-size'));
         $consumer->setPrefetchCount((int) $this->option('prefetch-count'));
+        $consumer->setBatchSize((int) $this->option('batch-size'));
 
         $filtersDto = new ConsumeVhostsFiltersDto(
             trim($this->option('vhosts', '')),
