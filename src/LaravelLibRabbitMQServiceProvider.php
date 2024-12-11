@@ -72,7 +72,7 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
                     $manager->addConnector('sqs', function () {
                         return new SqsConnector;
                     });
-                    $manager->addConnector('rabbitmq', function () {
+                    $manager->addConnector('rabbitmq_vhosts', function () {
                         return new RabbitMQConnector($this->app['events']);
                     });
                 });
@@ -130,10 +130,10 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
-        /** @var QueueManager $queue */
-        $queue = $this->app['queue'];
+        /** @var RabbitMQVhostsQueueManager $queue */
+        $queue = $this->app['rabbitmq_vhosts_manager'];
 
-        $queue->addConnector('rabbitmq', function () {
+        $queue->addConnector('rabbitmq_vhosts', function () {
             return new RabbitMQConnector($this->app['events']);
         });
     }
