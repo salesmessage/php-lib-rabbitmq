@@ -2,13 +2,14 @@
 
 namespace Salesmessage\LibRabbitMQ\Services;
 
+use Illuminate\Support\Collection;
 use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Services\Api\RabbitApiClient;
 use Throwable;
 
 class VhostsService
 {
-    private const VHOST_PREFIX = 'organization_';
+    public const VHOST_PREFIX = 'organization_';
 
     /**
      * @param RabbitApiClient $rabbitApiClient
@@ -25,23 +26,31 @@ class VhostsService
     }
 
     /**
-     * @param array $vhosts
      * @param int $page
      * @param int $pageSize
-     * @return array
+     * @param Collection|null $vhosts
+     * @return Collection
      */
-    public function getAllVhosts(array $vhosts = [], int $page = 1, int $pageSize = 500): array
+    public function getAllVhosts(
+        int $page = 1, 
+        int $pageSize = 500,
+        ?Collection $vhosts = null,
+    ): Collection
     {
+        if (null === $vhosts) {
+            $vhosts = new Collection();
+        }
+        
         try {
             $data = $this->rabbitApiClient->request(
                 'GET',
                 '/api/vhosts', [
                 'page' => $page,
                 'page_size' => $pageSize,
-                'columns' => 'name',
+                'columns' => 'name,messages,messages_ready,messages_unacknowledged',
             ]);
         } catch (Throwable $exception) {
-            $this->logger->warning('App.Organizations.Services.Rabbitmq.getAllVhosts.exception', [
+            $this->logger->warning('Salesmessage.LibRabbitMQ.Services.VhostsService.getAllVhosts.exception', [
                 'message' => $exception->getMessage(),
                 'code' => $exception->getCode(),
                 'trace' => $exception->getTraceAsString(),
@@ -50,19 +59,15 @@ class VhostsService
             $data = [];
         }
 
-        $vhostsChunk = (array) ($data['items'] ?? []);
-        if (!empty($vhostsChunk)) {
-            foreach ($vhostsChunk as $vhost) {
-                if (isset($vhost['name']) && str_starts_with($vhost['name'], self::VHOST_PREFIX)) {
-                    $vhosts[] = $vhost['name'];
-                }
-            }
+        $items = (array) ($data['items'] ?? []);
+        if (!empty($items)) {
+            $vhosts->push(...$items);
         }
 
         $nextPage = $page + 1;
         $lastPage = (int) ($data['page_count'] ?? 1);
         if ($lastPage >= $nextPage) {
-            return $this->getAllVhosts($vhosts, $nextPage, $pageSize);
+            return $this->getAllVhosts($nextPage, $pageSize, $vhosts);
         }
 
         return $vhosts;
@@ -96,7 +101,7 @@ class VhostsService
                 ]
             );
         } catch (Throwable $exception) {
-            $this->logger->warning('App.Organizations.Services.Rabbitmq.getVhost.exception', [
+            $this->logger->warning('Salesmessage.LibRabbitMQ.Services.VhostsService.getVhost.exception', [
                 'vhost_name' => $vhostName,
                 'message' => $exception->getMessage(),
                 'code' => $exception->getCode(),
@@ -142,7 +147,7 @@ class VhostsService
             );
             $isCreated = true;
         } catch (Throwable $exception) {
-            $this->logger->warning('App.Organizations.Services.Rabbitmq.createVhost.exception', [
+            $this->logger->warning('Salesmessage.LibRabbitMQ.Services.VhostsService.createVhost.exception', [
                 'vhost_name' => $vhostName,
                 'message' => $exception->getMessage(),
                 'code' => $exception->getCode(),

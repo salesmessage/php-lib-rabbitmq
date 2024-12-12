@@ -8,14 +8,14 @@ use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Redis;
 use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
-use Salesmessage\LibRabbitMQ\Services\Api\RabbitApiClient;
+use Salesmessage\LibRabbitMQ\Services\QueueService;
+use Salesmessage\LibRabbitMQ\Services\VhostsService;
 use Throwable;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 
 class ScanVhostsCommand extends Command
 {
-    protected $signature = 'lib-rabbitmq:scan-vhosts
-                            {connection? : The name of the queue connection to work}';
+    protected $signature = 'lib-rabbitmq:scan-vhosts';
 
     protected $description = 'Scan and index vhosts';
 
@@ -24,11 +24,13 @@ class ScanVhostsCommand extends Command
     private Collection $vhostQueues;
 
     /**
-     * @param RabbitApiClient $apiClient
+     * @param VhostsService $vhostsService
+     * @param QueueService $queueService
      * @param InternalStorageManager $internalStorageManager
      */
     public function __construct(
-        private RabbitApiClient $apiClient,
+        private VhostsService $vhostsService,
+        private QueueService $queueService,
         private InternalStorageManager $internalStorageManager
     ) {
         $this->vhosts = new Collection();
@@ -42,17 +44,7 @@ class ScanVhostsCommand extends Command
      */
     public function handle()
     {
-        $connectionName = (string) ($this->argument('connection') ?: $this->laravel['config']['queue.default']);
-
-        $connectionConfig = $this->laravel['config']['queue']['connections'][$connectionName] ?? [];
-        if (empty($connectionConfig)) {
-            $this->error(sprintf('Config for connection "%s" not found.', $connectionName));
-            return Command::INVALID;
-        }
-
-        $this->apiClient->setConnectionConfig($connectionConfig);
-
-        $this->loadVhosts();
+        $this->vhosts = $this->vhostsService->getAllVhosts();
 
         $oldVhosts = $this->internalStorageManager->getVhosts();
 
@@ -69,46 +61,12 @@ class ScanVhostsCommand extends Command
                 }
             }
         } else {
-            $this->warn(sprintf('Vhosts for connection "%s" not found.', $connectionName));
+            $this->warn('Vhosts not found.');
         }
 
         $this->removeOldsVhosts($oldVhosts);
 
         return Command::SUCCESS;
-    }
-
-    /**
-     * @param int $page
-     * @param int $pageSize
-     * @return void
-     */
-    private function loadVhosts(int $page = 1, int $pageSize = 100): void
-    {
-        try {
-            $data = $this->apiClient->request(
-                'GET',
-                '/api/vhosts', [
-                'page' => $page,
-                'page_size' => $pageSize,
-                'columns' => 'name,messages,messages_ready,messages_unacknowledged',
-            ]);
-        } catch (Throwable $exception) {
-            $data = [];
-
-            $this->error(sprintf('Load vhosts error: %s.', (string) $exception->getMessage()));
-        }
-
-        $items = (array) ($data['items'] ?? []);
-        if (!empty($items)) {
-            $this->vhosts->push(...$items);
-        }
-
-        $nextPage = $page + 1;
-        $lastPage = (int) ($data['page_count'] ?? 1);
-        if ($lastPage >= $nextPage) {
-            $this->loadVhosts($nextPage, $pageSize);
-            return;
-        }
     }
 
     /**
@@ -139,9 +97,7 @@ class ScanVhostsCommand extends Command
             $vhostDto->getMessagesReady()
         ));
 
-        $this->vhostQueues = new Collection();
-
-        $this->loadVhostQueues($vhostDto);
+        $this->vhostQueues = $this->queueService->getAllVhostQueues($vhostDto);
 
         $oldVhostQueues = $this->internalStorageManager->getVhostQueues($vhostDto->getName());
 
@@ -190,47 +146,6 @@ class ScanVhostsCommand extends Command
                 'Removed from index vhost: "%s".',
                 $vhostDto->getName()
             ));
-        }
-    }
-
-    /**
-     * @param VhostApiDto $vhostDto
-     * @param int $page
-     * @param int $pageSize
-     * @return void
-     */
-    private function loadVhostQueues(VhostApiDto $vhostDto, int $page = 1, int $pageSize = 2): void
-    {
-        try {
-            $data = $this->apiClient->request(
-                'GET',
-                '/api/queues/' . $vhostDto->getApiName(), [
-                'page' => $page,
-                'page_size' => $pageSize,
-                'columns' => 'name,vhost,messages,messages_ready,messages_unacknowledged',
-                'disable_stats' => 'true',
-                'enable_queue_totals' => 'true',
-            ]);
-        } catch (Throwable $exception) {
-            $data = [];
-
-            $this->error(sprintf(
-                'Load vhost "%s" queues error: %s.',
-                $vhostDto->getName(),
-                (string) $exception->getMessage()
-            ));
-        }
-
-        $items = (array) ($data['items'] ?? []);
-        if (!empty($items)) {
-            $this->vhostQueues->push(...$items);
-        }
-
-        $nextPage = $page + 1;
-        $lastPage = (int) ($data['page_count'] ?? 1);
-        if ($lastPage >= $nextPage) {
-            $this->loadVhostQueues($vhostDto, $nextPage, $pageSize);
-            return;
         }
     }
 

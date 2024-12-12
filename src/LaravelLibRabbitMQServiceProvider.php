@@ -16,8 +16,9 @@ use Salesmessage\LibRabbitMQ\Console\ConsumeVhostsCommand;
 use Salesmessage\LibRabbitMQ\Console\ScanVhostsCommand;
 use Salesmessage\LibRabbitMQ\Queue\Connectors\RabbitMQConnector;
 use Salesmessage\LibRabbitMQ\Queue\VhostsQueueManager as RabbitMQVhostsQueueManager;
-use Salesmessage\LibRabbitMQ\Services\Api\RabbitApiClient;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
+use Salesmessage\LibRabbitMQ\Services\QueueService;
+use Salesmessage\LibRabbitMQ\Services\VhostsService;
 
 class LaravelLibRabbitMQServiceProvider extends ServiceProvider
 {
@@ -102,7 +103,8 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
 
             $this->app->singleton(ScanVhostsCommand::class, static function ($app) {
                 return new ScanVhostsCommand(
-                    $app[RabbitApiClient::class],
+                    $app[VhostsService::class],
+                    $app[QueueService::class],
                     $app[InternalStorageManager::class]
                 );
             });
