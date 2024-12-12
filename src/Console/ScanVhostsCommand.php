@@ -82,7 +82,7 @@ class ScanVhostsCommand extends Command
      * @param int $pageSize
      * @return void
      */
-    private function loadVhosts(int $page = 1, int $pageSize = 500): void
+    private function loadVhosts(int $page = 1, int $pageSize = 100): void
     {
         try {
             $data = $this->apiClient->request(
@@ -199,7 +199,7 @@ class ScanVhostsCommand extends Command
      * @param int $pageSize
      * @return void
      */
-    private function loadVhostQueues(VhostApiDto $vhostDto, int $page = 1, int $pageSize = 500): void
+    private function loadVhostQueues(VhostApiDto $vhostDto, int $page = 1, int $pageSize = 2): void
     {
         try {
             $data = $this->apiClient->request(

@@ -7,6 +7,7 @@ use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue as BaseRabbitMQQueue;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
 use PhpAmqpLib\Exception\AMQPConnectionClosedException;
 use PhpAmqpLib\Channel\AMQPChannel;
+use Salesmessage\LibRabbitMQ\Services\VhostsService;
 
 class RabbitMQQueueBatchable extends BaseRabbitMQQueue
 {
@@ -43,12 +44,60 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
     public function push($job, $data = '', $queue = null)
     {
         $queue = $queue ?: $job->onQueue();
-        return parent::push($job, $data, $queue);
-    }
 
+        try {
+            $result = parent::push($job, $data, $queue);
+        } catch (AMQPConnectionClosedException $exception) {
+            if (530 !== $exception->getCode()) {
+                throw $exception;
+            }
+
+            // vhost not found
+            if (false === $this->createNotExistsVhost()) {
+                throw $exception;
+            }
+
+            $result = parent::push($job, $data, $queue);
+        }
+
+        return $result;
+    }
 
     public function pushRaw($payload, $queue = null, array $options = []): int|string|null
     {
         return parent::pushRaw($payload, $queue, $options);
     }
+
+    /**
+     * @return string|null
+     */
+    private function getVhostName(): ?string
+    {
+        $connectionName = $this->getConnectionName();
+        if (!str_contains($connectionName, VhostsQueueManager::VHOST_CONNECTION_PREFIX)) {
+            return null;
+        }
+
+        $connectionNameParts = explode(VhostsQueueManager::VHOST_CONNECTION_PREFIX, $connectionName);
+        return (string) end($connectionNameParts);
+    }
+
+    /**
+     * @return bool
+     * @throws \GuzzleHttp\Exception\GuzzleException
+     * @throws \Salesmessage\LibRabbitMQ\Exceptions\RabbitApiClientException
+     */
+    private function createNotExistsVhost(): bool
+    {
+        $vhostName = $this->getVhostName();
+        if (null === $vhostName) {
+            return false;
+        }
+
+        /** @var VhostsService $vhostsService */
+        $vhostsService = app(VhostsService::class);
+
+        return $vhostsService->createVhost($vhostName, 'Automatically created vhost');
+    }
+
 }
