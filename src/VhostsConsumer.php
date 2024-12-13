@@ -365,15 +365,14 @@ class VhostsConsumer extends Consumer
             }
 
             $this->connectionMutex->lock(static::MAIN_HANDLER_LOCK);
-            foreach ($batchJobMessages as $batchMessage) {
-                if ($isBatchSuccess) {
-                    $this->ackMessage($batchMessage);
-
-                    continue;
+            if ($isBatchSuccess) {
+                $lastBatchMessage = end($batchJobMessages);
+                $this->ackMessage($lastBatchMessage, true);
+            } else {
+                foreach ($batchJobMessages as $batchMessage) {
+                    $job = $this->getJobByMessage($batchMessage, $connection);
+                    $this->processSingleJob($job);
                 }
-
-                $job = $this->getJobByMessage($batchMessage, $connection);
-                $this->processSingleJob($job, $connection);
             }
             $this->connectionMutex->unlock(static::MAIN_HANDLER_LOCK);
         }
@@ -423,12 +422,13 @@ class VhostsConsumer extends Consumer
 
     /**
      * @param AMQPMessage $message
+     * @param bool $multiple
      * @return void
      */
-    private function ackMessage(AMQPMessage $message): void
+    private function ackMessage(AMQPMessage $message, bool $multiple = false): void
     {
         try {
-            $message->ack();
+            $message->ack($multiple);
         } catch (Throwable $exception) {
             $this->output->error('Ack message error: ' . $exception->getMessage());
         }

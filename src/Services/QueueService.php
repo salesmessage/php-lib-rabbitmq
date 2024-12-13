@@ -6,6 +6,7 @@ use Illuminate\Support\Collection;
 use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Services\Api\RabbitApiClient;
+use Throwable;
 
 class QueueService
 {
