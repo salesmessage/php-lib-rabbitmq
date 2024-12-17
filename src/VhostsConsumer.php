@@ -7,19 +7,17 @@ use GuzzleHttp\Exception\RequestException;
 use Illuminate\Console\OutputStyle;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Events\Dispatcher;
-use Illuminate\Contracts\Queue\Factory as QueueManager;
+use Illuminate\Queue\QueueManager;
 use Illuminate\Queue\WorkerOptions;
 use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Message\AMQPMessage;
+use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
 use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
 use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Interfaces\RabbitMQBatchable;
 use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
-use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJobBatchable;
-use Salesmessage\LibRabbitMQ\Queue\VhostsQueueManager as RabbitMQQueueManager;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
-use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueueBatchable;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Throwable;
 
@@ -117,7 +115,9 @@ class VhostsConsumer extends Consumer
         [$startTime, $jobsProcessed] = [hrtime(true) / 1e9, 0];
 
         /** @var RabbitMQQueue $connection */
-        $connection = $this->manager->rabbitConnectionByVhost($this->currentVhostName, $this->configConnectionName);
+        $connection = $this->manager->connection(
+            ConnectionNameDto::getVhostConnectionName($this->currentVhostName,  $this->configConnectionName)
+        );
         $this->currentConnectionName = $connection->getConnectionName();
 
         $this->channel = $connection->getChannel();
@@ -240,7 +240,9 @@ class VhostsConsumer extends Consumer
         $jobsProcessed = 0;
 
         /** @var RabbitMQQueue $connection */
-        $connection = $this->manager->rabbitConnectionByVhost($this->currentVhostName, $this->configConnectionName);
+        $connection = $this->manager->connection(
+            ConnectionNameDto::getVhostConnectionName($this->currentVhostName, $this->configConnectionName)
+        );
         $this->currentConnectionName = $connection->getConnectionName();
         $this->channel = $connection->getChannel();
 

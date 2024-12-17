@@ -3,6 +3,7 @@
 namespace Salesmessage\LibRabbitMQ\Queue;
 
 use PhpAmqpLib\Connection\AbstractConnection;
+use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue as BaseRabbitMQQueue;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
 use PhpAmqpLib\Exception\AMQPConnectionClosedException;
@@ -69,35 +70,21 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
     }
 
     /**
-     * @return string|null
-     */
-    private function getVhostName(): ?string
-    {
-        $connectionName = $this->getConnectionName();
-        if (!str_contains($connectionName, VhostsQueueManager::VHOST_CONNECTION_PREFIX)) {
-            return null;
-        }
-
-        $connectionNameParts = explode(VhostsQueueManager::VHOST_CONNECTION_PREFIX, $connectionName);
-        return (string) end($connectionNameParts);
-    }
-
-    /**
      * @return bool
      * @throws \GuzzleHttp\Exception\GuzzleException
      * @throws \Salesmessage\LibRabbitMQ\Exceptions\RabbitApiClientException
      */
     private function createNotExistsVhost(): bool
     {
-        $vhostName = $this->getVhostName();
-        if (null === $vhostName) {
+        $dto = new ConnectionNameDto($this->getConnectionName());
+        if (null === $dto->getVhostName()) {
             return false;
         }
 
         /** @var VhostsService $vhostsService */
         $vhostsService = app(VhostsService::class);
 
-        return $vhostsService->createVhost($vhostName, 'Automatically created vhost');
+        return $vhostsService->createVhost($dto->getVhostName(), 'Automatically created vhost');
     }
 
 }
