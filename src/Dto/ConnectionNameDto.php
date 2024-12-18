@@ -37,16 +37,13 @@ class ConnectionNameDto
     }
 
     /**
-     * @param int|string $vhostName
+     * @param string $vhostName
      * @param string $configName
      * @return string
      */
-    public static function getVhostConnectionName(
-        int|string $vhostName,
-        string $configName = 'rabbitmq_vhosts'
-    ): string
+    public static function getVhostConnectionName(string $vhostName, string $configName = 'rabbitmq_vhosts'): string
     {
-        return $configName . self::VHOST_CONNECTION_PREFIX . (string) $vhostName;
+        return $configName . self::VHOST_CONNECTION_PREFIX . $vhostName;
     }
 
     /**
