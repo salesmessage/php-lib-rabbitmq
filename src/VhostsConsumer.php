@@ -459,6 +459,13 @@ class VhostsConsumer extends Consumer
         if (!empty($filterVhosts)) {
             $vhosts = array_filter($vhosts, fn($value) => in_array($value, $filterVhosts, true));
         }
+
+        // filter vhosts mask
+        $filterVhostsMask = $this->filtersDto->getVhostsMask();
+        if ('' !== $filterVhostsMask) {
+            $vhosts = array_filter($vhosts, fn($value) => str_contains($value, $filterVhostsMask));
+        }
+
         $this->vhosts = $vhosts;
         $this->vhostQueues = [];
 
@@ -521,6 +528,12 @@ class VhostsConsumer extends Consumer
         $filterQueues = $this->filtersDto->getQueues();
         if (!empty($vhostQueues) && !empty($filterQueues)) {
             $vhostQueues = array_filter($vhostQueues, fn($value) => in_array($value, $filterQueues, true));
+        }
+
+        // filter queues mask
+        $filterQueuesMask = $this->filtersDto->getQueuesMask();
+        if ('' !== $filterQueuesMask) {
+            $vhostQueues = array_filter($vhostQueues, fn($value) => str_contains($value, $filterQueuesMask));
         }
 
         $this->vhostQueues = $vhostQueues;

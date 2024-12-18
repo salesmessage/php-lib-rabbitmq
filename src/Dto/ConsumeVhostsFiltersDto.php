@@ -10,18 +10,38 @@ class ConsumeVhostsFiltersDto
     private array $vhosts = [];
 
     /**
+     * @var string 
+     */
+    private string $vhostsMask = '';
+
+    /**
      * @var array
      */
     private array $queues = [];
 
     /**
-     * @param string $vhosts
-     * @param string $queues
+     * @var string
      */
-    public function __construct(string $vhosts, string $queues)
+    private string $queuesMask = '';
+
+    /**
+     * @param string $vhosts
+     * @param string $vhostsMask
+     * @param string $queues
+     * @param string $queuesMask
+     */
+    public function __construct(
+        string $vhosts,
+        string $vhostsMask,
+        string $queues,
+        string $queuesMask
+    )
     {
         $this->vhosts = $this->stringToArray($vhosts);
+        $this->vhostsMask = trim($vhostsMask);
+        
         $this->queues = $this->stringToArray($queues);
+        $this->queuesMask = trim($queuesMask);
     }
 
     /**
@@ -57,6 +77,14 @@ class ConsumeVhostsFiltersDto
     }
 
     /**
+     * @return string
+     */
+    public function getVhostsMask(): string
+    {
+        return $this->vhostsMask;
+    }
+
+    /**
      * @return array
      */
     public function getQueues(): array
@@ -70,6 +98,14 @@ class ConsumeVhostsFiltersDto
     public function hasQueues(): bool
     {
         return !empty($this->queues);
+    }
+
+    /**
+     * @return string
+     */
+    public function getQueuesMask(): string
+    {
+        return $this->queuesMask;
     }
 }
 
