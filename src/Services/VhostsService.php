@@ -157,7 +157,44 @@ class VhostsService
             $isCreated = false;
         }
 
+        if ($isCreated) {
+            $this->setVhostPermissions($vhostName);
+        }
+
         return $isCreated;
+    }
+
+    /**
+     * @param string $vhostName
+     * @param string $userName
+     * @return bool
+     */
+    public function setVhostPermissions(string $vhostName): bool
+    {
+        try {
+            $this->rabbitApiClient->request(
+                'PUT',
+                '/api/permissions/' . $vhostName . '/' . $this->rabbitApiClient->getUsername(),
+                [],
+                [
+                    'configure' => '.*',
+                    'write' => '.*',
+                    'read' => '.*',
+                ]
+            );
+            $isSuccess = true;
+        } catch (Throwable $exception) {
+            $this->logger->warning('Salesmessage.LibRabbitMQ.Services.VhostsService.setVhostPermissions.exception', [
+                'vhost_name' => $vhostName,
+                'message' => $exception->getMessage(),
+                'code' => $exception->getCode(),
+                'trace' => $exception->getTraceAsString(),
+            ]);
+
+            $isSuccess = false;
+        }
+
+        return $isSuccess;
     }
 
     /**

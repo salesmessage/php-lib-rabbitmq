@@ -96,7 +96,7 @@ class RabbitApiClient
     /**
      * @return string
      */
-    private function getUsername(): string
+    public function getUsername(): string
     {
         return (string) ($this->connectionConfig['hosts'][0]['user'] ?? '');
 
