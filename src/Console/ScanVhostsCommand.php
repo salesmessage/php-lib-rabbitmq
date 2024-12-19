@@ -15,7 +15,8 @@ use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 
 class ScanVhostsCommand extends Command
 {
-    protected $signature = 'lib-rabbitmq:scan-vhosts';
+    protected $signature = 'lib-rabbitmq:scan-vhosts
+                            {--sleep=10 : Number of seconds to sleep}';
 
     protected $description = 'Scan and index vhosts';
 
@@ -44,6 +45,8 @@ class ScanVhostsCommand extends Command
      */
     public function handle()
     {
+        $sleep = (int) $this->option('sleep');
+
         $this->vhosts = $this->vhostsService->getAllVhosts();
 
         $oldVhosts = $this->internalStorageManager->getVhosts();
@@ -65,6 +68,13 @@ class ScanVhostsCommand extends Command
         }
 
         $this->removeOldsVhosts($oldVhosts);
+
+        if ($sleep > 0) {
+            $this->line(sprintf('Sleep %d seconds...', $sleep));
+
+            sleep($sleep);
+            return $this->handle();
+        }
 
         return Command::SUCCESS;
     }
