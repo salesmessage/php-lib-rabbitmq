@@ -5,6 +5,11 @@ namespace Salesmessage\LibRabbitMQ\Dto;
 class ConsumeVhostsFiltersDto
 {
     /**
+     * @var string
+     */
+    private $group = '';
+
+    /**
      * @var array
      */
     private array $vhosts = [];
@@ -25,39 +30,35 @@ class ConsumeVhostsFiltersDto
     private string $queuesMask = '';
 
     /**
-     * @param string $vhosts
+     * @param string $group
+     * @param array $vhosts
      * @param string $vhostsMask
-     * @param string $queues
+     * @param array $queues
      * @param string $queuesMask
      */
     public function __construct(
-        string $vhosts,
+        string $group,
+        array $vhosts,
         string $vhostsMask,
-        string $queues,
+        array $queues,
         string $queuesMask
     )
     {
-        $this->vhosts = $this->stringToArray($vhosts);
+        $this->group = trim($group);
+
+        $this->vhosts = array_filter($vhosts);
         $this->vhostsMask = trim($vhostsMask);
         
-        $this->queues = $this->stringToArray($queues);
+        $this->queues = array_filter($queues);
         $this->queuesMask = trim($queuesMask);
     }
 
     /**
-     * @param string $string
-     * @return array
+     * @return string
      */
-    private function stringToArray(string $string): array
+    public function getGroup(): string
     {
-        if ('' === $string) {
-            return [];
-        }
-
-        $array = explode(',', $string);
-        $array = array_map(fn($value) => trim($value), $array);
-
-        return array_filter($array);
+        return $this->group;
     }
 
     /**

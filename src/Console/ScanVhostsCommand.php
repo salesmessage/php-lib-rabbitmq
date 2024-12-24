@@ -8,6 +8,7 @@ use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Redis;
 use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
+use Salesmessage\LibRabbitMQ\Services\GroupsService;
 use Salesmessage\LibRabbitMQ\Services\QueueService;
 use Salesmessage\LibRabbitMQ\Services\VhostsService;
 use Throwable;
@@ -19,25 +20,24 @@ class ScanVhostsCommand extends Command
                             {--sleep=10 : Number of seconds to sleep}';
 
     protected $description = 'Scan and index vhosts';
-
-    private Collection $vhosts;
-
-    private Collection $vhostQueues;
+    
+    private array $groups = ['test-group-1', 'test-group-2', 'test-group-3'];
 
     /**
+     * @param GroupsService $groupsService
      * @param VhostsService $vhostsService
      * @param QueueService $queueService
      * @param InternalStorageManager $internalStorageManager
      */
     public function __construct(
+        private GroupsService $groupsService,
         private VhostsService $vhostsService,
         private QueueService $queueService,
         private InternalStorageManager $internalStorageManager
     ) {
-        $this->vhosts = new Collection();
-        $this->vhostQueues = new Collection();
-
         parent::__construct();
+
+        $this->groups = $this->groupsService->getAllGroupsNames();
     }
 
     /**
@@ -46,13 +46,12 @@ class ScanVhostsCommand extends Command
     public function handle()
     {
         $sleep = (int) $this->option('sleep');
-
-        $this->vhosts = $this->vhostsService->getAllVhosts();
-
+        
+        $vhosts = $this->vhostsService->getAllVhosts();
         $oldVhosts = $this->internalStorageManager->getVhosts();
 
-        if ($this->vhosts->isNotEmpty()) {
-            foreach ($this->vhosts as $vhost) {
+        if ($vhosts->isNotEmpty()) {
+            foreach ($vhosts as $vhost) {
                 $vhostDto = $this->processVhost($vhost);
                 if (null === $vhostDto) {
                     continue;
@@ -90,7 +89,7 @@ class ScanVhostsCommand extends Command
             return null;
         }
 
-        $indexedSuccessfully = $this->internalStorageManager->indexVhost($vhostDto);
+        $indexedSuccessfully = $this->internalStorageManager->indexVhost($vhostDto, $this->groups);
         if (!$indexedSuccessfully) {
             $this->warn(sprintf(
                 'Skip indexation vhost: "%s". Messages ready: %d.',
@@ -107,12 +106,12 @@ class ScanVhostsCommand extends Command
             $vhostDto->getMessagesReady()
         ));
 
-        $this->vhostQueues = $this->queueService->getAllVhostQueues($vhostDto);
+        $vhostQueues = $this->queueService->getAllVhostQueues($vhostDto);
 
         $oldVhostQueues = $this->internalStorageManager->getVhostQueues($vhostDto->getName());
 
-        if ($this->vhostQueues->isNotEmpty()) {
-            foreach ($this->vhostQueues as $queueApiData) {
+        if ($vhostQueues->isNotEmpty()) {
+            foreach ($vhostQueues as $queueApiData) {
                 $processQueueDto = $this->processVhostQueue($queueApiData);
                 if (null === $processQueueDto) {
                     continue;
@@ -170,7 +169,7 @@ class ScanVhostsCommand extends Command
             return null;
         }
 
-        $indexedSuccessfully = $this->internalStorageManager->indexQueue($queueApiDto);
+        $indexedSuccessfully = $this->internalStorageManager->indexQueue($queueApiDto, $this->groups);
         if (!$indexedSuccessfully) {
             $this->warn(sprintf(
                 'Skip indexation queue: "%s". Vhost: %s. Messages ready: %d.',

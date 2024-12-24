@@ -9,19 +9,62 @@ RabbitMQ Queue driver for Laravel
 
 Only the latest version will get new features. Bug fixes will be provided using the following scheme:
 
-| Package Version | Laravel Version | Bug Fixes Until  |                                                                                             |
-|-----------------|-----------------|------------------|---------------------------------------------------------------------------------------------|
-| 13              | 9               | August 8th, 2023 | [Documentation](https://github.com/vyuldashev/laravel-queue-rabbitmq/blob/master/README.md) |
+| Package Version | Laravel Version | Bug Fixes Until   |                                                                                             |
+|-----------------|-----------------|-------------------|---------------------------------------------------------------------------------------------|
+| 1               | 05              | December 24th, 2024 | [Documentation](https://github.com/vyuldashev/laravel-queue-rabbitmq/blob/master/README.md) |
 
 ## Installation
 
 You can install this package via composer using this command:
 
 ```
-composer require salesmessage/php-lib-rabbitmq
+composer require salesmessage/php-lib-rabbitmq:^1.05 --ignore-platform-reqs
 ```
 
 The package will automatically register itself.
+
+### Groups configuration
+
+Add groups configuration to file `rabbit-groups.yml`:
+
+> This config file is required.
+
+```php
+groups:
+  test-group-1:
+    vhosts:
+      - organization_10
+      - organization_11
+      - organization_12
+    vhosts_mask: organization
+    queues:
+      - test-queue-1
+      - test-queue-11
+    queues_mask: test
+    batch_size: 100
+  test-group-2:
+    vhosts:
+      - organization_20
+      - organization_21
+      - organization_22
+    vhosts_mask: organization
+    queues:
+      - test-queue-2
+      - test-queue-22
+    queues_mask: test
+    batch_size: 100
+  test-group-3:
+    vhosts:
+      - organization_30
+      - organization_31
+      - organization_32
+    vhosts_mask: organization
+    queues:
+      - test-queue-3
+      - test-queue-33
+    queues_mask: test
+    batch_size: 100,
+```
 
 ### Configuration
 
@@ -33,9 +76,9 @@ Add connection to `config/queue.php`:
 'connections' => [
     // ...
 
-    'rabbitmq' => [
+    'rabbitmq_vhosts' => [
     
-       'driver' => 'rabbitmq',
+       'driver' => 'rabbitmq_vhosts',
        'hosts' => [
            [
                'host' => env('RABBITMQ_HOST', '127.0.0.1'),
@@ -67,7 +110,7 @@ When you want to prioritize messages when they were delayed, then this is possib
 'connections' => [
     // ...
 
-    'rabbitmq' => [
+    'rabbitmq_vhosts' => [
         // ...
 
         'options' => [
@@ -96,7 +139,7 @@ When you want to publish messages against an exchange with routing-keys, then th
 'connections' => [
     // ...
 
-    'rabbitmq' => [
+    'rabbitmq_vhosts' => [
         // ...
 
         'options' => [
@@ -130,7 +173,7 @@ by adding extra options.
 'connections' => [
     // ...
 
-    'rabbitmq' => [
+    'rabbitmq_vhosts' => [
         // ...
 
         'options' => [
@@ -162,7 +205,7 @@ This Library supports Horizon, but in the config you have to inform Laravel to u
 'connections' => [
     // ...
 
-    'rabbitmq' => [
+    'rabbitmq_vhosts' => [
         // ...
 
         /* Set to "horizon" if you wish to use Laravel Horizon. */
@@ -189,14 +232,14 @@ An example for the config:
 'connections' => [
     // ...
 
-    'rabbitmq' => [
+    'rabbitmq_vhosts' => [
         // ...
 
         'options' => [
             'queue' => [
                 // ...
 
-                'job' => \App\Queue\Jobs\RabbitMQJob::class,
+                'job' => \Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJobBatchable::class,
             ],
         ],
     ],
@@ -303,7 +346,7 @@ An example for the config:
 'connections' => [
     // ...
 
-    'rabbitmq' => [
+    'rabbitmq_vhosts' => [
         // ...
 
         'connection' = > \App\Queue\Connection\MyRabbitMQConnection::class,
@@ -325,11 +368,11 @@ and inform laravel to use your class by setting `RABBITMQ_WORKER` to `\App\Queue
 'connections' => [
     // ...
 
-    'rabbitmq' => [
+    'rabbitmq_vhosts' => [
         // ...
 
         /* Set to a class if you wish to use your own. */
-       'worker' => \App\Queue\RabbitMQQueue::class,
+       'worker' => \Salesmessage\LibRabbitMQ\Queue\RabbitMQQueueBatchable::class
     ],
 
     // ...    
@@ -409,7 +452,7 @@ It is possible to change te default queue by adding an extra parameter in the co
 'connections' => [
     // ...
 
-    'rabbitmq' => [
+    'rabbitmq_vhosts' => [
         // ...
             
         'queue' => env('RABBITMQ_QUEUE', 'default'),
@@ -429,7 +472,7 @@ You can alter the heartbeat settings by changing the config.
 'connections' => [
     // ...
 
-    'rabbitmq' => [
+    'rabbitmq_vhosts' => [
         // ...
 
         'options' => [
@@ -451,7 +494,7 @@ If you need a secure connection to rabbitMQ server(s), you will need to add thes
 'connections' => [
     // ...
 
-    'rabbitmq' => [
+    'rabbitmq_vhosts' => [
         // ...
 
         'secure' = > true,
@@ -480,7 +523,7 @@ To instruct Laravel workers to dispatch events after all database commits are co
 'connections' => [
     // ...
 
-    'rabbitmq' => [
+    'rabbitmq_vhosts' => [
         // ...
 
         'after_commit' => true,
@@ -499,7 +542,7 @@ If for some reason you don't want the connection lazy you can turn it off by set
 'connections' => [
     // ...
 
-    'rabbitmq' => [
+    'rabbitmq_vhosts' => [
         // ...
 
         'lazy' = > false,
@@ -519,7 +562,7 @@ Available protocols : `tcp`, `ssl`, `tls`
 'connections' => [
     // ...
 
-    'rabbitmq' => [
+    'rabbitmq_vhosts' => [
         // ...
 
         'network_protocol' => 'tcp',
@@ -549,13 +592,24 @@ For Lumen usage the service provider should be registered manually as follow in 
 $app->register(Salesmessage\LibRabbitMQ\LaravelLibRabbitMQServiceProvider::class);
 ```
 
+## Scan Vhosts 
+
+```bash
+php artisan lib-rabbitmq:scan-vhosts --sleep=10
+```
+
 ## Consuming Messages
 
 There are two ways of consuming messages.
 
 1. `queue:work` command which is Laravel's built-in command. This command utilizes `basic_get`. Use this if you want to consume multiple queues.
 
-2. `rabbitmq:consume` command which is provided by this package. This command utilizes `basic_consume` and is more performant than `basic_get` by ~2x, but does not support multiple queues.
+2. `lib-rabbitmq:consume-vhosts` command which is provided by this package. This command utilizes `basic_consume` and is more performant than `basic_get` by ~2x, but does not support multiple queues.
+
+Example:
+```bash
+php artisan lib-rabbitmq:consume-vhosts test-group-1 rabbitmq_vhosts --name=mq-vhosts-test-name --sleep=3 --memory=300 --max-jobs=5000 --max-time=600 --prefetch-count=100 --timeout=0
+```
 
 ## Testing
 

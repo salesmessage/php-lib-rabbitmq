@@ -452,7 +452,10 @@ class VhostsConsumer extends Consumer
      */
     private function loadVhosts(): void
     {
-        $vhosts = $this->internalStorageManager->getVhosts();
+        $group = $this->filtersDto->getGroup();
+        $lastProcessedAtKey = $this->internalStorageManager->getLastProcessedAtKeyName($group);
+
+        $vhosts = $this->internalStorageManager->getVhosts($lastProcessedAtKey, false);
 
         // filter vhosts
         $filterVhosts = $this->filtersDto->getVhosts();
@@ -520,8 +523,11 @@ class VhostsConsumer extends Consumer
      */
     private function loadVhostQueues(): void
     {
+        $group = $this->filtersDto->getGroup();
+        $lastProcessedAtKey = $this->internalStorageManager->getLastProcessedAtKeyName($group);
+
         $vhostQueues = (null !== $this->currentVhostName)
-            ? $this->internalStorageManager->getVhostQueues($this->currentVhostName)
+            ? $this->internalStorageManager->getVhostQueues($this->currentVhostName, $lastProcessedAtKey, false)
             : [];
 
         // filter queues
@@ -620,19 +626,24 @@ class VhostsConsumer extends Consumer
             return;
         }
 
+        $group = $this->filtersDto->getGroup();
         $timestamp = time();
 
         $queueDto = new QueueApiDto([
             'name' => $this->currentQueueName,
             'vhost' => $this->currentVhostName,
         ]);
-        $queueDto->setLastProcessedAt($timestamp);
+        $queueDto
+            ->setGroupName($group)
+            ->setLastProcessedAt($timestamp);
         $this->internalStorageManager->updateQueueLastProcessedAt($queueDto);
 
         $vhostDto = new VhostApiDto([
             'name' => $queueDto->getVhostName(),
         ]);
-        $vhostDto->setLastProcessedAt($timestamp);
+        $vhostDto
+            ->setGroupName($group)
+            ->setLastProcessedAt($timestamp);
         $this->internalStorageManager->updateVhostLastProcessedAt($vhostDto);
     }
 }

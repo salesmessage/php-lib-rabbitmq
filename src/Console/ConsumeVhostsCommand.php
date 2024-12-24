@@ -7,19 +7,17 @@ use Illuminate\Queue\Console\WorkCommand;
 use Illuminate\Queue\Worker;
 use Illuminate\Support\Str;
 use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
+use Salesmessage\LibRabbitMQ\Services\GroupsService;
 use Symfony\Component\Console\Terminal;
 use Salesmessage\LibRabbitMQ\VhostsConsumer;
+use Throwable;
 
 class ConsumeVhostsCommand extends WorkCommand
 {
     protected $signature = 'lib-rabbitmq:consume-vhosts
-                            {connection? : The name of the queue connection to work}
+                            {group : The name of the group}
+                            {connection=rabbitmq_vhosts : The name of the queue connection to work}
                             {--name=default : The name of the consumer}
-                            {--vhosts= : The list of the vhosts to work}
-                            {--vhosts-mask= : The vhosts mask}
-                            {--queues= : The list of the queues to work}
-                            {--queues-mask= : The queues mask}
-                            {--batch-size=100 : The number of jobs for batch}
                             {--once : Only process the next job on the queue}
                             {--stop-when-empty : Stop when the queue is empty}
                             {--delay=0 : The number of seconds to delay failed jobs (Deprecated)}
@@ -41,10 +39,42 @@ class ConsumeVhostsCommand extends WorkCommand
 
     protected $description = 'Consume messages';
 
+    /**
+     * @param GroupsService $groupsService
+     * @param Worker $worker
+     * @param Cache $cache
+     */
+    public function __construct(
+        private GroupsService $groupsService,
+        Worker $worker,
+        Cache $cache
+    )
+    {
+        parent::__construct($worker, $cache);
+    }
+
     public function handle(): void
     {
+        $group = trim($this->argument('group'));
+
+        $groupConfigData = $this->groupsService->getGroupConfig($group);
+        if (empty($groupConfigData)) {
+            $this->error(sprintf('Config for consumer group "%s" is not specified', $group));
+            return;
+        }
+
+        $filtersDto = new ConsumeVhostsFiltersDto(
+            $group,
+            (array) ($groupConfigData['vhosts'] ?? []),
+            trim($groupConfigData['vhosts_mask'] ?? ''),
+            (array) ($groupConfigData['queues'] ?? []),
+            trim($groupConfigData['queues_mask'] ?? '')
+        );
+
         /** @var VhostsConsumer $consumer */
         $consumer = $this->worker;
+
+        $consumer->setFiltersDto($filtersDto);
 
         $consumer->setOutput($this->getOutput());
 
@@ -54,15 +84,7 @@ class ConsumeVhostsCommand extends WorkCommand
         $consumer->setMaxPriority((int) $this->option('max-priority'));
         $consumer->setPrefetchSize((int) $this->option('prefetch-size'));
         $consumer->setPrefetchCount((int) $this->option('prefetch-count'));
-        $consumer->setBatchSize((int) $this->option('batch-size'));
-
-        $filtersDto = new ConsumeVhostsFiltersDto(
-            trim($this->option('vhosts', '')),
-            trim($this->option('vhosts-mask', '')),
-            trim($this->option('queues', '')),
-            trim($this->option('queues-mask', ''))
-        );
-        $consumer->setFiltersDto($filtersDto);
+        $consumer->setBatchSize((int) ($groupConfigData['batch_size'] ?? 100));
 
         if ($this->downForMaintenance() && $this->option('once')) {
             $consumer->sleep($this->option('sleep'));

@@ -13,6 +13,8 @@ class VhostApiDto
     private int $messagesUnacknowledged = 0;
 
     private int $lastProcessedAt = 0;
+    
+    private ?string $groupName = null;
 
     /**
      * @param array $data
@@ -85,21 +87,34 @@ class VhostApiDto
     }
 
     /**
+     * @return string|null
+     */
+    public function getGroupName(): ?string
+    {
+        return $this->groupName;
+    }
+
+    /**
+     * @param string|null $groupName
+     * @return $this
+     */
+    public function setGroupName(?string $groupName): self
+    {
+        $this->groupName = $groupName;
+        return $this;
+    }
+
+    /**
      * @return array
      */
-    public function toInternalData(bool $withLastProcessedAt = false): array
+    public function toInternalData(): array
     {
-        $data = [
+        return [
             'name' => $this->getName(),
             'messages' => $this->getMessages(),
             'messages_ready' => $this->getMessagesReady(),
             'messages_unacknowledged' => $this->getMessagesUnacknowledged(),
         ];
-        if ($withLastProcessedAt) {
-            $data['last_processed_at'] = $this->getLastProcessedAt();
-        }
-
-        return $data;
     }
 }
 

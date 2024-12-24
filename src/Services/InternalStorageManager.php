@@ -26,12 +26,15 @@ class InternalStorageManager
     }
 
     /**
+     * @param string $by
+     * @param bool $alpha
      * @return array
      */
-    public function getVhosts(): array
+    public function getVhosts(string $by = 'name', bool $alpha = true): array
     {
         $vhosts = $this->redis->sort(self::INDEX_KEY_VHOSTS, [
-            'by' => '*->last_processed_at',
+            'by' => '*->' . $by,
+            'alpha' => $alpha,
             'sort' => 'asc',
         ]);
 
@@ -44,14 +47,17 @@ class InternalStorageManager
 
     /**
      * @param string $vhostName
+     * @param string $by
+     * @param bool $alpha
      * @return array
      */
-    public function getVhostQueues(string $vhostName): array
+    public function getVhostQueues(string $vhostName, string $by = 'name', bool $alpha = true): array
     {
         $indexKey = $this->getQueueIndexKey($vhostName);
 
         $queues = $this->redis->sort($indexKey, [
-            'by' => '*->last_processed_at',
+            'by' => '*->' . $by,
+            'alpha' => $alpha,
             'sort' => 'asc',
         ]);
 
@@ -64,12 +70,13 @@ class InternalStorageManager
 
     /**
      * @param VhostApiDto $vhostDto
+     * @param array $groups
      * @return bool
      */
-    public function indexVhost(VhostApiDto $vhostDto): bool
+    public function indexVhost(VhostApiDto $vhostDto, array $groups = []): bool
     {
         if ($vhostDto->getMessagesReady() > 0) {
-            return $this->addVhost($vhostDto);
+            return $this->addVhost($vhostDto, $groups);
         }
 
         return $this->removeVhost($vhostDto);
@@ -77,9 +84,10 @@ class InternalStorageManager
 
     /**
      * @param VhostApiDto $vhostDto
+     * @param array $groups
      * @return bool
      */
-    private function addVhost(VhostApiDto $vhostDto): bool
+    private function addVhost(VhostApiDto $vhostDto, array $groups): bool
     {
         $storageKey = $this->getVhostStorageKey($vhostDto);
 
@@ -87,7 +95,9 @@ class InternalStorageManager
             $this->redis->sadd(self::INDEX_KEY_VHOSTS, $storageKey);
         }
 
-        $this->redis->hmset($storageKey, $vhostDto->toInternalData(!$this->redis->exists($storageKey)));
+        $this->redis->hmset($storageKey, $vhostDto->toInternalData());
+
+        $this->initLastProcessedAtKeys($storageKey, $groups);
 
         return true;
     }
@@ -122,7 +132,13 @@ class InternalStorageManager
             return false;
         }
 
-        $this->redis->hset($storageKey, 'last_processed_at', $vhostDto->getLastProcessedAt());
+        $groupName = $vhostDto->getGroupName();
+        if (null === $groupName) {
+            return false;
+        }
+
+        $lastProcessedAtKey = $this->getLastProcessedAtKeyName($groupName);
+        $this->redis->hset($storageKey, $lastProcessedAtKey, $vhostDto->getLastProcessedAt());
 
         return true;
     }
@@ -146,12 +162,13 @@ class InternalStorageManager
 
     /**
      * @param QueueApiDto $queueDto
+     * @param array $groups
      * @return bool
      */
-    public function indexQueue(QueueApiDto $queueDto): bool
+    public function indexQueue(QueueApiDto $queueDto, array $groups): bool
     {
         if ($queueDto->getMessagesReady() > 0) {
-            return $this->addQueue($queueDto);
+            return $this->addQueue($queueDto, $groups);
         }
 
         return $this->removeQueue($queueDto);
@@ -159,9 +176,10 @@ class InternalStorageManager
 
     /**
      * @param QueueApiDto $queueDto
+     * @param array $groups
      * @return bool
      */
-    private function addQueue(QueueApiDto $queueDto): bool
+    private function addQueue(QueueApiDto $queueDto, array $groups): bool
     {
         $storageKey = $this->getQueueStorageKey($queueDto);
         $indexKey = $this->getQueueIndexKey($queueDto->getVhostName());
@@ -170,7 +188,9 @@ class InternalStorageManager
             $this->redis->sadd($indexKey, $storageKey);
         }
 
-        $this->redis->hmset($storageKey, $queueDto->toInternalData(!$this->redis->exists($storageKey)));
+        $this->redis->hmset($storageKey, $queueDto->toInternalData());
+
+        $this->initLastProcessedAtKeys($storageKey, $groups);
 
         return true;
     }
@@ -206,7 +226,14 @@ class InternalStorageManager
             return false;
         }
 
-        $this->redis->hset($storageKey, 'last_processed_at', $queueDto->getLastProcessedAt());
+        $groupName = $queueDto->getGroupName();
+        if (null === $groupName) {
+            return false;
+        }
+
+        $lastProcessedAtKey = $this->getLastProcessedAtKeyName($groupName);
+
+        $this->redis->hset($storageKey, $lastProcessedAtKey, $queueDto->getLastProcessedAt());
 
         return true;
     }
@@ -236,6 +263,42 @@ class InternalStorageManager
     private function getQueueIndexKey(string $vhostName): string
     {
         return sprintf('%s:%s', self::INDEX_KEY_QUEUES, $vhostName);
+    }
+
+    /**
+     * @param string $storageKey
+     * @param array $groups
+     * @return bool
+     */
+    private function initLastProcessedAtKeys(string $storageKey, array $groups): bool
+    {
+        if (!$this->redis->exists($storageKey)) {
+            return false;
+        }
+
+        if (empty($groups)) {
+            return false;
+        }
+
+        foreach ($groups as $groupName) {
+            $lastProcessedAtKey = $this->getLastProcessedAtKeyName($groupName);
+            if ($this->redis->hexists($storageKey, $lastProcessedAtKey)) {
+                continue;
+            }
+
+            $this->redis->hset($storageKey, $lastProcessedAtKey, 0);
+        }
+
+        return true;
+    }
+
+    /**
+     * @param string $groupName
+     * @return string
+     */
+    public function getLastProcessedAtKeyName(string $groupName): string
+    {
+        return sprintf('last_processed_at:%s', $groupName);
     }
 }
 
