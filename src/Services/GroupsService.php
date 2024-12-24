@@ -3,6 +3,7 @@
 namespace Salesmessage\LibRabbitMQ\Services;
 
 use Symfony\Component\Yaml\Yaml;
+use Throwable;
 
 class GroupsService
 {
@@ -13,13 +14,7 @@ class GroupsService
 
     public function __construct()
     {
-        try {
-            $configData = (array) Yaml::parseFile(base_path() . '/rabbit-groups.yml');
-        } catch (Throwable $exception) {
-            $configData = [];
-        }
-
-        $this->configData = $configData;
+        $this->configData = $this->loadConfigData();
     }
 
     /**
@@ -41,6 +36,25 @@ class GroupsService
         }
 
         return array_filter(array_keys($this->configData['groups']));
+    }
+
+    /**
+     * @return array
+     */
+    private function loadConfigData(): array
+    {
+        $filePath = base_path() . '/rabbit-groups.yml';
+        if (!file_exists($filePath)) {
+            return [];
+        }
+
+        try {
+            $configData = (array) Yaml::parseFile($filePath);
+        } catch (Throwable $exception) {
+            $configData = [];
+        }
+
+        return $configData;
     }
 }
 
