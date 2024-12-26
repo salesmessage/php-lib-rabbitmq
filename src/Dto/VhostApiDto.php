@@ -53,11 +53,31 @@ class VhostApiDto
     }
 
     /**
+     * @param int $messages
+     * @return $this
+     */
+    public function setMessages(int $messages): self
+    {
+        $this->messages = $messages;
+        return $this;
+    }
+
+    /**
      * @return int
      */
     public function getMessagesReady(): int
     {
         return $this->messagesReady;
+    }
+
+    /**
+     * @param int $messagesReady
+     * @return $this
+     */
+    public function setMessagesReady(int $messagesReady): self
+    {
+        $this->messagesReady = $messagesReady;
+        return $this;
     }
 
     /**

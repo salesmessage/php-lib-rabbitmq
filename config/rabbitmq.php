@@ -10,6 +10,7 @@ return [
     'driver' => 'rabbitmq_vhosts',
     'queue' => env('RABBITMQ_QUEUE', 'default'),
     'connection' => 'default',
+    'immediate_indexation' => env('RABBITMQ_IMMEDIATE_INDEXATION', false),
 
     'hosts' => [
         [

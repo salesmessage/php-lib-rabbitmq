@@ -9,16 +9,16 @@ RabbitMQ Queue driver for Laravel
 
 Only the latest version will get new features. Bug fixes will be provided using the following scheme:
 
-| Package Version | Laravel Version | Bug Fixes Until   |                                                                                             |
-|-----------------|-----------------|-------------------|---------------------------------------------------------------------------------------------|
-| 1               | 06              | December 24th, 2024 | [Documentation](https://github.com/vyuldashev/laravel-queue-rabbitmq/blob/master/README.md) |
+| Package Version | Laravel Version | Bug Fixes Until     |                                                                                             |
+|-----------------|-----------------|---------------------|---------------------------------------------------------------------------------------------|
+| 1               | 07              | December 26th, 2024 | [Documentation](https://github.com/vyuldashev/laravel-queue-rabbitmq/blob/master/README.md) |
 
 ## Installation
 
 You can install this package via composer using this command:
 
 ```
-composer require salesmessage/php-lib-rabbitmq:^1.06 --ignore-platform-reqs
+composer require salesmessage/php-lib-rabbitmq:^1.07 --ignore-platform-reqs
 ```
 
 The package will automatically register itself.
@@ -462,6 +462,26 @@ It is possible to change te default queue by adding an extra parameter in the co
 ],
 ```
 
+### Immediate Indexation
+
+By default, your connection will be created with a immediate indexation setting of `false`.
+
+
+```php
+
+'connections' => [
+    // ...
+
+    'rabbitmq_vhosts' => [
+        // ...
+
+        'immediate_indexation' => env('RABBITMQ_IMMEDIATE_INDEXATION', false),
+    ],
+
+    // ...    
+],
+```
+
 ### Heartbeat
 
 By default, your connection will be created with a heartbeat setting of `0`.
@@ -574,7 +594,7 @@ Available protocols : `tcp`, `ssl`, `tls`
 
 ### Octane support
 
-Starting with 13.3.0, this package supports [Laravel Octane](https://laravel.com/docs/octane) out of the box.
+Starting with 1.04, this package supports [Laravel Octane](https://laravel.com/docs/octane) out of the box.
 Firstly, install Octane and don't forget to warm 'rabbitmq' connection in the octane config.
 > See: https://github.com/vyuldashev/laravel-queue-rabbitmq/issues/460#issuecomment-1469851667
 

@@ -123,6 +123,24 @@ class InternalStorageManager
 
     /**
      * @param VhostApiDto $vhostDto
+     * @param array $groups
+     * @return bool
+     */
+    public function activateVhost(VhostApiDto $vhostDto, array $groups): bool
+    {
+        $storageKey = $this->getVhostStorageKey($vhostDto);
+
+        $messages = (int) $this->redis->hget($storageKey, 'messages') + 1;
+        $vhostDto->setMessages($messages);
+
+        $messagesReady = (int) $this->redis->hget($storageKey, 'messages_ready') + 1;
+        $vhostDto->setMessagesReady($messagesReady);
+
+        return $this->addVhost($vhostDto, $groups);
+    }
+
+    /**
+     * @param VhostApiDto $vhostDto
      * @return bool
      */
     public function updateVhostLastProcessedAt(VhostApiDto $vhostDto): bool
@@ -213,6 +231,24 @@ class InternalStorageManager
         }
 
         return true;
+    }
+
+    /**
+     * @param QueueApiDto $queueDto
+     * @param array $groups
+     * @return bool
+     */
+    public function activateQueue(QueueApiDto $queueDto, array $groups): bool
+    {
+        $storageKey = $this->getQueueStorageKey($queueDto);
+
+        $messages = (int) $this->redis->hget($storageKey, 'messages') + 1;
+        $queueDto->setMessages($messages);
+
+        $messagesReady = (int) $this->redis->hget($storageKey, 'messages_ready') + 1;
+        $queueDto->setMessagesReady($messagesReady);
+
+        return $this->addQueue($queueDto, $groups);
     }
 
     /**
