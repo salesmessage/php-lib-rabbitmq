@@ -9,6 +9,10 @@ use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Queue\QueueManager;
 use Illuminate\Queue\WorkerOptions;
+use PhpAmqpLib\Channel\AMQPChannel;
+use PhpAmqpLib\Exception\AMQPChannelClosedException;
+use PhpAmqpLib\Exception\AMQPConnectionClosedException;
+use PhpAmqpLib\Exception\AMQPProtocolChannelException;
 use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Message\AMQPMessage;
 use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
@@ -114,13 +118,8 @@ class VhostsConsumer extends Consumer
 
         [$startTime, $jobsProcessed] = [hrtime(true) / 1e9, 0];
 
-        /** @var RabbitMQQueue $connection */
-        $connection = $this->manager->connection(
-            ConnectionNameDto::getVhostConnectionName($this->currentVhostName,  $this->configConnectionName)
-        );
-        $this->currentConnectionName = $connection->getConnectionName();
+        $connection = $this->initConnection();
 
-        $this->channel = $connection->getChannel();
         $this->connectionMutex = new Mutex(false);
 
         $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
@@ -239,12 +238,7 @@ class VhostsConsumer extends Consumer
 
         $jobsProcessed = 0;
 
-        /** @var RabbitMQQueue $connection */
-        $connection = $this->manager->connection(
-            ConnectionNameDto::getVhostConnectionName($this->currentVhostName, $this->configConnectionName)
-        );
-        $this->currentConnectionName = $connection->getConnectionName();
-        $this->channel = $connection->getChannel();
+        $connection = $this->initConnection();
 
         $callback = function (AMQPMessage $message) use ($connection, &$jobsProcessed): void {
             $this->hasJob = true;
@@ -278,21 +272,41 @@ class VhostsConsumer extends Consumer
             }
         };
 
+        $isSuccess = true;
+
         $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
-        $this->channel->basic_consume(
-            $this->currentQueueName,
-            $this->consumerTag,
-            false,
-            false,
-            false,
-            false,
-            $callback,
-            null,
-            $arguments
-        );
+        try {
+            $this->channel->basic_consume(
+                $this->currentQueueName,
+                $this->consumerTag,
+                false,
+                false,
+                false,
+                false,
+                $callback,
+                null,
+                $arguments
+            );
+        } catch (AMQPProtocolChannelException|AMQPChannelClosedException $exception) {
+            $isSuccess = false;
+
+            $this->output->error(sprintf(
+                'Start consuming. Vhost: "%s". Queue: "%s". Error: "%s". Code: %d',
+                $this->currentVhostName,
+                $this->currentQueueName,
+                $exception->getMessage(),
+                $exception->getCode()
+            ));
+        }
+
         $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
 
         $this->updateLastProcessedAt();
+
+        if (false === $isSuccess) {
+            $this->goAheadOrWait();
+            return $this->startConsuming();
+        }
     }
 
     /**
@@ -645,6 +659,41 @@ class VhostsConsumer extends Consumer
             ->setGroupName($group)
             ->setLastProcessedAt($timestamp);
         $this->internalStorageManager->updateVhostLastProcessedAt($vhostDto);
+    }
+
+    /**
+     * @return RabbitMQQueue
+     */
+    private function initConnection()
+    {
+        $connection = $this->manager->connection(
+            ConnectionNameDto::getVhostConnectionName($this->currentVhostName,  $this->configConnectionName)
+        );
+
+        try {
+            $channel = $connection->getChannel();
+        } catch (AMQPConnectionClosedException $exception) {
+            $this->output->error(sprintf(
+                'Init Connection Error: "%s". Vhost: "%s"',
+                $exception->getMessage(),
+                $this->currentVhostName
+            ));
+
+            $vhostDto = new VhostApiDto([
+                'name' => $this->currentVhostName,
+            ]);
+
+            $this->internalStorageManager->removeVhost($vhostDto);
+            $this->loadVhosts();
+            $this->goAheadOrWait();
+
+            return $this->initConnection();
+        }
+
+        $this->currentConnectionName = $connection->getConnectionName();
+        $this->channel = $channel;
+
+        return $connection;
     }
 }
 
