@@ -120,16 +120,6 @@ class VhostsConsumer extends Consumer
 
         $connection = $this->initConnection();
 
-        $this->connectionMutex = new Mutex(false);
-
-        $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
-        $this->channel->basic_qos(
-            $this->prefetchSize,
-            $this->prefetchCount,
-            false
-        );
-        $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
-
         $this->startConsuming();
 
         while ($this->channel->is_consuming()) {
@@ -692,6 +682,16 @@ class VhostsConsumer extends Consumer
 
         $this->currentConnectionName = $connection->getConnectionName();
         $this->channel = $channel;
+
+        $this->connectionMutex = new Mutex(false);
+
+        $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
+        $this->channel->basic_qos(
+            $this->prefetchSize,
+            $this->prefetchCount,
+            false
+        );
+        $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
 
         return $connection;
     }

@@ -34,7 +34,6 @@ class ConsumeVhostsCommand extends WorkCommand
                             {--max-priority=}
                             {--consumer-tag}
                             {--prefetch-size=0}
-                            {--prefetch-count=1000}
                            ';
 
     protected $description = 'Consume messages';
@@ -83,8 +82,8 @@ class ConsumeVhostsCommand extends WorkCommand
         $consumer->setConsumerTag($this->consumerTag());
         $consumer->setMaxPriority((int) $this->option('max-priority'));
         $consumer->setPrefetchSize((int) $this->option('prefetch-size'));
-        $consumer->setPrefetchCount((int) $this->option('prefetch-count'));
-        $consumer->setBatchSize((int) ($groupConfigData['batch_size'] ?? 100));
+        $consumer->setPrefetchCount((int) ($groupConfigData['prefetch_count'] ?? 1000));
+        $consumer->setBatchSize((int) ($groupConfigData['batch_size'] ?? 1000));
 
         if ($this->downForMaintenance() && $this->option('once')) {
             $consumer->sleep($this->option('sleep'));

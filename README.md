@@ -11,14 +11,14 @@ Only the latest version will get new features. Bug fixes will be provided using 
 
 | Package Version | Laravel Version | Bug Fixes Until     |                                                                                             |
 |-----------------|-----------------|---------------------|---------------------------------------------------------------------------------------------|
-| 1               | 08              | December 26th, 2024 | [Documentation](https://github.com/vyuldashev/laravel-queue-rabbitmq/blob/master/README.md) |
+| 1               | 09              | December 26th, 2024 | [Documentation](https://github.com/vyuldashev/laravel-queue-rabbitmq/blob/master/README.md) |
 
 ## Installation
 
 You can install this package via composer using this command:
 
 ```
-composer require salesmessage/php-lib-rabbitmq:^1.08 --ignore-platform-reqs
+composer require salesmessage/php-lib-rabbitmq:^1.09 --ignore-platform-reqs
 ```
 
 The package will automatically register itself.
@@ -42,6 +42,7 @@ groups:
       - test-queue-11
     queues_mask: test
     batch_size: 100
+    prefetch_count: 100
   test-group-2:
     vhosts:
       - organization_20
@@ -53,6 +54,7 @@ groups:
       - test-queue-22
     queues_mask: test
     batch_size: 100
+    prefetch_count: 100
   test-group-3:
     vhosts:
       - organization_30
@@ -63,7 +65,8 @@ groups:
       - test-queue-3
       - test-queue-33
     queues_mask: test
-    batch_size: 100,
+    batch_size: 100
+    prefetch_count: 100
 ```
 
 ### Configuration
@@ -628,7 +631,7 @@ There are two ways of consuming messages.
 
 Example:
 ```bash
-php artisan lib-rabbitmq:consume-vhosts test-group-1 rabbitmq_vhosts --name=mq-vhosts-test-name --sleep=3 --memory=300 --max-jobs=5000 --max-time=600 --prefetch-count=100 --timeout=0
+php artisan lib-rabbitmq:consume-vhosts test-group-1 rabbitmq_vhosts --name=mq-vhosts-test-name --sleep=3 --memory=300 --max-jobs=5000 --max-time=600 --timeout=0
 ```
 
 ## Testing
