@@ -11,6 +11,7 @@ use Illuminate\Queue\Connectors\SqsConnector;
 use Illuminate\Queue\Connectors\SyncConnector;
 use Illuminate\Queue\QueueManager;
 use Illuminate\Support\ServiceProvider;
+use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Console\ConsumeCommand;
 use Salesmessage\LibRabbitMQ\Console\ConsumeVhostsCommand;
 use Salesmessage\LibRabbitMQ\Console\ScanVhostsCommand;
@@ -60,6 +61,7 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
 
                 return new VhostsConsumer(
                     $this->app[InternalStorageManager::class],
+                    $this->app[LoggerInterface::class],
                     $this->app['queue'],
                     $this->app['events'],
                     $this->app[ExceptionHandler::class],
