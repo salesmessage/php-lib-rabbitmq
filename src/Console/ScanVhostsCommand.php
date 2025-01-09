@@ -11,7 +11,6 @@ use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Services\GroupsService;
 use Salesmessage\LibRabbitMQ\Services\QueueService;
 use Salesmessage\LibRabbitMQ\Services\VhostsService;
-use Throwable;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 
 class ScanVhostsCommand extends Command
@@ -21,7 +20,7 @@ class ScanVhostsCommand extends Command
 
     protected $description = 'Scan and index vhosts';
     
-    private array $groups = ['test-group-1', 'test-group-2', 'test-group-3'];
+    private array $groups = [];
 
     /**
      * @param GroupsService $groupsService
