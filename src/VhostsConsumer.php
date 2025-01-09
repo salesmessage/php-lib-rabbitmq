@@ -110,6 +110,8 @@ class VhostsConsumer extends Consumer
     {
         $this->goAheadOrWait();
 
+        $this->connectionMutex = new Mutex(false);
+
         $this->configConnectionName = (string) $connectionName;
         $this->workerOptions = $options;
 
@@ -121,9 +123,7 @@ class VhostsConsumer extends Consumer
 
         [$startTime, $jobsProcessed] = [hrtime(true) / 1e9, 0];
 
-        $connection = $this->initConnection();
-
-        $this->startConsuming();
+        $connection = $this->startConsuming();
 
         while ($this->channel->is_consuming()) {
             // Before reserving any jobs, we will make sure this queue is not paused and
@@ -175,9 +175,10 @@ class VhostsConsumer extends Consumer
             if (false === $this->hasJob) {
                 $this->output->info('Consuming sleep. No job...');
 
+                $this->stopConsuming();
+
                 $this->processBatch($connection);
 
-                $this->stopConsuming();
                 $this->goAheadOrWait();
                 $this->startConsuming();
 
@@ -231,7 +232,11 @@ class VhostsConsumer extends Consumer
         };
     }
 
-    private function startConsuming()
+    /**
+     * @return RabbitMQQueue
+     * @throws Exceptions\MutexTimeout
+     */
+    private function startConsuming(): RabbitMQQueue
     {
         $this->output->info(sprintf(
             'Start consuming. Vhost: "%s". Queue: "%s"',
@@ -276,9 +281,10 @@ class VhostsConsumer extends Consumer
             ]);
 
             if ($jobsProcessed >= $this->batchSize) {
+                $this->stopConsuming();
+
                 $this->processBatch($connection);
 
-                $this->stopConsuming();
                 $this->goAheadOrWait();
                 $this->startConsuming();
             }
@@ -294,7 +300,7 @@ class VhostsConsumer extends Consumer
         try {
             $this->channel->basic_consume(
                 $this->currentQueueName,
-                $this->consumerTag,
+                $this->getTagName(),
                 false,
                 false,
                 false,
@@ -328,9 +334,13 @@ class VhostsConsumer extends Consumer
         $this->updateLastProcessedAt();
 
         if (false === $isSuccess) {
+            $this->stopConsuming();
+            
             $this->goAheadOrWait();
             return $this->startConsuming();
         }
+
+        return $connection;
     }
 
     /**
@@ -507,10 +517,10 @@ class VhostsConsumer extends Consumer
      * @return void
      * @throws Exceptions\MutexTimeout
      */
-    private function stopConsuming()
+    private function stopConsuming(): void
     {
         $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
-        $this->channel->basic_cancel($this->consumerTag, true);
+        $this->channel->basic_cancel($this->getTagName(), true);
         $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
     }
 
@@ -717,7 +727,7 @@ class VhostsConsumer extends Consumer
     /**
      * @return RabbitMQQueue
      */
-    private function initConnection()
+    private function initConnection(): RabbitMQQueue
     {
         $connection = $this->manager->connection(
             ConnectionNameDto::getVhostConnectionName($this->currentVhostName,  $this->configConnectionName)
@@ -751,19 +761,26 @@ class VhostsConsumer extends Consumer
         }
 
         $this->currentConnectionName = $connection->getConnectionName();
-        $this->channel = $channel;
-
-        $this->connectionMutex = new Mutex(false);
 
         $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
-        $this->channel->basic_qos(
+        $channel->basic_qos(
             $this->prefetchSize,
             $this->prefetchCount,
             false
         );
         $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
 
+        $this->channel = $channel;
+
         return $connection;
+    }
+
+    /**
+     * @return string
+     */
+    private function getTagName(): string
+    {
+        return $this->consumerTag . '_' .  $this->currentVhostName;
     }
 }
 
