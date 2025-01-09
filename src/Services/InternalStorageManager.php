@@ -75,7 +75,7 @@ class InternalStorageManager
      */
     public function indexVhost(VhostApiDto $vhostDto, array $groups = []): bool
     {
-        if ($vhostDto->getMessagesReady() > 0) {
+        if (($vhostDto->getMessagesReady() > 0) || ($vhostDto->getMessagesUnacknowledged() > 0)) {
             return $this->addVhost($vhostDto, $groups);
         }
 
@@ -185,7 +185,7 @@ class InternalStorageManager
      */
     public function indexQueue(QueueApiDto $queueDto, array $groups): bool
     {
-        if ($queueDto->getMessagesReady() > 0) {
+        if (($queueDto->getMessagesReady() > 0) || ($queueDto->getMessagesUnacknowledged() > 0)) {
             return $this->addQueue($queueDto, $groups);
         }
 

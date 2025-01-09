@@ -91,18 +91,20 @@ class ScanVhostsCommand extends Command
         $indexedSuccessfully = $this->internalStorageManager->indexVhost($vhostDto, $this->groups);
         if (!$indexedSuccessfully) {
             $this->warn(sprintf(
-                'Skip indexation vhost: "%s". Messages ready: %d.',
+                'Skip indexation vhost: "%s". Messages ready: %d. Messages unacknowledged: %d.',
                 $vhostDto->getName(),
-                $vhostDto->getMessagesReady()
+                $vhostDto->getMessagesReady(),
+                $vhostDto->getMessagesUnacknowledged()
             ));
 
             return null;
         }
 
         $this->info(sprintf(
-            'Successfully indexed vhost: "%s". Messages ready: %d.',
+            'Successfully indexed vhost: "%s". Messages ready: %d. Messages unacknowledged: %d.',
             $vhostDto->getName(),
-            $vhostDto->getMessagesReady()
+            $vhostDto->getMessagesReady(),
+            $vhostDto->getMessagesUnacknowledged()
         ));
 
         $vhostQueues = $this->queueService->getAllVhostQueues($vhostDto);
@@ -171,20 +173,22 @@ class ScanVhostsCommand extends Command
         $indexedSuccessfully = $this->internalStorageManager->indexQueue($queueApiDto, $this->groups);
         if (!$indexedSuccessfully) {
             $this->warn(sprintf(
-                'Skip indexation queue: "%s". Vhost: %s. Messages ready: %d.',
+                'Skip indexation queue: "%s". Vhost: %s. Messages ready: %d. Messages unacknowledged: %d.',
                 $queueApiDto->getName(),
                 $queueApiDto->getVhostName(),
-                $queueApiDto->getMessagesReady()
+                $queueApiDto->getMessagesReady(),
+                $queueApiDto->getMessagesUnacknowledged()
             ));
 
             return null;
         }
 
         $this->info(sprintf(
-            'Successfully indexed queue: "%s". Vhost: %s. Messages ready: %d.',
+            'Successfully indexed queue: "%s". Vhost: %s. Messages ready: %d. Messages unacknowledged: %d.',
             $queueApiDto->getName(),
             $queueApiDto->getVhostName(),
-            $queueApiDto->getMessagesReady()
+            $queueApiDto->getMessagesReady(),
+            $queueApiDto->getMessagesUnacknowledged()
         ));
 
         return $queueApiDto;
