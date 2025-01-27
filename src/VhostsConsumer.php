@@ -9,6 +9,7 @@ use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Queue\QueueManager;
 use Illuminate\Queue\WorkerOptions;
+use Illuminate\Support\Str;
 use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
 use PhpAmqpLib\Exception\AMQPConnectionClosedException;
@@ -53,6 +54,10 @@ class VhostsConsumer extends Consumer
     private bool $hasJob = false;
 
     private array $batchMessages = [];
+
+    private ?string $processingUuid = null;
+
+    private int|float $processingStartedAt = 0;
 
     /**
      * @param InternalStorageManager $internalStorageManager
@@ -143,11 +148,7 @@ class VhostsConsumer extends Consumer
                 $this->channel->wait(null, true, (int) $this->workerOptions->timeout);
                 $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
             } catch (AMQPRuntimeException $exception) {
-                $this->output->error('Consuming AMQP Runtime exception. Error: ' . $exception->getMessage());
-
-                $this->logger->error('Salesmessage.LibRabbitMQ.VhostsConsumer.daemon.amqp_runtime_exception', [
-                    'vhost_name' => $this->currentVhostName,
-                    'queue_name' => $this->currentQueueName,
+                $this->logError('daemon.amqp_runtime_exception', [
                     'message' => $exception->getMessage(),
                     'trace' => $exception->getTraceAsString(),
                 ]);
@@ -156,14 +157,10 @@ class VhostsConsumer extends Consumer
 
                 $this->kill(self::EXIT_ERROR, $this->workerOptions);
             } catch (Exception|Throwable $exception) {
-                $this->output->error('Consuming exception. Error: ' . $exception->getMessage());
-
-                $this->logger->error('Salesmessage.LibRabbitMQ.VhostsConsumer.daemon.exception', [
-                    'vhost_name' => $this->currentVhostName,
-                    'queue_name' => $this->currentQueueName,
-                    'class' => get_class($exception),
+                $this->logError('daemon.exception', [
                     'message' => $exception->getMessage(),
                     'trace' => $exception->getTraceAsString(),
+                    'error_class' => get_class($exception),
                 ]);
 
                 $this->exceptions->report($exception);
@@ -196,7 +193,9 @@ class VhostsConsumer extends Consumer
                 $this->hasJob
             );
             if (! is_null($status)) {
-                $this->output->info(['Consuming stop.', $status]);
+                $this->logInfo('consuming_stop', [
+                    'status' => $status,
+                ]);
 
                 return $this->stop($status, $this->workerOptions);
             }
@@ -238,11 +237,10 @@ class VhostsConsumer extends Consumer
      */
     private function startConsuming(): RabbitMQQueue
     {
-        $this->output->info(sprintf(
-            'Start consuming. Vhost: "%s". Queue: "%s"',
-            $this->currentVhostName,
-            $this->currentQueueName
-        ));
+        $this->processingUuid = $this->generateProcessingUuid();
+        $this->processingStartedAt = microtime(true);
+
+        $this->logInfo('startConsuming.init');
 
         $arguments = [];
         if ($this->maxPriority) {
@@ -266,17 +264,8 @@ class VhostsConsumer extends Consumer
 
             $jobsProcessed++;
 
-            $this->output->info(sprintf(
-                'Consume message. Vhost: "%s". Queue: "%s". Num: %s',
-                $this->currentVhostName,
-                $this->currentQueueName,
-                $jobsProcessed
-            ));
-
-            $this->logger->info('Salesmessage.LibRabbitMQ.VhostsConsumer.startConsuming.consume_message', [
-                'vhost_name' => $this->currentVhostName,
-                'queue_name' => $this->currentQueueName,
-                'num' => $jobsProcessed,
+            $this->logInfo('startConsuming.message_consumed', [
+                'processed_jobs_count' => $jobsProcessed,
                 'is_support_batching' => $isSupportBatching,
             ]);
 
@@ -312,20 +301,10 @@ class VhostsConsumer extends Consumer
         } catch (AMQPProtocolChannelException|AMQPChannelClosedException $exception) {
             $isSuccess = false;
 
-            $this->output->error(sprintf(
-                'Start consuming. Vhost: "%s". Queue: "%s". Error: "%s". Code: %d',
-                $this->currentVhostName,
-                $this->currentQueueName,
-                $exception->getMessage(),
-                $exception->getCode()
-            ));
-
-            $this->logger->error('Salesmessage.LibRabbitMQ.VhostsConsumer.startConsuming.exception', [
-                'vhost_name' => $this->currentVhostName,
-                'queue_name' => $this->currentQueueName,
-                'class' => get_class($exception),
+            $this->logError('startConsuming.exception', [
                 'message' => $exception->getMessage(),
                 'trace' => $exception->getTraceAsString(),
+                'error_class' => get_class($exception),
             ]);
         }
 
@@ -341,6 +320,14 @@ class VhostsConsumer extends Consumer
         }
 
         return $connection;
+    }
+
+    /**
+     * @return string
+     */
+    private function generateProcessingUuid(): string
+    {
+        return sprintf('%s:%d:%s', $this->filtersDto->getGroup(), time(), Str::random(16));
     }
 
     /**
@@ -393,6 +380,8 @@ class VhostsConsumer extends Consumer
 
             $batchSize = count($batchJobMessages);
             if ($batchSize > 1) {
+                $batchTimeStarted = microtime(true);
+
                 $batchData = [];
                 /** @var AMQPMessage $batchMessage */
                 foreach ($batchJobMessages as $batchMessage) {
@@ -400,30 +389,28 @@ class VhostsConsumer extends Consumer
                     $batchData[] = $job->getPayloadData();
                 }
 
+                $this->logInfo('processBatch.start', [
+                    'batch_job_class' => $batchJobClass,
+                    'batch_size' => $batchSize,
+                ]);
+
                 try {
                     $batchJobClass::collection($batchData);
                     $isBatchSuccess = true;
 
-                    $this->output->comment('Process batch jobs success. Job class: ' . $batchJobClass . 'Size: ' . $batchSize);
-
-                    $this->logger->info('Salesmessage.LibRabbitMQ.VhostsConsumer.processBatch.process_batch_jobs_success', [
-                        'vhost_name' => $this->currentVhostName,
-                        'queue_name' => $this->currentQueueName,
+                    $this->logInfo('processBatch.finish', [
                         'batch_job_class' => $batchJobClass,
                         'batch_size' => $batchSize,
+                        'executive_batch_time_seconds' => microtime(true) - $batchTimeStarted,
                     ]);
                 } catch (Throwable $exception) {
                     $isBatchSuccess = false;
 
-                    $this->output->error('Process batch jobs error. Job class: ' . $batchJobClass . ' Error: ' . $exception->getMessage());
-
-                    $this->logger->error('Salesmessage.LibRabbitMQ.VhostsConsumer.processBatch.exception', [
-                        'vhost_name' => $this->currentVhostName,
-                        'queue_name' => $this->currentQueueName,
+                    $this->logError('processBatch.exception', [
                         'batch_job_class' => $batchJobClass,
-                        'class' => get_class($exception),
                         'message' => $exception->getMessage(),
                         'trace' => $exception->getTraceAsString(),
+                        'error_class' => get_class($exception),
                     ]);
                 }
 
@@ -472,6 +459,9 @@ class VhostsConsumer extends Consumer
      */
     private function processSingleJob(RabbitMQJob $job): void
     {
+        $timeStarted = microtime(true);
+        $this->logInfo('processSingleJob.start');
+
         if ($this->supportsAsyncSignals()) {
             $this->registerTimeoutHandler($job, $this->workerOptions);
         }
@@ -479,16 +469,13 @@ class VhostsConsumer extends Consumer
         $this->runJob($job, $this->currentConnectionName, $this->workerOptions);
         $this->updateLastProcessedAt();
 
-        $this->output->info('Process single job...');
-
-        $this->logger->info('Salesmessage.LibRabbitMQ.VhostsConsumer.processSingleJob.success', [
-            'vhost_name' => $this->currentVhostName,
-            'queue_name' => $this->currentQueueName,
-        ]);
-
         if ($this->supportsAsyncSignals()) {
             $this->resetTimeoutHandler();
         }
+
+        $this->logInfo('processSingleJob.finish', [
+            'executive_job_time_seconds' => microtime(true) - $timeStarted,
+        ]);
     }
 
     /**
@@ -501,14 +488,10 @@ class VhostsConsumer extends Consumer
         try {
             $message->ack($multiple);
         } catch (Throwable $exception) {
-            $this->output->error('Ack message error: ' . $exception->getMessage());
-
-            $this->logger->error('Salesmessage.LibRabbitMQ.VhostsConsumer.ackMessage.exception', [
-                'vhost_name' => $this->currentVhostName,
-                'queue_name' => $this->currentQueueName,
-                'class' => get_class($exception),
+            $this->logError('ackMessage.exception', [
                 'message' => $exception->getMessage(),
                 'trace' => $exception->getTraceAsString(),
+                'error_class' => get_class($exception),
             ]);
         }
     }
@@ -736,15 +719,7 @@ class VhostsConsumer extends Consumer
         try {
             $channel = $connection->getChannel();
         } catch (AMQPConnectionClosedException $exception) {
-            $this->output->error(sprintf(
-                'Init Connection Error: "%s". Vhost: "%s"',
-                $exception->getMessage(),
-                $this->currentVhostName
-            ));
-
-            $this->logger->error('Salesmessage.LibRabbitMQ.VhostsConsumer.initConnection.exception', [
-                'vhost_name' => $this->currentVhostName,
-                'queue_name' => $this->currentQueueName,
+            $this->logError('initConnection.exception', [
                 'message' => $exception->getMessage(),
                 'trace' => $exception->getTraceAsString(),
             ]);
@@ -781,6 +756,67 @@ class VhostsConsumer extends Consumer
     private function getTagName(): string
     {
         return $this->consumerTag . '_' .  $this->currentVhostName;
+    }
+
+    /**
+     * @param string $message
+     * @param array $data
+     * @return void
+     */
+    private function logInfo(string $message, array $data = []): void
+    {
+        $this->log($message, $data, false);
+    }
+
+    /**
+     * @param string $message
+     * @param array $data
+     * @return void
+     */
+    private function logError(string $message, array $data = []): void
+    {
+        $this->log($message, $data, true);
+    }
+
+    /**
+     * @param string $message
+     * @param array $data
+     * @param bool $isError
+     * @return void
+     */
+    private function log(string $message, array $data = [], bool $isError = false): void
+    {
+        $data['vhost_name'] = $this->currentVhostName;
+        $data['queue_name'] = $this->currentQueueName;
+
+        $outputMessage = $message;
+        foreach ($data as $key => $value) {
+            if (in_array($key, ['trace', 'error_class'])) {
+                continue;
+            }
+            $outputMessage .= '. ' . ucfirst(str_replace('_', ' ', $key)) . ': ' . $value;
+        }
+        if ($isError) {
+            $this->output->error($outputMessage);
+        } else {
+            $this->output->info($outputMessage);
+        }
+
+        $processingData = [
+            'uuid' => $this->processingUuid,
+            'started_at' => $this->processingStartedAt,
+        ];
+        if ($this->processingStartedAt) {
+            $processingData['executive_time_seconds'] = microtime(true) - $this->processingStartedAt;
+        }
+        $data['processing'] = $processingData;
+
+        $logMessage = 'Salesmessage.LibRabbitMQ.VhostsConsumer.' . $message;
+        if ($isError) {
+            $this->logger->error($logMessage, $data);
+        } else {
+            $this->logger->info($logMessage, $data);
+        }
     }
 }
 
