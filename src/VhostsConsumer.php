@@ -155,7 +155,7 @@ class VhostsConsumer extends Consumer
 
                 $this->exceptions->report($exception);
 
-                $this->kill(self::EXIT_ERROR, $this->workerOptions);
+                $this->kill(self::EXIT_SUCCESS, $this->workerOptions);
             } catch (Exception|Throwable $exception) {
                 $this->logError('daemon.exception', [
                     'message' => $exception->getMessage(),
