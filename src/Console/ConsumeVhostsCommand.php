@@ -8,8 +8,8 @@ use Illuminate\Queue\Worker;
 use Illuminate\Support\Str;
 use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
 use Salesmessage\LibRabbitMQ\Services\GroupsService;
+use Salesmessage\LibRabbitMQ\VhostsConsumers\AbstractVhostsConsumer;
 use Symfony\Component\Console\Terminal;
-use Salesmessage\LibRabbitMQ\VhostsConsumer;
 use Throwable;
 
 class ConsumeVhostsCommand extends WorkCommand
@@ -70,7 +70,7 @@ class ConsumeVhostsCommand extends WorkCommand
             trim($groupConfigData['queues_mask'] ?? '')
         );
 
-        /** @var VhostsConsumer $consumer */
+        /** @var AbstractVhostsConsumer $consumer */
         $consumer = $this->worker;
 
         $consumer->setFiltersDto($filtersDto);
