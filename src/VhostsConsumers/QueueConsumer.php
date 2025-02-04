@@ -218,3 +218,4 @@ class QueueConsumer extends AbstractVhostsConsumer
         $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
     }
 }
+
