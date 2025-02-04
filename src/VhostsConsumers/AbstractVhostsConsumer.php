@@ -1,63 +1,61 @@
 <?php
 
-namespace Salesmessage\LibRabbitMQ;
+namespace Salesmessage\LibRabbitMQ\VhostsConsumers;
 
-use GuzzleHttp\Client;
-use GuzzleHttp\Exception\RequestException;
 use Illuminate\Console\OutputStyle;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Queue\QueueManager;
 use Illuminate\Queue\WorkerOptions;
 use Illuminate\Support\Str;
-use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
 use PhpAmqpLib\Exception\AMQPConnectionClosedException;
 use PhpAmqpLib\Exception\AMQPProtocolChannelException;
 use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Message\AMQPMessage;
 use Psr\Log\LoggerInterface;
+use Salesmessage\LibRabbitMQ\Consumer;
 use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
 use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
 use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Interfaces\RabbitMQBatchable;
+use Salesmessage\LibRabbitMQ\Mutex;
 use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
-use Throwable;
 
-class VhostsConsumer extends Consumer
+abstract class AbstractVhostsConsumer extends Consumer
 {
     protected const MAIN_HANDLER_LOCK = 'vhost_handler';
 
-    private ?OutputStyle $output = null;
+    protected ?OutputStyle $output = null;
 
-    private ?ConsumeVhostsFiltersDto $filtersDto = null;
+    protected ?ConsumeVhostsFiltersDto $filtersDto = null;
 
-    private int $batchSize = 100;
+    protected int $batchSize = 100;
 
-    private string $configConnectionName = '';
+    protected string $configConnectionName = '';
 
-    private string $currentConnectionName = '';
+    protected string $currentConnectionName = '';
 
-    private array $vhosts = [];
+    protected array $vhosts = [];
 
-    private ?string $currentVhostName = null;
+    protected ?string $currentVhostName = null;
 
-    private array $vhostQueues = [];
+    protected array $vhostQueues = [];
 
-    private ?string $currentQueueName = null;
+    protected ?string $currentQueueName = null;
 
-    private ?WorkerOptions $workerOptions = null;
+    protected ?WorkerOptions $workerOptions = null;
 
-    private bool $hasJob = false;
+    protected array $batchMessages = [];
 
-    private array $batchMessages = [];
+    protected ?string $processingUuid = null;
 
-    private ?string $processingUuid = null;
+    protected int|float $processingStartedAt = 0;
 
-    private int|float $processingStartedAt = 0;
+    protected int $jobsProcessed = 0;
 
     /**
      * @param InternalStorageManager $internalStorageManager
@@ -69,8 +67,8 @@ class VhostsConsumer extends Consumer
      * @param callable|null $resetScope
      */
     public function __construct(
-        private InternalStorageManager $internalStorageManager,
-        private LoggerInterface $logger,
+        protected InternalStorageManager $internalStorageManager,
+        protected LoggerInterface $logger,
         QueueManager $manager,
         Dispatcher $events,
         ExceptionHandler $exceptions,
@@ -124,85 +122,10 @@ class VhostsConsumer extends Consumer
             $this->listenForSignals();
         }
 
-        $lastRestart = $this->getTimestampOfLastQueueRestart();
-
-        [$startTime, $jobsProcessed] = [hrtime(true) / 1e9, 0];
-
-        $connection = $this->startConsuming();
-
-        while ($this->channel->is_consuming()) {
-            // Before reserving any jobs, we will make sure this queue is not paused and
-            // if it is we will just pause this worker for a given amount of time and
-            // make sure we do not need to kill this worker process off completely.
-            if (! $this->daemonShouldRun($this->workerOptions, $this->configConnectionName, $this->currentQueueName)) {
-                $this->output->info('Consuming pause worker...');
-
-                $this->pauseWorker($this->workerOptions, $lastRestart);
-
-                continue;
-            }
-
-            // If the daemon should run (not in maintenance mode, etc.), then we can wait for a job.
-            try {
-                $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
-                $this->channel->wait(null, true, (int) $this->workerOptions->timeout);
-                $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
-            } catch (AMQPRuntimeException $exception) {
-                $this->logError('daemon.amqp_runtime_exception', [
-                    'message' => $exception->getMessage(),
-                    'trace' => $exception->getTraceAsString(),
-                ]);
-
-                $this->exceptions->report($exception);
-
-                $this->kill(self::EXIT_SUCCESS, $this->workerOptions);
-            } catch (Exception|Throwable $exception) {
-                $this->logError('daemon.exception', [
-                    'message' => $exception->getMessage(),
-                    'trace' => $exception->getTraceAsString(),
-                    'error_class' => get_class($exception),
-                ]);
-
-                $this->exceptions->report($exception);
-
-                $this->stopWorkerIfLostConnection($exception);
-            }
-
-            // If no job is got off the queue, we will need to sleep the worker.
-            if (false === $this->hasJob) {
-                $this->output->info('Consuming sleep. No job...');
-
-                $this->stopConsuming();
-
-                $this->processBatch($connection);
-
-                $this->goAheadOrWait();
-                $this->startConsuming();
-
-                $this->sleep($this->workerOptions->sleep);
-            }
-
-            // Finally, we will check to see if we have exceeded our memory limits or if
-            // the queue should restart based on other indications. If so, we'll stop
-            // this worker and let whatever is "monitoring" it restart the process.
-            $status = $this->getStopStatus(
-                $this->workerOptions,
-                $lastRestart,
-                $startTime,
-                $jobsProcessed,
-                $this->hasJob
-            );
-            if (! is_null($status)) {
-                $this->logInfo('consuming_stop', [
-                    'status' => $status,
-                ]);
-
-                return $this->stop($status, $this->workerOptions);
-            }
-
-            $this->hasJob = false;
-        }
+        $this->vhostDaemon($connectionName, $options);
     }
+    
+    abstract protected function vhostDaemon($connectionName, WorkerOptions $options);
 
     /**
      * @param WorkerOptions $options
@@ -235,97 +158,35 @@ class VhostsConsumer extends Consumer
      * @return RabbitMQQueue
      * @throws Exceptions\MutexTimeout
      */
-    private function startConsuming(): RabbitMQQueue
+    abstract protected function startConsuming(): RabbitMQQueue;
+
+    /**
+     * @param AMQPMessage $message
+     * @param RabbitMQQueue $connection
+     * @return void
+     */
+    protected function processAmqpMessage(AMQPMessage $message, RabbitMQQueue $connection): void
     {
-        $this->processingUuid = $this->generateProcessingUuid();
-        $this->processingStartedAt = microtime(true);
-
-        $this->logInfo('startConsuming.init');
-
-        $arguments = [];
-        if ($this->maxPriority) {
-            $arguments['priority'] = ['I', $this->maxPriority];
+        $isSupportBatching = $this->isSupportBatching($message);
+        if ($isSupportBatching) {
+            $this->addMessageToBatch($message);
+        } else {
+            $job = $this->getJobByMessage($message, $connection);
+            $this->processSingleJob($job);
         }
 
-        $jobsProcessed = 0;
+        $this->jobsProcessed++;
 
-        $connection = $this->initConnection();
-
-        $callback = function (AMQPMessage $message) use ($connection, &$jobsProcessed): void {
-            $this->hasJob = true;
-
-            $isSupportBatching = $this->isSupportBatching($message);
-            if ($isSupportBatching) {
-                $this->addMessageToBatch($message);
-            } else {
-                $job = $this->getJobByMessage($message, $connection);
-                $this->processSingleJob($job);
-            }
-
-            $jobsProcessed++;
-
-            $this->logInfo('startConsuming.message_consumed', [
-                'processed_jobs_count' => $jobsProcessed,
-                'is_support_batching' => $isSupportBatching,
-            ]);
-
-            if ($jobsProcessed >= $this->batchSize) {
-                $this->stopConsuming();
-
-                $this->processBatch($connection);
-
-                $this->goAheadOrWait();
-                $this->startConsuming();
-            }
-
-            if ($this->workerOptions->rest > 0) {
-                $this->sleep($this->workerOptions->rest);
-            }
-        };
-
-        $isSuccess = true;
-
-        $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
-        try {
-            $this->channel->basic_consume(
-                $this->currentQueueName,
-                $this->getTagName(),
-                false,
-                false,
-                false,
-                false,
-                $callback,
-                null,
-                $arguments
-            );
-        } catch (AMQPProtocolChannelException|AMQPChannelClosedException $exception) {
-            $isSuccess = false;
-
-            $this->logError('startConsuming.exception', [
-                'message' => $exception->getMessage(),
-                'trace' => $exception->getTraceAsString(),
-                'error_class' => get_class($exception),
-            ]);
-        }
-
-        $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
-
-        $this->updateLastProcessedAt();
-
-        if (false === $isSuccess) {
-            $this->stopConsuming();
-            
-            $this->goAheadOrWait();
-            return $this->startConsuming();
-        }
-
-        return $connection;
+        $this->logInfo('processAMQPMessage.message_consumed', [
+            'processed_jobs_count' => $this->jobsProcessed,
+            'is_support_batching' => $isSupportBatching,
+        ]);
     }
 
     /**
      * @return string
      */
-    private function generateProcessingUuid(): string
+    protected function generateProcessingUuid(): string
     {
         return sprintf('%s:%d:%s', $this->filtersDto->getGroup(), time(), Str::random(16));
     }
@@ -334,7 +195,7 @@ class VhostsConsumer extends Consumer
      * @param AMQPMessage $message
      * @return string
      */
-    private function getMessageClass(AMQPMessage $message): string
+    protected function getMessageClass(AMQPMessage $message): string
     {
         $body = json_decode($message->getBody(), true);
 
@@ -345,7 +206,7 @@ class VhostsConsumer extends Consumer
      * @param RabbitMQJob $job
      * @return void
      */
-    private function isSupportBatching(AMQPMessage $message): bool
+    protected function isSupportBatching(AMQPMessage $message): bool
     {
         $class = $this->getMessageClass($message);
 
@@ -358,7 +219,7 @@ class VhostsConsumer extends Consumer
      * @param AMQPMessage $message
      * @return void
      */
-    private function addMessageToBatch(AMQPMessage $message): void
+    protected function addMessageToBatch(AMQPMessage $message): void
     {
         $this->batchMessages[$this->getMessageClass($message)][] = $message;
     }
@@ -369,7 +230,7 @@ class VhostsConsumer extends Consumer
      * @throws Exceptions\MutexTimeout
      * @throws Throwable
      */
-    private function processBatch(RabbitMQQueue $connection): void
+    protected function processBatch(RabbitMQQueue $connection): void
     {
         if (empty($this->batchMessages)) {
             return;
@@ -440,7 +301,7 @@ class VhostsConsumer extends Consumer
      * @return RabbitMQJob
      * @throws Throwable
      */
-    private function getJobByMessage(AMQPMessage $message, RabbitMQQueue $connection): RabbitMQJob
+    protected function getJobByMessage(AMQPMessage $message, RabbitMQQueue $connection): RabbitMQJob
     {
         $jobClass = $connection->getJobClass();
 
@@ -457,7 +318,7 @@ class VhostsConsumer extends Consumer
      * @param RabbitMQJob $job
      * @return void
      */
-    private function processSingleJob(RabbitMQJob $job): void
+    protected function processSingleJob(RabbitMQJob $job): void
     {
         $timeStarted = microtime(true);
         $this->logInfo('processSingleJob.start');
@@ -483,7 +344,7 @@ class VhostsConsumer extends Consumer
      * @param bool $multiple
      * @return void
      */
-    private function ackMessage(AMQPMessage $message, bool $multiple = false): void
+    protected function ackMessage(AMQPMessage $message, bool $multiple = false): void
     {
         try {
             $message->ack($multiple);
@@ -500,17 +361,12 @@ class VhostsConsumer extends Consumer
      * @return void
      * @throws Exceptions\MutexTimeout
      */
-    private function stopConsuming(): void
-    {
-        $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
-        $this->channel->basic_cancel($this->getTagName(), true);
-        $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
-    }
+    abstract protected function stopConsuming(): void;
 
     /**
      * @return void
      */
-    private function loadVhosts(): void
+    protected function loadVhosts(): void
     {
         $group = $this->filtersDto->getGroup();
         $lastProcessedAtKey = $this->internalStorageManager->getLastProcessedAtKeyName($group);
@@ -539,7 +395,7 @@ class VhostsConsumer extends Consumer
     /**
      * @return bool
      */
-    private function switchToNextVhost(): bool
+    protected function switchToNextVhost(): bool
     {
         $nextVhost = $this->getNextVhost();
         if (null === $nextVhost) {
@@ -564,7 +420,7 @@ class VhostsConsumer extends Consumer
     /**
      * @return string|null
      */
-    private function getNextVhost(): ?string
+    protected function getNextVhost(): ?string
     {
         if (null === $this->currentVhostName) {
             return !empty($this->vhosts) ? (string) reset($this->vhosts) : null;
@@ -581,7 +437,7 @@ class VhostsConsumer extends Consumer
     /**
      * @return void
      */
-    private function loadVhostQueues(): void
+    protected function loadVhostQueues(): void
     {
         $group = $this->filtersDto->getGroup();
         $lastProcessedAtKey = $this->internalStorageManager->getLastProcessedAtKeyName($group);
@@ -610,7 +466,7 @@ class VhostsConsumer extends Consumer
     /**
      * @return bool
      */
-    private function switchToNextQueue(): bool
+    protected function switchToNextQueue(): bool
     {
         $nextQueue = $this->getNextQueue();
         if (null === $nextQueue) {
@@ -625,7 +481,7 @@ class VhostsConsumer extends Consumer
     /**
      * @return string|null
      */
-    private function getNextQueue(): ?string
+    protected function getNextQueue(): ?string
     {
         if (null === $this->currentQueueName) {
             return !empty($this->vhostQueues) ? (string) reset($this->vhostQueues) : null;
@@ -643,7 +499,7 @@ class VhostsConsumer extends Consumer
      * @param int $waitSeconds
      * @return bool
      */
-    private function goAheadOrWait(int $waitSeconds = 1): bool
+    protected function goAheadOrWait(int $waitSeconds = 1): bool
     {
         if (false === $this->goAhead()) {
             $this->loadVhosts();
@@ -664,7 +520,7 @@ class VhostsConsumer extends Consumer
     /**
      * @return bool
      */
-    private function goAhead(): bool
+    protected function goAhead(): bool
     {
         if ($this->switchToNextQueue()) {
             return true;
@@ -680,7 +536,7 @@ class VhostsConsumer extends Consumer
     /**
      * @return void
      */
-    private function updateLastProcessedAt()
+    protected function updateLastProcessedAt()
     {
         if ((null === $this->currentVhostName) || (null === $this->currentQueueName)) {
             return;
@@ -710,7 +566,7 @@ class VhostsConsumer extends Consumer
     /**
      * @return RabbitMQQueue
      */
-    private function initConnection(): RabbitMQQueue
+    protected function initConnection(): RabbitMQQueue
     {
         $connection = $this->manager->connection(
             ConnectionNameDto::getVhostConnectionName($this->currentVhostName,  $this->configConnectionName)
@@ -753,7 +609,7 @@ class VhostsConsumer extends Consumer
     /**
      * @return string
      */
-    private function getTagName(): string
+    protected function getTagName(): string
     {
         return $this->consumerTag . '_' .  $this->currentVhostName;
     }
@@ -763,7 +619,7 @@ class VhostsConsumer extends Consumer
      * @param array $data
      * @return void
      */
-    private function logInfo(string $message, array $data = []): void
+    protected function logInfo(string $message, array $data = []): void
     {
         $this->log($message, $data, false);
     }
@@ -773,7 +629,7 @@ class VhostsConsumer extends Consumer
      * @param array $data
      * @return void
      */
-    private function logError(string $message, array $data = []): void
+    protected function logError(string $message, array $data = []): void
     {
         $this->log($message, $data, true);
     }
@@ -784,7 +640,7 @@ class VhostsConsumer extends Consumer
      * @param bool $isError
      * @return void
      */
-    private function log(string $message, array $data = [], bool $isError = false): void
+    protected function log(string $message, array $data = [], bool $isError = false): void
     {
         $data['vhost_name'] = $this->currentVhostName;
         $data['queue_name'] = $this->currentQueueName;
@@ -811,7 +667,9 @@ class VhostsConsumer extends Consumer
         }
         $data['processing'] = $processingData;
 
-        $logMessage = 'Salesmessage.LibRabbitMQ.VhostsConsumer.' . $message;
+        $logMessage = 'Salesmessage.LibRabbitMQ.VhostsConsumers.';
+        $logMessage .= class_basename(static::class) . '.';
+        $logMessage .= $message;
         if ($isError) {
             $this->logger->error($logMessage, $data);
         } else {
@@ -819,4 +677,3 @@ class VhostsConsumer extends Consumer
         }
     }
 }
-

@@ -20,6 +20,8 @@ use Salesmessage\LibRabbitMQ\Services\GroupsService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Salesmessage\LibRabbitMQ\Services\QueueService;
 use Salesmessage\LibRabbitMQ\Services\VhostsService;
+use Salesmessage\LibRabbitMQ\VhostsConsumers\DirectConsumer as VhostsDirectConsumer;
+use Salesmessage\LibRabbitMQ\VhostsConsumers\QueueConsumer as VhostsQueueConsumer;
 
 class LaravelLibRabbitMQServiceProvider extends ServiceProvider
 {
@@ -54,12 +56,28 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
                 );
             });
 
-            $this->app->singleton(VhostsConsumer::class, function () {
+            $this->app->singleton(VhostsDirectConsumer::class, function () {
                 $isDownForMaintenance = function () {
                     return $this->app->isDownForMaintenance();
                 };
 
-                return new VhostsConsumer(
+                return new VhostsDirectConsumer(
+                    $this->app[InternalStorageManager::class],
+                    $this->app[LoggerInterface::class],
+                    $this->app['queue'],
+                    $this->app['events'],
+                    $this->app[ExceptionHandler::class],
+                    $isDownForMaintenance,
+                    null
+                );
+            });
+
+            $this->app->singleton(VhostsQueueConsumer::class, function () {
+                $isDownForMaintenance = function () {
+                    return $this->app->isDownForMaintenance();
+                };
+
+                return new VhostsQueueConsumer(
                     $this->app[InternalStorageManager::class],
                     $this->app[LoggerInterface::class],
                     $this->app['queue'],
@@ -71,9 +89,13 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
             });
 
             $this->app->singleton(ConsumeVhostsCommand::class, static function ($app) {
+                $consumerClass = ('direct' === config('queue.connections.rabbitmq_vhosts.consumer_type'))
+                    ? VhostsDirectConsumer::class
+                    : VhostsQueueConsumer::class;
+                
                 return new ConsumeVhostsCommand(
                     $app[GroupsService::class],
-                    $app[VhostsConsumer::class],
+                    $app[$consumerClass],
                     $app['cache.store']
                 );
             });
