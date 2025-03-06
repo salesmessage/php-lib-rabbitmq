@@ -16,8 +16,8 @@ class RabbitApiClient
     public function __construct()
     {
         $this->client = new HttpClient([
-            RequestOptions::TIMEOUT => 60,
-            RequestOptions::CONNECT_TIMEOUT => 60,
+            RequestOptions::TIMEOUT => 30,
+            RequestOptions::CONNECT_TIMEOUT => 30,
         ]);
     }
 
