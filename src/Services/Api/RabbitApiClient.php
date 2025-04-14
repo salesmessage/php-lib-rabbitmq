@@ -85,7 +85,7 @@ class RabbitApiClient
      */
     private function getBaseUrl(): string
     {
-        $host = $this->connectionConfig['hosts'][0]['host'] ?? '';
+        $host = $this->connectionConfig['hosts'][0]['api_host'] ?? '';
         $port = $this->connectionConfig['hosts'][0]['api_port'] ?? '';
 
         $scheme = $this->connectionConfig['secure'] ? 'https://' : 'http://';
