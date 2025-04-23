@@ -157,11 +157,12 @@ class VhostsService
             $isCreated = false;
         }
 
+        $isSuccess = false;
         if ($isCreated) {
-            $this->setVhostPermissions($vhostName);
+            $isSuccess = $this->setVhostPermissions($vhostName);
         }
 
-        return $isCreated;
+        return $isSuccess;
     }
 
     /**
