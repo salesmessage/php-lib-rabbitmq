@@ -65,7 +65,11 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
     {
         try {
             return parent::createChannel();
-        } catch (AMQPConnectionClosedException) {
+        } catch (AMQPConnectionClosedException $exception) {
+            if ($this->isVhostFailedException($exception) && (false === $this->createNotExistsVhost())) {
+                throw $exception;
+            }
+
             $this->reconnect();
             return parent::createChannel();
         }
@@ -147,6 +151,28 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         $isVhostActivated = $this->internalStorageManager->activateVhost($vhostDto, $groups);
 
         return $isQueueActivated && $isVhostActivated;
+    }
+
+    /**
+     * @param AMQPConnectionClosedException $exception
+     * @return bool
+     */
+    private function isVhostFailedException(AMQPConnectionClosedException $exception): bool
+    {
+        $dto = new ConnectionNameDto($this->getConnectionName());
+        $vhostName = (string) $dto->getVhostName();
+
+        $notFoundErrorMessage = sprintf('NOT_ALLOWED - vhost %s not found', $vhostName);
+        if ((403 === $exception->getCode()) && str_contains($exception->getMessage(), $notFoundErrorMessage)) {
+            return true;
+        }
+
+        $deletedErrorMessage = sprintf('CONNECTION_FORCED - vhost \'%s\' is deleted', $vhostName);
+        if (str_contains($exception->getMessage(), $deletedErrorMessage)) {
+            return true;
+        }
+
+        return false;
     }
 }
 
