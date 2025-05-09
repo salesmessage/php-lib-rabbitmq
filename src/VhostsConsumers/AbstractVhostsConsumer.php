@@ -566,10 +566,20 @@ abstract class AbstractVhostsConsumer extends Consumer
     /**
      * @return RabbitMQQueue
      */
-    protected function initConnection(): RabbitMQQueue
+    protected function initConnection(): RabbitMQQueue 
     {
+        // Close any existing connection/channel
+        if ($this->channel) {
+            try {
+                $this->channel->close();
+            } catch (\Exception $e) {
+                // Ignore close errors
+            }
+            $this->channel = null;
+        }
+
         $connection = $this->manager->connection(
-            ConnectionNameDto::getVhostConnectionName($this->currentVhostName,  $this->configConnectionName)
+            ConnectionNameDto::getVhostConnectionName($this->currentVhostName, $this->configConnectionName)
         );
 
         try {
