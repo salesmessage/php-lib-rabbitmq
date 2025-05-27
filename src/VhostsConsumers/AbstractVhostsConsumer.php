@@ -566,12 +566,13 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function initConnection(): RabbitMQQueue
     {
-        if ($this->connection) {
+        if ($this->channel) {
             try {
-                $this->connection->close();
+                $this->channel->close();
             } catch (\Exception $e) {
+                // Ignore close errors
             }
-            $this->connection = null;
+            $this->channel = null;
         }
 
         $connection = $this->manager->connection(
@@ -579,11 +580,7 @@ abstract class AbstractVhostsConsumer extends Consumer
         );
 
         try {
-            if (!$connection->isConnected()) {
-                $connection->reconnect();
-            }
-
-            $channel = $connection->getChannel();
+            $channel = $connection->getChannel(true);
 
             $this->currentConnectionName = $connection->getConnectionName();
 
