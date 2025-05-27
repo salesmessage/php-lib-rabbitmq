@@ -32,6 +32,8 @@ class Consumer extends Worker
     /** @var AMQPChannel */
     protected $channel;
 
+    protected $connection;
+
     /** @var object|null */
     protected $currentJob;
 

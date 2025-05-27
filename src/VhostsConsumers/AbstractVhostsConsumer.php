@@ -74,8 +74,7 @@ abstract class AbstractVhostsConsumer extends Consumer
         ExceptionHandler $exceptions,
         callable $isDownForMaintenance,
         callable $resetScope = null
-    )
-    {
+    ) {
         parent::__construct($manager, $events, $exceptions, $isDownForMaintenance, $resetScope);
     }
 
@@ -124,7 +123,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
         $this->vhostDaemon($connectionName, $options);
     }
-    
+
     abstract protected function vhostDaemon($connectionName, WorkerOptions $options);
 
     /**
@@ -141,8 +140,7 @@ abstract class AbstractVhostsConsumer extends Consumer
         $startTime = 0,
         $jobsProcessed = 0,
         bool $hasJob = false
-    ): ?int
-    {
+    ): ?int {
         return match (true) {
             $this->shouldQuit => static::EXIT_SUCCESS,
             $this->memoryExceeded($options->memory) => static::EXIT_MEMORY_LIMIT,
@@ -566,16 +564,14 @@ abstract class AbstractVhostsConsumer extends Consumer
     /**
      * @return RabbitMQQueue
      */
-    protected function initConnection(): RabbitMQQueue 
+    protected function initConnection(): RabbitMQQueue
     {
-        // Close any existing connection/channel
-        if ($this->channel) {
+        if ($this->connection) {
             try {
-                $this->channel->close();
+                $this->connection->close();
             } catch (\Exception $e) {
-                // Ignore close errors
             }
-            $this->channel = null;
+            $this->connection = null;
         }
 
         $connection = $this->manager->connection(
@@ -584,6 +580,19 @@ abstract class AbstractVhostsConsumer extends Consumer
 
         try {
             $channel = $connection->getChannel();
+
+            $this->currentConnectionName = $connection->getConnectionName();
+
+            $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
+            $channel->basic_qos(
+                $this->prefetchSize,
+                $this->prefetchCount,
+                false
+            );
+            $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
+
+            $this->channel = $channel;
+            $this->connection = $connection;
         } catch (AMQPConnectionClosedException $exception) {
             $this->logError('initConnection.exception', [
                 'message' => $exception->getMessage(),
@@ -600,18 +609,6 @@ abstract class AbstractVhostsConsumer extends Consumer
 
             return $this->initConnection();
         }
-
-        $this->currentConnectionName = $connection->getConnectionName();
-
-        $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
-        $channel->basic_qos(
-            $this->prefetchSize,
-            $this->prefetchCount,
-            false
-        );
-        $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
-
-        $this->channel = $channel;
 
         return $connection;
     }
