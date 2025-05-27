@@ -579,6 +579,10 @@ abstract class AbstractVhostsConsumer extends Consumer
         );
 
         try {
+            if (!$connection->isConnected()) {
+                $connection->reconnect();
+            }
+
             $channel = $connection->getChannel();
 
             $this->currentConnectionName = $connection->getConnectionName();
@@ -593,7 +597,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
             $this->channel = $channel;
             $this->connection = $connection;
-        } catch (AMQPConnectionClosedException $exception) {
+        } catch (AMQPConnectionClosedException|AMQPChannelClosedException $exception) {
             $this->logError('initConnection.exception', [
                 'message' => $exception->getMessage(),
                 'trace' => $exception->getTraceAsString(),
