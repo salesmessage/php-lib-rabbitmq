@@ -614,7 +614,6 @@ abstract class AbstractVhostsConsumer extends Consumer
             ]);
 
             $this->internalStorageManager->removeVhost($vhostDto);
-            $this->loadVhosts();
             $this->goAheadOrWait();
 
             return $this->initConnection();
