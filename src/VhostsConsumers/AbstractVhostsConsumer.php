@@ -369,7 +369,6 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function loadVhosts(): void
     {
-        $this->hadJobs = false;
         $group = $this->filtersDto->getGroup();
         $lastProcessedAtKey = $this->internalStorageManager->getLastProcessedAtKeyName($group);
 
@@ -508,8 +507,9 @@ abstract class AbstractVhostsConsumer extends Consumer
                 $this->output->warning(sprintf('No jobs during iteration. Wait %d seconds...', $waitSeconds));
                 $this->sleep($waitSeconds);
             }
-            
+
             $this->loadVhosts();
+            $this->hadJobs = false;
             if (empty($this->vhosts)) {
                 $this->output->warning(sprintf('No active vhosts. Wait %d seconds...', $waitSeconds));
                 $this->sleep($waitSeconds);
@@ -614,6 +614,7 @@ abstract class AbstractVhostsConsumer extends Consumer
             ]);
 
             $this->internalStorageManager->removeVhost($vhostDto);
+            $this->loadVhosts();
             $this->goAheadOrWait();
 
             return $this->initConnection();
