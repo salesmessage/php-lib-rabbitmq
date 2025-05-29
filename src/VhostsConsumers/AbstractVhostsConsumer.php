@@ -57,6 +57,8 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     protected int $jobsProcessed = 0;
 
+    protected bool $hadJobs = false;
+
     /**
      * @param InternalStorageManager $internalStorageManager
      * @param LoggerInterface $logger
@@ -165,6 +167,7 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function processAmqpMessage(AMQPMessage $message, RabbitMQQueue $connection): void
     {
+        $this->hadJobs = true;
         $isSupportBatching = $this->isSupportBatching($message);
         if ($isSupportBatching) {
             $this->addMessageToBatch($message);
@@ -500,7 +503,13 @@ abstract class AbstractVhostsConsumer extends Consumer
     protected function goAheadOrWait(int $waitSeconds = 1): bool
     {
         if (false === $this->goAhead()) {
+            if (!$this->hadJobs) {
+                $this->output->warning(sprintf('No jobs during iteration. Wait %d seconds...', $waitSeconds));
+                $this->sleep($waitSeconds);
+            }
+
             $this->loadVhosts();
+            $this->hadJobs = false;
             if (empty($this->vhosts)) {
                 $this->output->warning(sprintf('No active vhosts. Wait %d seconds...', $waitSeconds));
                 $this->sleep($waitSeconds);
@@ -594,7 +603,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
             $this->channel = $channel;
             $this->connection = $connection;
-        } catch (AMQPConnectionClosedException|AMQPChannelClosedException $exception) {
+        } catch (AMQPConnectionClosedException | AMQPChannelClosedException $exception) {
             $this->logError('initConnection.exception', [
                 'message' => $exception->getMessage(),
                 'trace' => $exception->getTraceAsString(),
