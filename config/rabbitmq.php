@@ -30,4 +30,9 @@ return [
      */
     'worker' => env('RABBITMQ_WORKER', 'default'),
 
+    /*
+     * Vhost prefix for organization-specific vhosts.
+     */
+    'vhost_prefix' => env('RABBITMQ_VHOST_PREFIX', 'organization_'),
+
 ];
