@@ -9,8 +9,6 @@ use Throwable;
 
 class VhostsService
 {
-    public const VHOST_PREFIX = 'organization_';
-
     /**
      * @param RabbitApiClient $rabbitApiClient
      * @param LoggerInterface $logger
@@ -204,7 +202,9 @@ class VhostsService
      */
     public function getVhostName(int $organizationId): string
     {
-        return self::VHOST_PREFIX . $organizationId;
+        $vhostPrefix = config('queue.connections.rabbitmq_vhosts.vhost_prefix', 'organization_');
+
+        return $vhostPrefix . $organizationId;
     }
 
     /**
