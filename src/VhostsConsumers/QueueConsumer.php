@@ -83,19 +83,19 @@ class QueueConsumer extends AbstractVhostsConsumer
             // Finally, we will check to see if we have exceeded our memory limits or if
             // the queue should restart based on other indications. If so, we'll stop
             // this worker and let whatever is "monitoring" it restart the process.
-            $status = $this->getStopStatus(
+            $this->stopStatusCode = $this->getStopStatus(
                 $this->workerOptions,
                 $lastRestart,
                 $startTime,
                 $jobsProcessed,
                 $this->hasJob
             );
-            if (! is_null($status)) {
+            if (! is_null($this->stopStatusCode)) {
                 $this->logInfo('consuming_stop', [
-                    'status' => $status,
+                    'status' => $this->stopStatusCode,
                 ]);
 
-                return $this->stop($status, $this->workerOptions);
+                return $this->stop($this->stopStatusCode, $this->workerOptions);
             }
 
             $this->hasJob = false;
