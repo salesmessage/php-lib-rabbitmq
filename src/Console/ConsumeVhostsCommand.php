@@ -30,6 +30,7 @@ class ConsumeVhostsCommand extends WorkCommand
                             {--timeout=60 : The number of seconds a child process can run}
                             {--tries=1 : Number of times to attempt a job before logging it failed}
                             {--rest=0 : Number of seconds to rest between jobs}
+                            {--async-mode=0 : Async processing for some functionality (now only "heartbeat" is supported)}
 
                             {--max-priority=}
                             {--consumer-tag}
@@ -84,6 +85,7 @@ class ConsumeVhostsCommand extends WorkCommand
         $consumer->setPrefetchSize((int) $this->option('prefetch-size'));
         $consumer->setPrefetchCount((int) ($groupConfigData['prefetch_count'] ?? 1000));
         $consumer->setBatchSize((int) ($groupConfigData['batch_size'] ?? 1000));
+        $consumer->setAsyncMode((bool) $this->option('async-mode'));
 
         if ($this->downForMaintenance() && $this->option('once')) {
             $consumer->sleep($this->option('sleep'));
@@ -95,8 +97,10 @@ class ConsumeVhostsCommand extends WorkCommand
         // which jobs are coming through a queue and be informed on its progress.
         $this->listenForEvents();
 
-        $connection = $this->argument('connection')
-            ?: $this->laravel['config']['queue.default'];
+        $queueConfigData = $this->laravel['config']['queue'];
+        $connectionName = $this->argument('connection') ?: ($queueConfigData['default'] ?? '');
+
+        $consumer->setConfig((array) ($queueConfigData['connections'][$connectionName] ?? []));
 
         if (Terminal::hasSttyAvailable()) {
             $this->components->info(sprintf(
@@ -107,7 +111,7 @@ class ConsumeVhostsCommand extends WorkCommand
         }
 
         $this->runWorker(
-            $connection,
+            $connectionName,
             ''
         );
     }

@@ -8,6 +8,7 @@ use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Queue\QueueManager;
 use Illuminate\Queue\WorkerOptions;
 use Illuminate\Support\Str;
+use PhpAmqpLib\Connection\AMQPStreamConnection;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
 use PhpAmqpLib\Exception\AMQPConnectionClosedException;
 use PhpAmqpLib\Exception\AMQPProtocolChannelException;
@@ -19,6 +20,7 @@ use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
 use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
 use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
+use Salesmessage\LibRabbitMQ\Exceptions\MutexTimeout;
 use Salesmessage\LibRabbitMQ\Interfaces\RabbitMQBatchable;
 use Salesmessage\LibRabbitMQ\Mutex;
 use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
@@ -28,6 +30,8 @@ use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 abstract class AbstractVhostsConsumer extends Consumer
 {
     protected const MAIN_HANDLER_LOCK = 'vhost_handler';
+
+    protected const HEALTHCHECK_HANDLER_LOCK = 'healthcheck_vhost_handler';
 
     protected ?OutputStyle $output = null;
 
@@ -58,6 +62,12 @@ abstract class AbstractVhostsConsumer extends Consumer
     protected int $jobsProcessed = 0;
 
     protected bool $hadJobs = false;
+
+    protected ?int $stopStatusCode = null;
+
+    protected array $config = [];
+
+    protected bool $asyncMode = false;
 
     /**
      * @param InternalStorageManager $internalStorageManager
@@ -110,11 +120,29 @@ abstract class AbstractVhostsConsumer extends Consumer
         return $this;
     }
 
+    /**
+     * @param array $config
+     * @return $this
+     */
+    public function setConfig(array $config): self
+    {
+        $this->config = $config;
+        return $this;
+    }
+
+    /**
+     * @param bool $asyncMode
+     * @return $this
+     */
+    public function setAsyncMode(bool $asyncMode): self
+    {
+        $this->asyncMode = $asyncMode;
+        return $this;
+    }
+
     public function daemon($connectionName, $queue, WorkerOptions $options)
     {
         $this->goAheadOrWait();
-
-        $this->connectionMutex = new Mutex(false);
 
         $this->configConnectionName = (string) $connectionName;
         $this->workerOptions = $options;
@@ -123,6 +151,40 @@ abstract class AbstractVhostsConsumer extends Consumer
             $this->listenForSignals();
         }
 
+        if ($this->asyncMode) {
+            $this->logInfo('daemon.AsyncMode.On');
+
+            $coroutineContextHandler = function () use ($connectionName, $options) {
+                $this->logInfo('daemon.AsyncMode.Coroutines.Running');
+
+                // we can't move it outside since Mutex should be created within coroutine context
+                $this->connectionMutex = new Mutex(true);
+                $this->startHeartbeatCheck();
+                \go(function () use ($connectionName, $options) {
+                    $this->vhostDaemon($connectionName, $options);
+                });
+            };
+
+            if (extension_loaded('swoole')) {
+                $this->logInfo('daemon.AsyncMode.Swoole');
+
+                \Co\run($coroutineContextHandler);
+            } elseif (extension_loaded('openswoole')) {
+                $this->logInfo('daemon.AsyncMode.OpenSwoole');
+
+                \OpenSwoole\Runtime::enableCoroutine(true, \OpenSwoole\Runtime::HOOK_ALL);
+                \co::run($coroutineContextHandler);
+            } else {
+                throw new \Exception('Async mode is not supported. Check if Swoole extension is installed');
+            }
+
+            return;
+        }
+
+        $this->logInfo('daemon.AsyncMode.Off');
+
+        $this->connectionMutex = new Mutex(false);
+        $this->startHeartbeatCheck();
         $this->vhostDaemon($connectionName, $options);
     }
 
@@ -621,6 +683,64 @@ abstract class AbstractVhostsConsumer extends Consumer
         }
 
         return $connection;
+    }
+
+    /**
+     * @return void
+     */
+    protected function startHeartbeatCheck(): void
+    {
+        if (false === $this->asyncMode) {
+            return;
+        }
+
+        $heartbeatInterval = (int) ($this->config['options']['heartbeat'] ?? 0);
+        if (!$heartbeatInterval) {
+            return;
+        }
+
+        $heartbeatHandler = function () {
+            if ($this->shouldQuit || (null !== $this->stopStatusCode)) {
+                return;
+            }
+
+            try {
+                /** @var AMQPStreamConnection $connection */
+                $connection = $this->connection?->getConnection();
+                if ((null === $connection)
+                    || (false === $connection->isConnected())
+                    || $connection->isWriting()
+                    || $connection->isBlocked()
+                ) {
+                    return;
+                }
+
+                $this->connectionMutex->lock(static::HEALTHCHECK_HANDLER_LOCK, 3);
+                $connection->checkHeartBeat();
+            } catch (MutexTimeout) {
+            } catch (Throwable $exception) {
+                $this->logError('startHeartbeatCheck.exception', [
+                    'eroor' => $exception->getMessage(),
+                    'trace' => $e->getTraceAsString(),
+                ]);
+
+                $this->shouldQuit = true;
+            } finally {
+                $this->connectionMutex->unlock(static::HEALTHCHECK_HANDLER_LOCK);
+            }
+        };
+
+        \go(function () use ($heartbeatHandler, $heartbeatInterval) {
+            $this->logInfo('startHeartbeatCheck.started');
+
+            while (true) {
+                sleep($heartbeatInterval);
+                $heartbeatHandler();
+                if ($this->shouldQuit || !is_null($this->stopStatusCode)) {
+                    return;
+                }
+            }
+        });
     }
 
     /**
