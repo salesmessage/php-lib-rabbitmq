@@ -8,6 +8,7 @@ use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Queue\QueueManager;
 use Illuminate\Queue\WorkerOptions;
 use Illuminate\Support\Str;
+use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Connection\AMQPStreamConnection;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
 use PhpAmqpLib\Exception\AMQPConnectionClosedException;
@@ -651,6 +652,7 @@ abstract class AbstractVhostsConsumer extends Consumer
         );
 
         try {
+            /** @var AMQPChannel $channel */
             $channel = $connection->getChannel(true);
 
             $this->currentConnectionName = $connection->getConnectionName();
