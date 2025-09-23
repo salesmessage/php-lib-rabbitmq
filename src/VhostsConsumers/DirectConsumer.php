@@ -41,6 +41,9 @@ class DirectConsumer extends AbstractVhostsConsumer
             try {
                 $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
                 $amqpMessage = $this->channel->basic_get($this->currentQueueName);
+                if (null !== $amqpMessage) {
+                    $this->channel->basic_reject($amqpMessage->getDeliveryTag(), false);
+                }
                 $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
             } catch (AMQPProtocolChannelException|AMQPChannelClosedException $exception) {
                 $amqpMessage = null;
@@ -111,11 +114,6 @@ class DirectConsumer extends AbstractVhostsConsumer
         $this->processingStartedAt = microtime(true);
 
         $this->logInfo('startConsuming.init');
-
-        $arguments = [];
-        if ($this->maxPriority) {
-            $arguments['priority'] = ['I', $this->maxPriority];
-        }
 
         $this->jobsProcessed = 0;
 
