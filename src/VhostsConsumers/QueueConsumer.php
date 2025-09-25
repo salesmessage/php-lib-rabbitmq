@@ -20,11 +20,21 @@ class QueueConsumer extends AbstractVhostsConsumer
 {
     protected bool $hasJob = false;
 
+    /**
+     * @param $connectionName
+     * @param WorkerOptions $options
+     * @return int|void
+     * @throws \Salesmessage\LibRabbitMQ\Exceptions\MutexTimeout
+     * @throws \Throwable
+     */
     protected function vhostDaemon($connectionName, WorkerOptions $options)
     {
+        $this->logInfo('daemon.start');
+
         $lastRestart = $this->getTimestampOfLastQueueRestart();
 
-        [$startTime, $jobsProcessed] = [hrtime(true) / 1e9, 0];
+        $startTime = hrtime(true) / 1e9;
+        $this->totalJobsProcessed = 0;
 
         $connection = $this->startConsuming();
 
@@ -33,7 +43,7 @@ class QueueConsumer extends AbstractVhostsConsumer
             // if it is we will just pause this worker for a given amount of time and
             // make sure we do not need to kill this worker process off completely.
             if (! $this->daemonShouldRun($this->workerOptions, $this->configConnectionName, $this->currentQueueName)) {
-                $this->output->info('Consuming pause worker...');
+                $this->logInfo('daemon.consuming_pause_worker');
 
                 $this->pauseWorker($this->workerOptions, $lastRestart);
 
@@ -68,7 +78,9 @@ class QueueConsumer extends AbstractVhostsConsumer
 
             // If no job is got off the queue, we will need to sleep the worker.
             if (false === $this->hasJob) {
-                $this->output->info('Consuming sleep. No job...');
+                $this->logInfo('daemon.consuming_sleep_no_job', [
+                    'sleep_seconds' => $this->workerOptions->sleep,
+                ]);
 
                 $this->stopConsuming();
 
@@ -87,12 +99,12 @@ class QueueConsumer extends AbstractVhostsConsumer
                 $this->workerOptions,
                 $lastRestart,
                 $startTime,
-                $jobsProcessed,
+                $this->totalJobsProcessed,
                 $this->hasJob
             );
             if (! is_null($this->stopStatusCode)) {
-                $this->logInfo('consuming_stop', [
-                    'status' => $this->stopStatusCode,
+                $this->logWarning('daemon.consuming_stop', [
+                    'status_code' => $this->stopStatusCode,
                 ]);
 
                 return $this->stop($this->stopStatusCode, $this->workerOptions);
@@ -100,33 +112,6 @@ class QueueConsumer extends AbstractVhostsConsumer
 
             $this->hasJob = false;
         }
-    }
-
-    /**
-     * @param WorkerOptions $options
-     * @param $lastRestart
-     * @param $startTime
-     * @param $jobsProcessed
-     * @param $hasJob
-     * @return int|null
-     */
-    protected function getStopStatus(
-        WorkerOptions $options,
-        $lastRestart,
-        $startTime = 0,
-        $jobsProcessed = 0,
-        bool $hasJob = false
-    ): ?int
-    {
-        return match (true) {
-            $this->shouldQuit => static::EXIT_SUCCESS,
-            $this->memoryExceeded($options->memory) => static::EXIT_MEMORY_LIMIT,
-            $this->queueShouldRestart($lastRestart) => static::EXIT_SUCCESS,
-            $options->stopWhenEmpty && !$hasJob => static::EXIT_SUCCESS,
-            $options->maxTime && hrtime(true) / 1e9 - $startTime >= $options->maxTime => static::EXIT_SUCCESS,
-            $options->maxJobs && $jobsProcessed >= $options->maxJobs => static::EXIT_SUCCESS,
-            default => null
-        };
     }
 
     /**
@@ -164,6 +149,10 @@ class QueueConsumer extends AbstractVhostsConsumer
             }
 
             if ($this->workerOptions->rest > 0) {
+                $this->logInfo('startConsuming.rest', [
+                    'rest_seconds' => $this->workerOptions->rest,
+                ]);
+
                 $this->sleep($this->workerOptions->rest);
             }
         };
