@@ -60,6 +60,8 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     protected int|float $processingStartedAt = 0;
 
+    protected int $totalJobsProcessed = 0;
+
     protected int $jobsProcessed = 0;
 
     protected bool $hadJobs = false;
@@ -176,6 +178,8 @@ abstract class AbstractVhostsConsumer extends Consumer
                 \OpenSwoole\Runtime::enableCoroutine(true, \OpenSwoole\Runtime::HOOK_ALL);
                 \co::run($coroutineContextHandler);
             } else {
+                $this->logError('daemon.AsyncMode.IsNotSupported');
+
                 throw new \Exception('Async mode is not supported. Check if Swoole extension is installed');
             }
 
@@ -240,10 +244,11 @@ abstract class AbstractVhostsConsumer extends Consumer
         }
 
         $this->jobsProcessed++;
+        $this->totalJobsProcessed++;
 
         $this->logInfo('processAMQPMessage.message_consumed', [
             'processed_jobs_count' => $this->jobsProcessed,
-            'is_support_batching' => $isSupportBatching,
+            'is_support_batching' => $isSupportBatching ? 'Y' :'N',
         ]);
     }
 
@@ -410,6 +415,10 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function ackMessage(AMQPMessage $message, bool $multiple = false): void
     {
+        $this->logInfo('ackMessage.start', [
+            'multiple' => $multiple,
+        ]);
+
         try {
             $message->ack($multiple);
         } catch (Throwable $exception) {
@@ -432,6 +441,8 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function loadVhosts(): void
     {
+        $this->logInfo('loadVhosts.start');
+
         $group = $this->filtersDto->getGroup();
         $lastProcessedAtKey = $this->internalStorageManager->getLastProcessedAtKeyName($group);
 
@@ -478,6 +489,9 @@ abstract class AbstractVhostsConsumer extends Consumer
         }
 
         $this->currentQueueName = $nextQueue;
+
+        $this->logInfo('switchToNextVhost.success');
+
         return true;
     }
 
@@ -503,6 +517,8 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function loadVhostQueues(): void
     {
+        $this->logInfo('loadVhostQueues.start');
+
         $group = $this->filtersDto->getGroup();
         $lastProcessedAtKey = $this->internalStorageManager->getLastProcessedAtKeyName($group);
 
@@ -539,6 +555,9 @@ abstract class AbstractVhostsConsumer extends Consumer
         }
 
         $this->currentQueueName = $nextQueue;
+
+        $this->logInfo('switchToNextQueue.success');
+
         return true;
     }
 
@@ -567,20 +586,26 @@ abstract class AbstractVhostsConsumer extends Consumer
     {
         if (false === $this->goAhead()) {
             if (!$this->hadJobs) {
-                $this->output->warning(sprintf('No jobs during iteration. Wait %d seconds...', $waitSeconds));
+                $this->logWarning('goAheadOrWait.no_jobs_during_iteration', [
+                    'wait_seconds' => $waitSeconds,
+                ]);
+
                 $this->sleep($waitSeconds);
             }
 
             $this->loadVhosts();
             $this->hadJobs = false;
             if (empty($this->vhosts)) {
-                $this->output->warning(sprintf('No active vhosts. Wait %d seconds...', $waitSeconds));
+                $this->logWarning('goAheadOrWait.no_active_vhosts', [
+                    'wait_seconds' => $waitSeconds,
+                ]);
+
                 $this->sleep($waitSeconds);
 
                 return $this->goAheadOrWait($waitSeconds);
             }
 
-            $this->output->info('Starting from the first vhost...');
+            $this->logInfo('goAheadOrWait.starting_from_the_first_vhost');
             return $this->goAheadOrWait($waitSeconds);
         }
 
@@ -611,6 +636,8 @@ abstract class AbstractVhostsConsumer extends Consumer
         if ((null === $this->currentVhostName) || (null === $this->currentQueueName)) {
             return;
         }
+
+        $this->logInfo('updateLastProcessedAt.start');
 
         $group = $this->filtersDto->getGroup();
         $timestamp = time();
@@ -701,25 +728,42 @@ abstract class AbstractVhostsConsumer extends Consumer
             return;
         }
 
+        $this->logInfo('startHeartbeatCheck.start', [
+            'heartbeat_interval' => $heartbeatInterval,
+        ]);
+
         $heartbeatHandler = function () {
             if ($this->shouldQuit || (null !== $this->stopStatusCode)) {
+                $this->logWarning('startHeartbeatCheck.quit', [
+                    'should_quit' => $this->shouldQuit,
+                    'stop_status_code' => $this->stopStatusCode,
+                ]);
+
                 return;
             }
 
             try {
-                /** @var AMQPStreamConnection $connection */
+                /** @var AMQPStreamConnection|null $connection */
                 $connection = $this->connection?->getConnection();
                 if ((null === $connection)
                     || (false === $connection->isConnected())
                     || $connection->isWriting()
                     || $connection->isBlocked()
                 ) {
+                    $this->logWarning('startHeartbeatCheck.incorrect_connection', [
+                        'has_connection' => (null !== $connection) ? 'Y' : 'N',
+                        'is_connected' => $connection?->isConnected() ? 'Y' : 'N',
+                        'is_writing' => $connection->isWriting() ? 'Y' : 'N',
+                        'is_blocked' => $connection->isBlocked() ? 'Y' : 'N',
+                    ]);
+
                     return;
                 }
 
                 $this->connectionMutex->lock(static::HEALTHCHECK_HANDLER_LOCK, 3);
                 $connection->checkHeartBeat();
             } catch (MutexTimeout) {
+                $this->logWarning('startHeartbeatCheck.mutex_timeout');
             } catch (Throwable $exception) {
                 $this->logError('startHeartbeatCheck.exception', [
                     'eroor' => $exception->getMessage(),
@@ -739,6 +783,11 @@ abstract class AbstractVhostsConsumer extends Consumer
                 sleep($heartbeatInterval);
                 $heartbeatHandler();
                 if ($this->shouldQuit || !is_null($this->stopStatusCode)) {
+                    $this->logWarning('startHeartbeatCheck.go_quit', [
+                        'should_quit' => $this->shouldQuit,
+                        'stop_status_code' => $this->stopStatusCode,
+                    ]);
+
                     return;
                 }
             }
@@ -760,7 +809,17 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function logInfo(string $message, array $data = []): void
     {
-        $this->log($message, $data, false);
+        $this->log($message, $data, 'info');
+    }
+
+    /**
+     * @param string $message
+     * @param array $data
+     * @return void
+     */
+    protected function logWarning(string $message, array $data = []): void
+    {
+        $this->log($message, $data, 'warning');
     }
 
     /**
@@ -770,19 +829,23 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function logError(string $message, array $data = []): void
     {
-        $this->log($message, $data, true);
+        $this->log($message, $data, 'error');
     }
 
     /**
      * @param string $message
      * @param array $data
-     * @param bool $isError
+     * @param string $logType
      * @return void
      */
-    protected function log(string $message, array $data = [], bool $isError = false): void
+    protected function log(string $message, array $data = [], string $logType = 'info'): void
     {
-        $data['vhost_name'] = $this->currentVhostName;
-        $data['queue_name'] = $this->currentQueueName;
+        if (null !== $this->currentVhostName) {
+            $data['vhost_name'] = $this->currentVhostName;
+        }
+        if (null !== $this->currentQueueName) {
+            $data['queue_name'] = $this->currentQueueName;
+        }
 
         $outputMessage = $message;
         foreach ($data as $key => $value) {
@@ -791,15 +854,17 @@ abstract class AbstractVhostsConsumer extends Consumer
             }
             $outputMessage .= '. ' . ucfirst(str_replace('_', ' ', $key)) . ': ' . $value;
         }
-        if ($isError) {
-            $this->output->error($outputMessage);
-        } else {
-            $this->output->info($outputMessage);
-        }
+
+        match ($logType) {
+            'error' => $this->output->error($outputMessage),
+            'warning' => $this->output->warning($outputMessage),
+            default => $this->output->info($outputMessage)
+        };
 
         $processingData = [
             'uuid' => $this->processingUuid,
             'started_at' => $this->processingStartedAt,
+            'total_processed_jobs_count' => $this->totalJobsProcessed,
         ];
         if ($this->processingStartedAt) {
             $processingData['executive_time_seconds'] = microtime(true) - $this->processingStartedAt;
@@ -809,10 +874,11 @@ abstract class AbstractVhostsConsumer extends Consumer
         $logMessage = 'Salesmessage.LibRabbitMQ.VhostsConsumers.';
         $logMessage .= class_basename(static::class) . '.';
         $logMessage .= $message;
-        if ($isError) {
-            $this->logger->error($logMessage, $data);
-        } else {
-            $this->logger->info($logMessage, $data);
-        }
+
+        match ($logType) {
+            'error' => $this->logger->error($logMessage, $data),
+            'warning' => $this->logger->warning($logMessage, $data),
+            default => $this->logger->info($logMessage, $data)
+        };
     }
 }

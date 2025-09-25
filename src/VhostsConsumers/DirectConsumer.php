@@ -18,11 +18,21 @@ use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
 
 class DirectConsumer extends AbstractVhostsConsumer
 {
+    /**
+     * @param $connectionName
+     * @param WorkerOptions $options
+     * @return int
+     * @throws \Salesmessage\LibRabbitMQ\Exceptions\MutexTimeout
+     * @throws \Throwable
+     */
     protected function vhostDaemon($connectionName, WorkerOptions $options)
     {
+        $this->logInfo('daemon.start');
+
         $lastRestart = $this->getTimestampOfLastQueueRestart();
 
-        [$startTime, $jobsProcessed] = [hrtime(true) / 1e9, 0];
+        $startTime = hrtime(true) / 1e9;
+        $this->totalJobsProcessed = 0;
 
         $connection = $this->startConsuming();
 
@@ -31,7 +41,7 @@ class DirectConsumer extends AbstractVhostsConsumer
             // if it is we will just pause this worker for a given amount of time and
             // make sure we do not need to kill this worker process off completely.
             if (! $this->daemonShouldRun($this->workerOptions, $this->configConnectionName, $this->currentQueueName)) {
-                $this->output->info('Consuming pause worker...');
+                $this->logInfo('daemon.consuming_pause_worker');
 
                 $this->pauseWorker($this->workerOptions, $lastRestart);
 
@@ -75,7 +85,7 @@ class DirectConsumer extends AbstractVhostsConsumer
             }
 
             if (null === $amqpMessage) {
-                $this->output->info('Consuming sleep. No job...');
+                $this->logInfo('daemon.consuming_sleep_no_job');
 
                 $this->stopConsuming();
 
@@ -90,7 +100,7 @@ class DirectConsumer extends AbstractVhostsConsumer
             $this->processAmqpMessage($amqpMessage, $connection);
 
             if ($this->jobsProcessed >= $this->batchSize) {
-                $this->output->info('Consuming batch full...');
+                $this->logInfo('daemon.consuming_batch_full');
 
                 $this->stopConsuming();
 
@@ -100,6 +110,24 @@ class DirectConsumer extends AbstractVhostsConsumer
                 $connection = $this->startConsuming();
 
                 continue;
+            }
+
+            // Finally, we will check to see if we have exceeded our memory limits or if
+            // the queue should restart based on other indications. If so, we'll stop
+            // this worker and let whatever is "monitoring" it restart the process.
+            $this->stopStatusCode = $this->getStopStatus(
+                $this->workerOptions,
+                $lastRestart,
+                $startTime,
+                $this->totalJobsProcessed,
+                true
+            );
+            if (! is_null($this->stopStatusCode)) {
+                $this->logWarning('daemon.consuming_stop', [
+                    'status_code' => $this->stopStatusCode,
+                ]);
+
+                return $this->stop($this->stopStatusCode, $this->workerOptions);
             }
         }
     }
