@@ -51,9 +51,6 @@ class DirectConsumer extends AbstractVhostsConsumer
             try {
                 $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
                 $amqpMessage = $this->channel->basic_get($this->currentQueueName);
-                if (null !== $amqpMessage) {
-                    $this->channel->basic_reject($amqpMessage->getDeliveryTag(), false);
-                }
                 $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
             } catch (AMQPProtocolChannelException|AMQPChannelClosedException $exception) {
                 $amqpMessage = null;
