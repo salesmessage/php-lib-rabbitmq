@@ -70,7 +70,7 @@ class RabbitApiClient
             $contents = $response->getBody()->getContents();
 
             return (array) ($contents ? json_decode($contents, true) : []);
-        } catch (Throwable $exception) {
+        } catch (\Throwable $exception) {
             $rethrowException = $exception;
             if ($exception instanceof ClientException) {
                 $rethrowException = new RabbitApiClientException($exception->getMessage());

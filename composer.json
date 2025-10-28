@@ -43,7 +43,9 @@
         }
     },
     "suggest": {
-        "ext-pcntl": "Required to use all features of the queue consumer."
+        "ext-pcntl": "Required to use all features of the queue consumer.",
+        "ext-swoole": "Required to use async mode for healthcheck (alternative is ext-openswoole).",
+        "ext-openswoole": "Required to use async mode for healthcheck (alternative is ext-swoole)."
     },
     "scripts": {
         "test": [

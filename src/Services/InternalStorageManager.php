@@ -4,6 +4,7 @@ namespace Salesmessage\LibRabbitMQ\Services;
 
 use Illuminate\Redis\Connections\PredisConnection;
 use Illuminate\Support\Facades\Redis;
+use Illuminate\Support\Str;
 use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 
@@ -38,7 +39,7 @@ class InternalStorageManager
             'sort' => 'asc',
         ]);
 
-        return array_map(fn($value): string => str_replace_first(
+        return array_map(fn($value): string => Str::replaceFirst(
             $this->getVhostStorageKeyPrefix(),
             '',
             $value
@@ -61,7 +62,7 @@ class InternalStorageManager
             'sort' => 'asc',
         ]);
 
-        return array_map(fn($value): string => str_replace_first(
+        return array_map(fn($value): string => Str::replaceFirst(
             $this->getQueueStorageKeyPrefix($vhostName),
             '',
             $value

@@ -12,8 +12,6 @@ use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Connection\AMQPStreamConnection;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
 use PhpAmqpLib\Exception\AMQPConnectionClosedException;
-use PhpAmqpLib\Exception\AMQPProtocolChannelException;
-use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Message\AMQPMessage;
 use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Consumer;
@@ -54,6 +52,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     protected ?WorkerOptions $workerOptions = null;
 
+    /** @var array<class-string<RabbitMQBatchable>, array<AMQPMessage>> */
     protected array $batchMessages = [];
 
     protected ?string $processingUuid = null;
@@ -71,6 +70,8 @@ abstract class AbstractVhostsConsumer extends Consumer
     protected array $config = [];
 
     protected bool $asyncMode = false;
+
+    protected ?Mutex $connectionMutex = null;
 
     /**
      * @param InternalStorageManager $internalStorageManager
@@ -223,7 +224,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     /**
      * @return RabbitMQQueue
-     * @throws Exceptions\MutexTimeout
+     * @throws MutexTimeout
      */
     abstract protected function startConsuming(): RabbitMQQueue;
 
@@ -262,18 +263,23 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     /**
      * @param AMQPMessage $message
-     * @return string
+     * @return non-empty-string
      */
     protected function getMessageClass(AMQPMessage $message): string
     {
         $body = json_decode($message->getBody(), true);
 
-        return (string) ($body['data']['commandName'] ?? '');
+        $messageClass = (string) ($body['data']['commandName'] ?? '');
+        if (empty($messageClass)) {
+            throw new \RuntimeException('Message class is not defined');
+        }
+        return $messageClass;
     }
 
     /**
-     * @param RabbitMQJob $job
-     * @return void
+     * @param AMQPMessage $message
+     * @return bool
+     * @throws \ReflectionException
      */
     protected function isSupportBatching(AMQPMessage $message): bool
     {
@@ -296,8 +302,8 @@ abstract class AbstractVhostsConsumer extends Consumer
     /**
      * @param RabbitMQQueue $connection
      * @return void
-     * @throws Exceptions\MutexTimeout
-     * @throws Throwable
+     * @throws MutexTimeout
+     * @throws \Throwable
      */
     protected function processBatch(RabbitMQQueue $connection): void
     {
@@ -313,7 +319,6 @@ abstract class AbstractVhostsConsumer extends Consumer
                 $batchTimeStarted = microtime(true);
 
                 $batchData = [];
-                /** @var AMQPMessage $batchMessage */
                 foreach ($batchJobMessages as $batchMessage) {
                     $job = $this->getJobByMessage($batchMessage, $connection);
                     $batchData[] = $job->getPayloadData();
@@ -333,7 +338,7 @@ abstract class AbstractVhostsConsumer extends Consumer
                         'batch_size' => $batchSize,
                         'executive_batch_time_seconds' => microtime(true) - $batchTimeStarted,
                     ]);
-                } catch (Throwable $exception) {
+                } catch (\Throwable $exception) {
                     $isBatchSuccess = false;
 
                     $this->logError('processBatch.exception', [
@@ -348,16 +353,19 @@ abstract class AbstractVhostsConsumer extends Consumer
             }
 
             $this->connectionMutex->lock(static::MAIN_HANDLER_LOCK);
-            if ($isBatchSuccess) {
-                $lastBatchMessage = end($batchJobMessages);
-                $this->ackMessage($lastBatchMessage, true);
-            } else {
-                foreach ($batchJobMessages as $batchMessage) {
-                    $job = $this->getJobByMessage($batchMessage, $connection);
-                    $this->processSingleJob($job);
+            try {
+                if ($isBatchSuccess) {
+                    $lastBatchMessage = end($batchJobMessages);
+                    $this->ackMessage($lastBatchMessage, true);
+                } else {
+                    foreach ($batchJobMessages as $batchMessage) {
+                        $job = $this->getJobByMessage($batchMessage, $connection);
+                        $this->processSingleJob($job);
+                    }
                 }
+            } finally {
+                $this->connectionMutex->unlock(static::MAIN_HANDLER_LOCK);
             }
-            $this->connectionMutex->unlock(static::MAIN_HANDLER_LOCK);
         }
         $this->updateLastProcessedAt();
 
@@ -368,7 +376,7 @@ abstract class AbstractVhostsConsumer extends Consumer
      * @param AMQPMessage $message
      * @param RabbitMQQueue $connection
      * @return RabbitMQJob
-     * @throws Throwable
+     * @throws \Throwable
      */
     protected function getJobByMessage(AMQPMessage $message, RabbitMQQueue $connection): RabbitMQJob
     {
@@ -421,7 +429,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
         try {
             $message->ack($multiple);
-        } catch (Throwable $exception) {
+        } catch (\Throwable $exception) {
             $this->logError('ackMessage.exception', [
                 'message' => $exception->getMessage(),
                 'trace' => $exception->getTraceAsString(),
@@ -432,7 +440,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     /**
      * @return void
-     * @throws Exceptions\MutexTimeout
+     * @throws MutexTimeout
      */
     abstract protected function stopConsuming(): void;
 
@@ -631,7 +639,7 @@ abstract class AbstractVhostsConsumer extends Consumer
     /**
      * @return void
      */
-    protected function updateLastProcessedAt()
+    protected function updateLastProcessedAt(): void
     {
         if ((null === $this->currentVhostName) || (null === $this->currentQueueName)) {
             return;
@@ -690,7 +698,6 @@ abstract class AbstractVhostsConsumer extends Consumer
                 $this->prefetchCount,
                 false
             );
-            $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
 
             $this->channel = $channel;
             $this->connection = $connection;
@@ -709,6 +716,8 @@ abstract class AbstractVhostsConsumer extends Consumer
             $this->goAheadOrWait();
 
             return $this->initConnection();
+        } finally {
+            $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
         }
 
         return $connection;
@@ -725,6 +734,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
         $heartbeatInterval = (int) ($this->config['options']['heartbeat'] ?? 0);
         if (!$heartbeatInterval) {
+            $this->logWarning('startHeartbeatCheck.heartbeat_interval_is_not_set');
             return;
         }
 
@@ -764,10 +774,10 @@ abstract class AbstractVhostsConsumer extends Consumer
                 $connection->checkHeartBeat();
             } catch (MutexTimeout) {
                 $this->logWarning('startHeartbeatCheck.mutex_timeout');
-            } catch (Throwable $exception) {
+            } catch (\Throwable $exception) {
                 $this->logError('startHeartbeatCheck.exception', [
-                    'eroor' => $exception->getMessage(),
-                    'trace' => $e->getTraceAsString(),
+                    'error' => $exception->getMessage(),
+                    'trace' => $exception->getTraceAsString(),
                 ]);
 
                 $this->shouldQuit = true;

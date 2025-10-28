@@ -2,18 +2,10 @@
 
 namespace Salesmessage\LibRabbitMQ\VhostsConsumers;
 
-use Illuminate\Console\OutputStyle;
-use Illuminate\Contracts\Debug\ExceptionHandler;
-use Illuminate\Contracts\Events\Dispatcher;
-use Illuminate\Queue\QueueManager;
 use Illuminate\Queue\WorkerOptions;
-use Illuminate\Support\Str;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
-use PhpAmqpLib\Exception\AMQPConnectionClosedException;
 use PhpAmqpLib\Exception\AMQPProtocolChannelException;
 use PhpAmqpLib\Exception\AMQPRuntimeException;
-use PhpAmqpLib\Message\AMQPMessage;
-use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
 
 class DirectConsumer extends AbstractVhostsConsumer
@@ -22,7 +14,6 @@ class DirectConsumer extends AbstractVhostsConsumer
      * @param $connectionName
      * @param WorkerOptions $options
      * @return int
-     * @throws \Salesmessage\LibRabbitMQ\Exceptions\MutexTimeout
      * @throws \Throwable
      */
     protected function vhostDaemon($connectionName, WorkerOptions $options)
@@ -51,7 +42,6 @@ class DirectConsumer extends AbstractVhostsConsumer
             try {
                 $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
                 $amqpMessage = $this->channel->basic_get($this->currentQueueName);
-                $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
             } catch (AMQPProtocolChannelException|AMQPChannelClosedException $exception) {
                 $amqpMessage = null;
 
@@ -69,7 +59,7 @@ class DirectConsumer extends AbstractVhostsConsumer
                 $this->exceptions->report($exception);
 
                 $this->kill(self::EXIT_SUCCESS, $this->workerOptions);
-            } catch (Exception|Throwable $exception) {
+            } catch (\Throwable $exception) {
                 $this->logError('daemon.exception', [
                     'message' => $exception->getMessage(),
                     'trace' => $exception->getTraceAsString(),
@@ -79,9 +69,11 @@ class DirectConsumer extends AbstractVhostsConsumer
                 $this->exceptions->report($exception);
 
                 $this->stopWorkerIfLostConnection($exception);
+            } finally {
+                $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
             }
 
-            if (null === $amqpMessage) {
+            if (!isset($amqpMessage)) {
                 $this->logInfo('daemon.consuming_sleep_no_job');
 
                 $this->stopConsuming();
@@ -131,7 +123,6 @@ class DirectConsumer extends AbstractVhostsConsumer
 
     /**
      * @return RabbitMQQueue
-     * @throws Exceptions\MutexTimeout
      */
     protected function startConsuming(): RabbitMQQueue
     {
@@ -154,4 +145,3 @@ class DirectConsumer extends AbstractVhostsConsumer
         return;
     }
 }
-
