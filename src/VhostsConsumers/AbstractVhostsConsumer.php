@@ -25,6 +25,7 @@ use Salesmessage\LibRabbitMQ\Mutex;
 use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
+use Salesmessage\LibRabbitMQ\Services\Deduplication\DeduplicationService;
 
 abstract class AbstractVhostsConsumer extends Consumer
 {
@@ -81,6 +82,7 @@ abstract class AbstractVhostsConsumer extends Consumer
      * @param ExceptionHandler $exceptions
      * @param callable $isDownForMaintenance
      * @param callable|null $resetScope
+     * @param ?DeduplicationService $deduplicationService
      */
     public function __construct(
         protected InternalStorageManager $internalStorageManager,
@@ -89,7 +91,8 @@ abstract class AbstractVhostsConsumer extends Consumer
         Dispatcher $events,
         ExceptionHandler $exceptions,
         callable $isDownForMaintenance,
-        callable $resetScope = null
+        callable $resetScope = null,
+        protected ?DeduplicationService $deduplicationService = null,
     ) {
         parent::__construct($manager, $events, $exceptions, $isDownForMaintenance, $resetScope);
     }
@@ -240,6 +243,14 @@ abstract class AbstractVhostsConsumer extends Consumer
         if ($isSupportBatching) {
             $this->addMessageToBatch($message);
         } else {
+            if (!$this->deduplicationService?->add($message)) {
+                $this->ackMessage($message);
+                $this->logWarning('processAMQPMessage.message_already_processed', [
+                    'message_id' => $message->get('message_id'),
+                ]);
+                return;
+            }
+
             $job = $this->getJobByMessage($message, $connection);
             $this->processSingleJob($job);
         }
@@ -314,30 +325,43 @@ abstract class AbstractVhostsConsumer extends Consumer
         foreach ($this->batchMessages as $batchJobClass => $batchJobMessages) {
             $isBatchSuccess = false;
 
+            $uniqueMessagesForProcessing = [];
             $batchSize = count($batchJobMessages);
             if ($batchSize > 1) {
                 $batchTimeStarted = microtime(true);
 
                 $batchData = [];
                 foreach ($batchJobMessages as $batchMessage) {
+                    if (!$this->deduplicationService?->add($batchMessage)) {
+                        $this->ackMessage($batchMessage);
+                        $this->logWarning('processBatch.message_already_processed', [
+                            'message_id' => $batchMessage->get('message_id'),
+                        ]);
+                        continue;
+                    }
+
                     $job = $this->getJobByMessage($batchMessage, $connection);
                     $batchData[] = $job->getPayloadData();
+                    $uniqueMessagesForProcessing[] = $batchMessage;
                 }
 
-                $this->logInfo('processBatch.start', [
-                    'batch_job_class' => $batchJobClass,
-                    'batch_size' => $batchSize,
-                ]);
-
                 try {
-                    $batchJobClass::collection($batchData);
-                    $isBatchSuccess = true;
+                    if (!empty($batchData)) {
+                        $this->logInfo('processBatch.start', [
+                            'batch_job_class' => $batchJobClass,
+                            'batch_size' => $batchSize,
+                        ]);
 
-                    $this->logInfo('processBatch.finish', [
-                        'batch_job_class' => $batchJobClass,
-                        'batch_size' => $batchSize,
-                        'executive_batch_time_seconds' => microtime(true) - $batchTimeStarted,
-                    ]);
+                        $batchJobClass::collection($batchData);
+
+                        $this->logInfo('processBatch.finish', [
+                            'batch_job_class' => $batchJobClass,
+                            'batch_size' => $batchSize,
+                            'executive_batch_time_seconds' => microtime(true) - $batchTimeStarted,
+                        ]);
+                    }
+
+                    $isBatchSuccess = true;
                 } catch (\Throwable $exception) {
                     $isBatchSuccess = false;
 
@@ -355,10 +379,10 @@ abstract class AbstractVhostsConsumer extends Consumer
             $this->connectionMutex->lock(static::MAIN_HANDLER_LOCK);
             try {
                 if ($isBatchSuccess) {
-                    $lastBatchMessage = end($batchJobMessages);
+                    $lastBatchMessage = end($uniqueMessagesForProcessing);
                     $this->ackMessage($lastBatchMessage, true);
                 } else {
-                    foreach ($batchJobMessages as $batchMessage) {
+                    foreach ($uniqueMessagesForProcessing as $batchMessage) {
                         $job = $this->getJobByMessage($batchMessage, $connection);
                         $this->processSingleJob($job);
                     }

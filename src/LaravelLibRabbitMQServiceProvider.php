@@ -3,12 +3,6 @@
 namespace Salesmessage\LibRabbitMQ;
 
 use Illuminate\Contracts\Debug\ExceptionHandler;
-use Illuminate\Queue\Connectors\BeanstalkdConnector;
-use Illuminate\Queue\Connectors\DatabaseConnector;
-use Illuminate\Queue\Connectors\NullConnector;
-use Illuminate\Queue\Connectors\RedisConnector;
-use Illuminate\Queue\Connectors\SqsConnector;
-use Illuminate\Queue\Connectors\SyncConnector;
 use Illuminate\Queue\QueueManager;
 use Illuminate\Support\ServiceProvider;
 use Psr\Log\LoggerInterface;
@@ -16,10 +10,14 @@ use Salesmessage\LibRabbitMQ\Console\ConsumeCommand;
 use Salesmessage\LibRabbitMQ\Console\ConsumeVhostsCommand;
 use Salesmessage\LibRabbitMQ\Console\ScanVhostsCommand;
 use Salesmessage\LibRabbitMQ\Queue\Connectors\RabbitMQVhostsConnector;
+use Salesmessage\LibRabbitMQ\Services\Deduplication\DeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\GroupsService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Salesmessage\LibRabbitMQ\Services\QueueService;
 use Salesmessage\LibRabbitMQ\Services\VhostsService;
+use Salesmessage\LibRabbitMQ\Services\Deduplication\DeduplicationStore;
+use Salesmessage\LibRabbitMQ\Services\Deduplication\NullDeduplicationStore;
+use Salesmessage\LibRabbitMQ\Services\Deduplication\RedisDeduplicationStore;
 use Salesmessage\LibRabbitMQ\VhostsConsumers\DirectConsumer as VhostsDirectConsumer;
 use Salesmessage\LibRabbitMQ\VhostsConsumers\QueueConsumer as VhostsQueueConsumer;
 
@@ -36,6 +34,8 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
         );
 
         if ($this->app->runningInConsole()) {
+            $this->bindDeduplicationService();
+
             $this->app->singleton('rabbitmq.consumer', function () {
                 $isDownForMaintenance = function () {
                     return $this->app->isDownForMaintenance();
@@ -68,7 +68,8 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
                     $this->app['events'],
                     $this->app[ExceptionHandler::class],
                     $isDownForMaintenance,
-                    null
+                    null,
+                    $this->app->get(DeduplicationService::class)
                 );
             });
 
@@ -84,7 +85,8 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
                     $this->app['events'],
                     $this->app[ExceptionHandler::class],
                     $isDownForMaintenance,
-                    null
+                    null,
+                    $this->app->get(DeduplicationService::class)
                 );
             });
 
@@ -92,7 +94,7 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
                 $consumerClass = ('direct' === config('queue.connections.rabbitmq_vhosts.consumer_type'))
                     ? VhostsDirectConsumer::class
                     : VhostsQueueConsumer::class;
-                
+
                 return new ConsumeVhostsCommand(
                     $app[GroupsService::class],
                     $app[$consumerClass],
@@ -137,6 +139,37 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
 
         $queue->addConnector('rabbitmq_vhosts', function () {
             return new RabbitMQVhostsConnector($this->app['events']);
+        });
+    }
+
+    /**
+     * Config params:
+     * @phpstan-import-type DeduplicationConfig from DeduplicationService
+     *
+     * @return void
+     */
+    private function bindDeduplicationService(): void
+    {
+        $this->app->bind(DeduplicationStore::class, static function () {
+            /** @var DeduplicationConfig $config */
+            $config = (array) config('queue.connections.rabbitmq_vhosts.deduplication', []);
+            $enabled = (bool) ($config['enabled'] ?? false);
+            if (!$enabled) {
+                return new NullDeduplicationStore();
+            }
+
+            $connectionDriver = $config['connection']['driver'] ?? null;
+            if ($connectionDriver !== 'redis') {
+                throw new \InvalidArgumentException('For now only Redis connection is supported for deduplication');
+            }
+            $connectionName = $config['connection']['name'] ?? null;
+
+            $prefix = trim($config['connection']['key_prefix'] ?? '');
+            if (empty($prefix)) {
+                throw new \InvalidArgumentException('Key prefix is required');
+            }
+
+            return new RedisDeduplicationStore($connectionName, $prefix);
         });
     }
 }

@@ -11,6 +11,7 @@ use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Message\AMQPMessage;
 use Throwable;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
+use Salesmessage\LibRabbitMQ\Services\Deduplication\DeduplicationService;
 
 class Consumer extends Worker
 {
@@ -106,6 +107,12 @@ class Consumer extends Worker
             false,
             false,
             function (AMQPMessage $message) use ($connection, $options, $connectionName, $queue, $jobClass, &$jobsProcessed): void {
+                /** @var DeduplicationService $dedupService */
+                $dedupService = $this->container->make(DeduplicationService::class);
+                if (!$dedupService->add($message)) {
+                    return;
+                }
+
                 $job = new $jobClass(
                     $this->container,
                     $connection,

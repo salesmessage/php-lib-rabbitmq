@@ -25,6 +25,17 @@ return [
     'options' => [
     ],
 
+    'deduplication' => [
+        'enabled' => env('RABBITMQ_DEDUPLICATION_ENABLED', false),
+        'skip_for_dlq' => env('RABBITMQ_DEDUPLICATION_SKIP_FOR_DLQ', true),
+        'ttl' => env('RABBITMQ_DEDUPLICATION_TTL', 7200),
+        'connection' => [
+            'driver' => env('RABBITMQ_DEDUPLICATION_DRIVER', 'redis'),
+            'name' => env('RABBITMQ_DEDUPLICATION_CONNECTION_NAME', 'persistent'),
+            'key_prefix' => env('RABBITMQ_DEDUPLICATION_KEY_PREFIX', 'mq_dedup'),
+        ],
+    ],
+
     /*
      * Set to "horizon" if you wish to use Laravel Horizon.
      */
