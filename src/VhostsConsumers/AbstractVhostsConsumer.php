@@ -243,6 +243,8 @@ abstract class AbstractVhostsConsumer extends Consumer
         if ($isSupportBatching) {
             $this->addMessageToBatch($message);
         } else {
+            $job = $this->getJobByMessage($message, $connection);
+
             if (!$this->deduplicationService?->add($message)) {
                 $this->ackMessage($message);
                 $this->logWarning('processAMQPMessage.message_already_processed', [
@@ -251,7 +253,6 @@ abstract class AbstractVhostsConsumer extends Consumer
                 return;
             }
 
-            $job = $this->getJobByMessage($message, $connection);
             $this->processSingleJob($job);
         }
 
@@ -332,17 +333,27 @@ abstract class AbstractVhostsConsumer extends Consumer
 
                 $batchData = [];
                 foreach ($batchJobMessages as $batchMessage) {
-                    if (!$this->deduplicationService?->add($batchMessage)) {
-                        $this->ackMessage($batchMessage);
-                        $this->logWarning('processBatch.message_already_processed', [
-                            'message_id' => $batchMessage->get('message_id'),
-                        ]);
-                        continue;
-                    }
+                    try {
+                        if (!$this->deduplicationService?->add($batchMessage)) {
+                            $this->ackMessage($batchMessage);
+                            $this->logWarning('processBatch.message_already_processed', [
+                                'message_id' => $batchMessage->get('message_id'),
+                            ]);
+                            continue;
+                        }
 
-                    $job = $this->getJobByMessage($batchMessage, $connection);
-                    $batchData[] = $job->getPayloadData();
-                    $uniqueMessagesForProcessing[] = $batchMessage;
+                        $job = $this->getJobByMessage($batchMessage, $connection);
+                        $uniqueMessagesForProcessing[] = $batchMessage;
+                        $batchData[] = $job->getPayloadData();
+
+                    } catch (\Throwable $exception) {
+                        $this->deduplicationService->release($batchMessage);
+                        $this->logError('processBatch.message_processing_exception', [
+                            'released_message_id' => $batchMessage->get('message_id'),
+                        ]);
+
+                        throw $exception;
+                    }
                 }
 
                 try {

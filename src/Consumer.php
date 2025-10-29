@@ -107,12 +107,6 @@ class Consumer extends Worker
             false,
             false,
             function (AMQPMessage $message) use ($connection, $options, $connectionName, $queue, $jobClass, &$jobsProcessed): void {
-                /** @var DeduplicationService $dedupService */
-                $dedupService = $this->container->make(DeduplicationService::class);
-                if (!$dedupService->add($message)) {
-                    return;
-                }
-
                 $job = new $jobClass(
                     $this->container,
                     $connection,
@@ -129,7 +123,11 @@ class Consumer extends Worker
 
                 $jobsProcessed++;
 
-                $this->runJob($job, $connectionName, $options);
+                /** @var DeduplicationService $dedupService */
+                $dedupService = $this->container->make(DeduplicationService::class);
+                if ($dedupService->add($message)) {
+                    $this->runJob($job, $connectionName, $options);
+                }
 
                 if ($this->supportsAsyncSignals()) {
                     $this->resetTimeoutHandler();
