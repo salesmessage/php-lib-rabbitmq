@@ -9,7 +9,7 @@ class NullDeduplicationStore implements DeduplicationStore
         return null;
     }
 
-    public function add(string $messageKey, mixed $value, int $ttlSeconds): bool
+    public function set(string $messageKey, mixed $value, int $ttlSeconds, bool $withOverride = false): bool
     {
         return true;
     }

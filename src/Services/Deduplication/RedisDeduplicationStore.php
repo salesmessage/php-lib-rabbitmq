@@ -18,15 +18,19 @@ class RedisDeduplicationStore implements DeduplicationStore
         return $this->connection()->get($key);
     }
 
-    public function add(string $messageKey, mixed $value, int $ttlSeconds): bool
+    public function set(string $messageKey, mixed $value, int $ttlSeconds, bool $withOverride = false): bool
     {
         if ($ttlSeconds <= 0 || $ttlSeconds > 7 * 24 * 60 * 60) {
             throw new \InvalidArgumentException('Invalid TTL seconds');
         }
 
         $key = $this->getKey($messageKey);
+        $args = [$key, $value, 'EX', $ttlSeconds];
+        if (!$withOverride) {
+            $args[] = 'NX';
+        }
 
-        return (bool) $this->connection()->set($key, $value, 'EX', $ttlSeconds, 'NX');
+        return (bool) $this->connection()->set(...$args);
     }
 
     public function release(string $messageKey): void

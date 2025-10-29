@@ -129,10 +129,17 @@ class Consumer extends Worker
                 if ($messageState === DeduplicationService::IN_PROGRESS) {
                     $message->reject(true);
 
-                } elseif ($messageState === null) {
-                    $dedupService->markAsInProgress($message);
-                    $this->runJob($job, $connectionName, $options);
-                    $dedupService->markAsProcessed($message);
+                } elseif ($messageState === DeduplicationService::PROCESSED) {
+                    $message->ack();
+
+                } else {
+                    $hasPutAsInProgress = $dedupService->markAsInProgress($message);
+                    if ($hasPutAsInProgress !== false) {
+                        $this->runJob($job, $connectionName, $options);
+                        $dedupService->markAsProcessed($message);
+                    } else {
+                        $message->reject(true);
+                    }
                 }
 
                 if ($this->supportsAsyncSignals()) {

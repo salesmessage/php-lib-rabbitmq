@@ -52,7 +52,12 @@ class DeduplicationService
 
     public function markAsInProgress(AMQPMessage $message): bool
     {
-        return $this->add($message, self::IN_PROGRESS, (int) ($this->getConfig('lock_ttl') ?: self::DEFAULT_LOCK_TTL));
+        $ttl = (int) ($this->getConfig('lock_ttl') ?: self::DEFAULT_LOCK_TTL);
+        if ($ttl <= 0 || $ttl > 300) {
+            throw new \InvalidArgumentException('Invalid TTL seconds. Should be between 1 and 300');
+        }
+
+        return $this->add($message, self::IN_PROGRESS, $ttl);
     }
 
     public function markAsProcessed(AMQPMessage $message): bool
@@ -94,7 +99,7 @@ class DeduplicationService
             return true;
         }
 
-        return $this->store->add($messageId, $value, $ttl);
+        return $this->store->set($messageId, $value, $ttl, $value === self::PROCESSED);
     }
 
     protected function getMessageId(AMQPMessage $message): ?string
@@ -107,7 +112,7 @@ class DeduplicationService
 
         if (DlqDetector::isDlqMessage($message)) {
             if ($this->getConfig('skip_for_dlq', false)) {
-                return true;
+                return null;
             }
 
             $messageId = 'dlq:' . $messageId;

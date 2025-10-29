@@ -343,6 +343,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
                         $hasPutAsInProgress = $this->deduplicationService?->markAsInProgress($batchMessage);
                         if ($hasPutAsInProgress === false) {
+                            $batchMessage->reject(true);
                             $this->logWarning('processBatch.message_already_in_progress.skip', [
                                 'message_id' => $batchMessage->get('message_id'),
                             ]);
@@ -468,11 +469,14 @@ abstract class AbstractVhostsConsumer extends Consumer
         } else {
             $isPutAsInProgress = $this->deduplicationService?->markAsInProgress($message);
             if ($isPutAsInProgress === false) {
+                $message->reject(true);
                 $this->logWarning('processSingleJob.message_already_in_progress.skip', [
                     'message_id' => $message->get('message_id'),
                 ]);
+
             } else {
                 $this->runJob($job, $this->currentConnectionName, $this->workerOptions);
+                $this->deduplicationService?->markAsProcessed($message);
             }
         }
 

@@ -6,7 +6,7 @@ interface DeduplicationStore
 {
     public function get(string $messageKey): mixed;
 
-    public function add(string $messageKey, mixed $value, int $ttlSeconds): bool;
+    public function set(string $messageKey, mixed $value, int $ttlSeconds, bool $withOverride = false): bool;
 
     public function release(string $messageKey): void;
 }
