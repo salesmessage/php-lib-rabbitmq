@@ -244,16 +244,7 @@ abstract class AbstractVhostsConsumer extends Consumer
             $this->addMessageToBatch($message);
         } else {
             $job = $this->getJobByMessage($message, $connection);
-
-            if (!$this->deduplicationService?->add($message)) {
-                $this->ackMessage($message);
-                $this->logWarning('processAMQPMessage.message_already_processed', [
-                    'message_id' => $message->get('message_id'),
-                ]);
-                return;
-            }
-
-            $this->processSingleJob($job);
+            $this->processSingleJob($job, $message);
         }
 
         $this->jobsProcessed++;
@@ -333,8 +324,16 @@ abstract class AbstractVhostsConsumer extends Consumer
 
                 $batchData = [];
                 foreach ($batchJobMessages as $batchMessage) {
+                    $messageState = $this->deduplicationService?->getState($batchMessage);
                     try {
-                        if (!$this->deduplicationService?->add($batchMessage)) {
+                        if ($messageState === DeduplicationService::IN_PROGRESS) {
+                            $batchMessage->reject(true);
+                            $this->logWarning('processBatch.message_already_in_progress.requeue', [
+                                'message_id' => $batchMessage->get('message_id'),
+                            ]);
+                            continue;
+                        }
+                        if ($messageState === DeduplicationService::PROCESSED) {
                             $this->ackMessage($batchMessage);
                             $this->logWarning('processBatch.message_already_processed', [
                                 'message_id' => $batchMessage->get('message_id'),
@@ -342,12 +341,22 @@ abstract class AbstractVhostsConsumer extends Consumer
                             continue;
                         }
 
-                        $job = $this->getJobByMessage($batchMessage, $connection);
-                        $uniqueMessagesForProcessing[] = $batchMessage;
-                        $batchData[] = $job->getPayloadData();
+                        $hasPutAsInProgress = $this->deduplicationService?->markAsInProgress($batchMessage);
+                        if ($hasPutAsInProgress === false) {
+                            $this->logWarning('processBatch.message_already_in_progress.skip', [
+                                'message_id' => $batchMessage->get('message_id'),
+                            ]);
+                        } else {
+                            $job = $this->getJobByMessage($batchMessage, $connection);
+                            $uniqueMessagesForProcessing[] = $batchMessage;
+                            $batchData[] = $job->getPayloadData();
+                        }
 
                     } catch (\Throwable $exception) {
-                        $this->deduplicationService->release($batchMessage);
+                        if ($messageState === null) {
+                            $this->deduplicationService?->release($batchMessage);
+                        }
+
                         $this->logError('processBatch.message_processing_exception', [
                             'released_message_id' => $batchMessage->get('message_id'),
                         ]);
@@ -374,6 +383,10 @@ abstract class AbstractVhostsConsumer extends Consumer
 
                     $isBatchSuccess = true;
                 } catch (\Throwable $exception) {
+                    foreach ($uniqueMessagesForProcessing as $batchMessage) {
+                        $this->deduplicationService?->release($batchMessage);
+                    }
+
                     $isBatchSuccess = false;
 
                     $this->logError('processBatch.exception', [
@@ -390,12 +403,16 @@ abstract class AbstractVhostsConsumer extends Consumer
             $this->connectionMutex->lock(static::MAIN_HANDLER_LOCK);
             try {
                 if ($isBatchSuccess) {
+                    foreach ($uniqueMessagesForProcessing as $batchMessage) {
+                        $this->deduplicationService?->markAsProcessed($batchMessage);
+                    }
+
                     $lastBatchMessage = end($uniqueMessagesForProcessing);
                     $this->ackMessage($lastBatchMessage, true);
                 } else {
                     foreach ($uniqueMessagesForProcessing as $batchMessage) {
                         $job = $this->getJobByMessage($batchMessage, $connection);
-                        $this->processSingleJob($job);
+                        $this->processSingleJob($job, $batchMessage);
                     }
                 }
             } finally {
@@ -426,11 +443,7 @@ abstract class AbstractVhostsConsumer extends Consumer
         );
     }
 
-    /**
-     * @param RabbitMQJob $job
-     * @return void
-     */
-    protected function processSingleJob(RabbitMQJob $job): void
+    protected function processSingleJob(RabbitMQJob $job, AMQPMessage $message): void
     {
         $timeStarted = microtime(true);
         $this->logInfo('processSingleJob.start');
@@ -439,7 +452,30 @@ abstract class AbstractVhostsConsumer extends Consumer
             $this->registerTimeoutHandler($job, $this->workerOptions);
         }
 
-        $this->runJob($job, $this->currentConnectionName, $this->workerOptions);
+        $messageState = $this->deduplicationService?->getState($message);
+        if ($messageState === DeduplicationService::IN_PROGRESS) {
+            $message->reject(true);
+            $this->logWarning('processSingleJob.message_already_in_progress.requeue', [
+                'message_id' => $message->get('message_id'),
+            ]);
+
+        } elseif ($messageState === DeduplicationService::PROCESSED) {
+            $this->logWarning('processSingleJob.message_already_processed', [
+                'message_id' => $message->get('message_id'),
+            ]);
+            $this->ackMessage($message);
+
+        } else {
+            $isPutAsInProgress = $this->deduplicationService?->markAsInProgress($message);
+            if ($isPutAsInProgress === false) {
+                $this->logWarning('processSingleJob.message_already_in_progress.skip', [
+                    'message_id' => $message->get('message_id'),
+                ]);
+            } else {
+                $this->runJob($job, $this->currentConnectionName, $this->workerOptions);
+            }
+        }
+
         $this->updateLastProcessedAt();
 
         if ($this->supportsAsyncSignals()) {

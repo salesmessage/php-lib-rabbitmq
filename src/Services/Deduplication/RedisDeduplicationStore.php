@@ -12,7 +12,13 @@ class RedisDeduplicationStore implements DeduplicationStore
         protected string $keyPrefix = 'mq_dedup',
     ) {}
 
-    public function add(string $messageKey, int $ttlSeconds): bool
+    public function get(string $messageKey): mixed
+    {
+        $key = $this->getKey($messageKey);
+        return $this->connection()->get($key);
+    }
+
+    public function add(string $messageKey, mixed $value, int $ttlSeconds): bool
     {
         if ($ttlSeconds <= 0 || $ttlSeconds > 7 * 24 * 60 * 60) {
             throw new \InvalidArgumentException('Invalid TTL seconds');
@@ -20,7 +26,7 @@ class RedisDeduplicationStore implements DeduplicationStore
 
         $key = $this->getKey($messageKey);
 
-        return (bool) $this->connection()->set($key, 1, 'EX', $ttlSeconds, 'NX');
+        return (bool) $this->connection()->set($key, $value, 'EX', $ttlSeconds, 'NX');
     }
 
     public function release(string $messageKey): void
