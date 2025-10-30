@@ -31,6 +31,9 @@ class DeduplicationService
     private const DEFAULT_LOCK_TTL = 60;
     private const DEFAULT_TTL = 7200;
 
+    private const MAX_LOCK_TTL = 300;
+    private const MAX_TTL = 7 * 24 * 60 * 60;
+
     public function __construct(private DeduplicationStore $store) {}
 
     /**
@@ -53,8 +56,8 @@ class DeduplicationService
     public function markAsInProgress(AMQPMessage $message, ?string $queueName = null): bool
     {
         $ttl = (int) ($this->getConfig('lock_ttl') ?: self::DEFAULT_LOCK_TTL);
-        if ($ttl <= 0 || $ttl > 300) {
-            throw new \InvalidArgumentException('Invalid TTL seconds. Should be between 1 and 300');
+        if ($ttl <= 0 || $ttl > self::MAX_LOCK_TTL) {
+            throw new \InvalidArgumentException(sprintf('Invalid TTL seconds. Should be between 1 and %d', self::MAX_LOCK_TTL));
         }
 
         return $this->add($message, self::IN_PROGRESS, $ttl, $queueName);
@@ -62,7 +65,12 @@ class DeduplicationService
 
     public function markAsProcessed(AMQPMessage $message, ?string $queueName = null): bool
     {
-        return $this->add($message, self::PROCESSED, (int) ($this->getConfig('ttl') ?: self::DEFAULT_TTL), $queueName);
+        $ttl = (int) ($this->getConfig('ttl') ?: self::DEFAULT_TTL);
+        if ($ttl <= 0 || $ttl > self::MAX_TTL) {
+            throw new \InvalidArgumentException(sprintf('Invalid TTL seconds. Should be between 1 sec and %d sec', self::MAX_TTL));
+        }
+
+        return $this->add($message, self::PROCESSED, $ttl, $queueName);
     }
 
     public function release(AMQPMessage $message, ?string $queueName = null): void

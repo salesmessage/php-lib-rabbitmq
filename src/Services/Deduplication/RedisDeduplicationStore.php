@@ -20,8 +20,8 @@ class RedisDeduplicationStore implements DeduplicationStore
 
     public function set(string $messageKey, mixed $value, int $ttlSeconds, bool $withOverride = false): bool
     {
-        if ($ttlSeconds <= 0 || $ttlSeconds > 7 * 24 * 60 * 60) {
-            throw new \InvalidArgumentException('Invalid TTL seconds');
+        if ($ttlSeconds <= 0) {
+            throw new \InvalidArgumentException('Invalid TTL seconds. Should be greater than 0.');
         }
 
         $key = $this->getKey($messageKey);
