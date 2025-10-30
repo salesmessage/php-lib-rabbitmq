@@ -663,7 +663,18 @@ if not all the issues with the following command:
 composer fix:style
 ```
 
-## Contribution
-
-You can contribute to this package by discovering bugs and opening issues. Please, add to which version of package you
-create pull request or issue. (e.g. [5.2] Fatal error on delayed job)
+## Local Setup
+- Configure all config items in `config/queue.php` section `connections.rabbitmq_vhosts` (see as example [rabbitmq.php](./config/rabbitmq.php))
+- Create `yml` file in the project root with name `rabbit-groups.yml` and content, for example like this (you can replace `vhosts` and `queues` with `vhosts_mask` and `queues_mask`):
+```yaml
+groups:
+  test-notes:
+    vhosts:
+      - organization_200005
+    queues:
+      - local-myname.notes.200005
+    batch_size: 3
+    prefetch_count: 3
+```
+- Run command `php artisan lib-rabbitmq:scan-vhosts` within your project where this library is installed (this command fetches data from RabbitMQ to Redis)
+- Run command for consumer `php artisan lib-rabbitmq:consume-vhosts test-notes rabbitmq_vhosts --name=mq-vhost-test-local-notes --memory=300 --timeout=0 --max-jobs=1000 --max-time=600 --async-mode=1`
