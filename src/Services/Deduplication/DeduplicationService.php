@@ -8,7 +8,6 @@ use Salesmessage\LibRabbitMQ\Services\DlqDetector;
 /**
  * @phpstan-type DeduplicationConfig array{
  *     enabled: bool,
- *     skip_for_dlq: bool,
  *     ttl: int,
  *     lock_ttl: int,
  *     connection: array{
@@ -119,10 +118,6 @@ class DeduplicationService
         }
 
         if (DlqDetector::isDlqMessage($message)) {
-            if ($this->getConfig('skip_for_dlq', false)) {
-                return null;
-            }
-
             $messageId = 'dlq:' . $messageId;
         }
 

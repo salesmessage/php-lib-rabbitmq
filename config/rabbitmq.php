@@ -27,7 +27,6 @@ return [
 
     'deduplication' => [
         'enabled' => env('RABBITMQ_DEDUPLICATION_ENABLED', false),
-        'skip_for_dlq' => env('RABBITMQ_DEDUPLICATION_SKIP_FOR_DLQ', true),
         'ttl' => env('RABBITMQ_DEDUPLICATION_TTL', 7200),
         'lock_ttl' => env('RABBITMQ_DEDUPLICATION_LOCK_TTL', 60),
         'connection' => [
