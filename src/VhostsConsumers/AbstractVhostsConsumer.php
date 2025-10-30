@@ -324,7 +324,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
                 $batchData = [];
                 foreach ($batchJobMessages as $batchMessage) {
-                    $messageState = $this->deduplicationService?->getState($batchMessage);
+                    $messageState = $this->deduplicationService?->getState($batchMessage, $this->currentQueueName);
                     try {
                         if ($messageState === DeduplicationService::IN_PROGRESS) {
                             $batchMessage->reject(true);
@@ -341,7 +341,7 @@ abstract class AbstractVhostsConsumer extends Consumer
                             continue;
                         }
 
-                        $hasPutAsInProgress = $this->deduplicationService?->markAsInProgress($batchMessage);
+                        $hasPutAsInProgress = $this->deduplicationService?->markAsInProgress($batchMessage, $this->currentQueueName);
                         if ($hasPutAsInProgress === false) {
                             $batchMessage->reject(true);
                             $this->logWarning('processBatch.message_already_in_progress.skip', [
@@ -355,7 +355,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
                     } catch (\Throwable $exception) {
                         if ($messageState === null) {
-                            $this->deduplicationService?->release($batchMessage);
+                            $this->deduplicationService?->release($batchMessage, $this->currentQueueName);
                         }
 
                         $this->logError('processBatch.message_processing_exception', [
@@ -385,7 +385,7 @@ abstract class AbstractVhostsConsumer extends Consumer
                     $isBatchSuccess = true;
                 } catch (\Throwable $exception) {
                     foreach ($uniqueMessagesForProcessing as $batchMessage) {
-                        $this->deduplicationService?->release($batchMessage);
+                        $this->deduplicationService?->release($batchMessage, $this->currentQueueName);
                     }
 
                     $isBatchSuccess = false;
@@ -405,7 +405,7 @@ abstract class AbstractVhostsConsumer extends Consumer
             try {
                 if ($isBatchSuccess) {
                     foreach ($uniqueMessagesForProcessing as $batchMessage) {
-                        $this->deduplicationService?->markAsProcessed($batchMessage);
+                        $this->deduplicationService?->markAsProcessed($batchMessage, $this->currentQueueName);
                     }
 
                     $lastBatchMessage = end($uniqueMessagesForProcessing);
@@ -453,7 +453,7 @@ abstract class AbstractVhostsConsumer extends Consumer
             $this->registerTimeoutHandler($job, $this->workerOptions);
         }
 
-        $messageState = $this->deduplicationService?->getState($message);
+        $messageState = $this->deduplicationService?->getState($message, $this->currentQueueName);
         if ($messageState === DeduplicationService::IN_PROGRESS) {
             $message->reject(true);
             $this->logWarning('processSingleJob.message_already_in_progress.requeue', [
@@ -467,7 +467,7 @@ abstract class AbstractVhostsConsumer extends Consumer
             $this->ackMessage($message);
 
         } else {
-            $isPutAsInProgress = $this->deduplicationService?->markAsInProgress($message);
+            $isPutAsInProgress = $this->deduplicationService?->markAsInProgress($message, $this->currentQueueName);
             if ($isPutAsInProgress === false) {
                 $message->reject(true);
                 $this->logWarning('processSingleJob.message_already_in_progress.skip', [
@@ -476,7 +476,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
             } else {
                 $this->runJob($job, $this->currentConnectionName, $this->workerOptions);
-                $this->deduplicationService?->markAsProcessed($message);
+                $this->deduplicationService?->markAsProcessed($message, $this->currentQueueName);
             }
         }
 

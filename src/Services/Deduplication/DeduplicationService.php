@@ -37,12 +37,12 @@ class DeduplicationService
      * @param AMQPMessage $message
      * @return string|null - @enum {self::IN_PROGRESS, self::PROCESSED}
      */
-    public function getState(AMQPMessage $message): ?string
+    public function getState(AMQPMessage $message, ?string $queueName = null): ?string
     {
         if (!$this->isEnabled()) {
             return null;
         }
-        $messageId = $this->getMessageId($message);
+        $messageId = $this->getMessageId($message, $queueName);
         if ($messageId === null) {
             return null;
         }
@@ -50,28 +50,28 @@ class DeduplicationService
         return $this->store->get($messageId);
     }
 
-    public function markAsInProgress(AMQPMessage $message): bool
+    public function markAsInProgress(AMQPMessage $message, ?string $queueName = null): bool
     {
         $ttl = (int) ($this->getConfig('lock_ttl') ?: self::DEFAULT_LOCK_TTL);
         if ($ttl <= 0 || $ttl > 300) {
             throw new \InvalidArgumentException('Invalid TTL seconds. Should be between 1 and 300');
         }
 
-        return $this->add($message, self::IN_PROGRESS, $ttl);
+        return $this->add($message, self::IN_PROGRESS, $ttl, $queueName);
     }
 
-    public function markAsProcessed(AMQPMessage $message): bool
+    public function markAsProcessed(AMQPMessage $message, ?string $queueName = null): bool
     {
-        return $this->add($message, self::PROCESSED, (int) ($this->getConfig('ttl') ?: self::DEFAULT_TTL));
+        return $this->add($message, self::PROCESSED, (int) ($this->getConfig('ttl') ?: self::DEFAULT_TTL), $queueName);
     }
 
-    public function release(AMQPMessage $message): void
+    public function release(AMQPMessage $message, ?string $queueName = null): void
     {
         if (!$this->isEnabled()) {
             return;
         }
 
-        $messageId = $this->getMessageId($message);
+        $messageId = $this->getMessageId($message, $queueName);
         if ($messageId === null) {
             return;
         }
@@ -88,13 +88,13 @@ class DeduplicationService
      * @param int $ttl
      * @return bool
      */
-    protected function add(AMQPMessage $message, string $value, int $ttl): bool
+    protected function add(AMQPMessage $message, string $value, int $ttl, ?string $queueName = null): bool
     {
         if (!$this->isEnabled()) {
             return true;
         }
 
-        $messageId = $this->getMessageId($message);
+        $messageId = $this->getMessageId($message, $queueName);
         if ($messageId === null) {
             return true;
         }
@@ -102,7 +102,7 @@ class DeduplicationService
         return $this->store->set($messageId, $value, $ttl, $value === self::PROCESSED);
     }
 
-    protected function getMessageId(AMQPMessage $message): ?string
+    protected function getMessageId(AMQPMessage $message, ?string $queueName = null): ?string
     {
         $props = $message->get_properties();
         $messageId = $props['message_id'] ?? null;
@@ -116,6 +116,10 @@ class DeduplicationService
             }
 
             $messageId = 'dlq:' . $messageId;
+        }
+
+        if (is_string($queueName) && $queueName !== '') {
+            $messageId = $queueName . ':' . $messageId;
         }
 
         return $messageId;

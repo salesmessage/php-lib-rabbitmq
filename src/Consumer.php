@@ -125,7 +125,7 @@ class Consumer extends Worker
 
                 /** @var DeduplicationService $dedupService */
                 $dedupService = $this->container->make(DeduplicationService::class);
-                $messageState = $dedupService->getState($message);
+                $messageState = $dedupService->getState($message, $queue);
                 if ($messageState === DeduplicationService::IN_PROGRESS) {
                     $message->reject(true);
 
@@ -133,10 +133,10 @@ class Consumer extends Worker
                     $message->ack();
 
                 } else {
-                    $hasPutAsInProgress = $dedupService->markAsInProgress($message);
+                    $hasPutAsInProgress = $dedupService->markAsInProgress($message, $queue);
                     if ($hasPutAsInProgress !== false) {
                         $this->runJob($job, $connectionName, $options);
-                        $dedupService->markAsProcessed($message);
+                        $dedupService->markAsProcessed($message, $queue);
                     } else {
                         $message->reject(true);
                     }
