@@ -676,5 +676,6 @@ groups:
     batch_size: 3
     prefetch_count: 3
 ```
+- Make sure that vhosts exist in RabbitMQ (if not - create them)
 - Run command `php artisan lib-rabbitmq:scan-vhosts` within your project where this library is installed (this command fetches data from RabbitMQ to Redis)
 - Run command for consumer `php artisan lib-rabbitmq:consume-vhosts test-notes rabbitmq_vhosts --name=mq-vhost-test-local-notes --memory=300 --timeout=0 --max-jobs=1000 --max-time=600 --async-mode=1`

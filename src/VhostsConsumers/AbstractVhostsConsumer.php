@@ -406,10 +406,10 @@ abstract class AbstractVhostsConsumer extends Consumer
     /**
      * @param AMQPMessage $message
      * @param RabbitMQQueue $connection
-     * @return RabbitMQConsumable|RabbitMQJob - since in PHP 8.0 intersection is not supported we use union type
+     * @return RabbitMQJob
      * @throws \Throwable
      */
-    protected function getJobByMessage(AMQPMessage $message, RabbitMQQueue $connection): RabbitMQJob|RabbitMQConsumable
+    protected function getJobByMessage(AMQPMessage $message, RabbitMQQueue $connection): RabbitMQJob
     {
         $jobClass = $connection->getJobClass();
 
@@ -421,19 +421,17 @@ abstract class AbstractVhostsConsumer extends Consumer
             $this->currentQueueName
         );
 
-        if (!is_subclass_of($jobClass, RabbitMQConsumable::class)) {
-            throw new \RuntimeException(sprintf('Job class %s must implement %s', $jobClass, RabbitMQConsumable::class));
+        if (!is_subclass_of($job->getPayloadClass(), RabbitMQConsumable::class)) {
+            throw new \RuntimeException(sprintf('Job class %s must implement %s', $job->getPayloadClass(), RabbitMQConsumable::class));
         }
 
         return $job;
     }
 
-    protected function processSingleJob(RabbitMQJob|RabbitMQConsumable $job, AMQPMessage $message): void
+    protected function processSingleJob(RabbitMQJob $job, AMQPMessage $message): void
     {
         $timeStarted = microtime(true);
-        $this->logInfo('processSingleJob.start', [
-            'job_consumable_id' => $job->getConsumableId(),
-        ]);
+        $this->logInfo('processSingleJob.start');
 
         if ($this->supportsAsyncSignals()) {
             $this->registerTimeoutHandler($job, $this->workerOptions);
@@ -441,10 +439,8 @@ abstract class AbstractVhostsConsumer extends Consumer
 
         $this->transportDeduplicationService->decorateWithDeduplication(
             function () use ($job, $message) {
-                if (AppDeduplicationService::isEnabled() && $job->isDuplicated()) {
-                    $this->logWarning('processSingleJob.job_is_duplicated', [
-                        'job_consumable_id' => $job->getConsumableId(),
-                    ]);
+                if (AppDeduplicationService::isEnabled() && $job->getPayloadData()->isDuplicated()) {
+                    $this->logWarning('processSingleJob.job_is_duplicated');
                     $this->ackMessage($message);
 
                 } else {

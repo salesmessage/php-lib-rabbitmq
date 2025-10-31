@@ -8,13 +8,6 @@ namespace Salesmessage\LibRabbitMQ\Contracts;
 interface RabbitMQConsumable
 {
     /**
-     * Used to track the job's execution (e.g. for logging).
-     *
-     * @return string
-     */
-    public function getConsumableId(): string;
-
-    /**
      * Check duplications on the application side.
      * It's mostly represented as an idempotency checker.
      */
