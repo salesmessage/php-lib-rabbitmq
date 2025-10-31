@@ -3,6 +3,7 @@
 namespace Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel;
 
 use PhpAmqpLib\Message\AMQPMessage;
+use PhpAmqpLib\Wire\AMQPTable;
 use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Services\DlqDetector;
@@ -41,8 +42,11 @@ class DeduplicationService
     private const DEFAULT_LOCK_TTL = 60;
     private const DEFAULT_TTL = 7200;
 
-    private const MAX_LOCK_TTL = 300;
+    private const MAX_LOCK_TTL = 180;
     private const MAX_TTL = 7 * 24 * 60 * 60;
+    private const WAIT_AFTER_PUBLISH = 1;
+
+    private const HEADER_LOCK_REQUEUE_COUNT = 'x-dup-lock-requeue-count';
 
     public function __construct(
         private DeduplicationStore $store,
@@ -208,7 +212,7 @@ class DeduplicationService
         } elseif ($action === self::ACTION_ACK) {
             $message->ack();
         } else {
-            $message->reject(true);
+            $action = $this->republishLockedMessage($message);
         }
 
         return $action;
@@ -224,6 +228,56 @@ class DeduplicationService
         }
 
         return $action;
+    }
+
+    /**
+     * Such a situation normally should not happen or can happen very rarely.
+     * Republish the locked message with a retry-count guard.
+     * It's necessary to avoid infinite redelivery loop.
+     *
+     * @param AMQPMessage $message
+     * @return string
+     */
+    protected function republishLockedMessage(AMQPMessage $message): string
+    {
+        $props = $message->get_properties();
+        $headers = [];
+        if (($props['application_headers'] ?? null) instanceof AMQPTable) {
+            $headers = $props['application_headers']->getNativeData();
+        }
+
+        $attempts = (int) ($headers[self::HEADER_LOCK_REQUEUE_COUNT] ?? 0);
+        ++$attempts;
+
+        $maxAttempts = ((int) ($this->getConfig('lock_ttl', 30))) / self::WAIT_AFTER_PUBLISH;
+        if ($attempts > $maxAttempts) {
+            $this->logger->warning('DeduplicationService.republishLockedMessage.max_attempts_reached', [
+                'message_id' => $props['message_id'] ?? null,
+            ]);
+            $message->ack();
+
+            return self::ACTION_ACK;
+        }
+
+        $headers[self::HEADER_LOCK_REQUEUE_COUNT] = $attempts;
+
+        $newProps = $props;
+        $newProps['application_headers'] = new AMQPTable($headers);
+
+        $newMessage = new AMQPMessage($message->getBody(), $newProps);
+        $channel = $message->getChannel();
+        $channel->basic_publish($newMessage, $message->getExchange(), $message->getRoutingKey());
+
+        $this->logger->warning('DeduplicationService.republishLockedMessage.republish', [
+            'message_id' => $props['message_id'] ?? null,
+            'attempts' => $attempts,
+        ]);
+        $message->ack();
+        // it's necessary to avoid a high redelivery rate
+        // normally, such a situation is not expected (or expected very rarely)
+        sleep(self::WAIT_AFTER_PUBLISH);
+
+        return self::ACTION_REQUEUE;
     }
 
     protected function isEnabled(): bool

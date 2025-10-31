@@ -381,7 +381,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
             $this->connectionMutex->lock(static::MAIN_HANDLER_LOCK);
             try {
-                if ($isBatchSuccess) {
+                if ($isBatchSuccess && !empty($uniqueMessagesForProcessing)) {
                     foreach ($uniqueMessagesForProcessing as $batchMessage) {
                         $this->transportDeduplicationService?->markAsProcessed($batchMessage, $this->currentQueueName);
                     }
