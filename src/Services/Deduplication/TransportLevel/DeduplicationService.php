@@ -61,52 +61,34 @@ class DeduplicationService
         $messageState = $this->getState($message, $queueName);
         try {
             if ($messageState === DeduplicationService::IN_PROGRESS) {
-                $action = $this->getConfig('action_on_lock', self::ACTION_REQUEUE);
-                if ($action === self::ACTION_REJECT) {
-                    $message->reject(false);
-                } else {
-                    $message->reject(true);
-                }
-
+                $action = $this->applyActionOnLock($message);
                 $this->logger->warning('DeduplicationService.message_already_in_progress', [
                     'action' => $action,
                     'message_id' => $message->get_properties()['message_id'] ?? null,
                 ]);
+
                 return false;
             }
 
             if ($messageState === DeduplicationService::PROCESSED) {
-                $action = $this->getConfig('action_on_duplication', self::ACTION_ACK);
-                if ($action === self::ACTION_REJECT) {
-                    $message->reject(false);
-                } elseif ($action === self::ACTION_REQUEUE) {
-                    $message->reject(true);
-                } else {
-                    $message->ack();
-                }
-
+                $action = $this->applyActionOnDuplication($message);
                 $this->logger->warning('DeduplicationService.message_already_processed', [
                     'action' => $action,
                     'message_id' => $message->get_properties()['message_id'] ?? null,
                 ]);
+
                 return false;
             }
 
             $hasPutAsInProgress = $this->markAsInProgress($message, $queueName);
             if ($hasPutAsInProgress === false) {
-                $action = $this->getConfig('action_on_lock', self::ACTION_REQUEUE);
-                if ($action === self::ACTION_REJECT) {
-                    $message->reject(false);
-                } else {
-                    $message->reject(true);
-                }
-
+                $action = $this->applyActionOnLock($message);
                 $this->logger->warning('DeduplicationService.message_already_in_progress.skip', [
                     'action' => $action,
                     'message_id' => $message->get_properties()['message_id'] ?? null,
                 ]);
-                return false;
 
+                return false;
             }
 
             $handler();
@@ -216,6 +198,32 @@ class DeduplicationService
         }
 
         return $messageId;
+    }
+
+    protected function applyActionOnLock(AMQPMessage $message): string
+    {
+        $action = $this->getConfig('action_on_lock', self::ACTION_REQUEUE);
+        if ($action === self::ACTION_REJECT) {
+            $message->reject(false);
+        } elseif ($action === self::ACTION_ACK) {
+            $message->ack();
+        } else {
+            $message->reject(true);
+        }
+
+        return $action;
+    }
+
+    protected function applyActionOnDuplication(AMQPMessage $message): string
+    {
+        $action = $this->getConfig('action_on_duplication', self::ACTION_ACK);
+        if ($action === self::ACTION_REJECT) {
+            $message->reject(false);
+        } else {
+            $message->ack();
+        }
+
+        return $action;
     }
 
     protected function isEnabled(): bool
