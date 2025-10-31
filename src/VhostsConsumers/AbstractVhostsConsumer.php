@@ -15,6 +15,7 @@ use PhpAmqpLib\Exception\AMQPConnectionClosedException;
 use PhpAmqpLib\Message\AMQPMessage;
 use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Consumer;
+use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
 use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
 use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
@@ -24,8 +25,9 @@ use Salesmessage\LibRabbitMQ\Interfaces\RabbitMQBatchable;
 use Salesmessage\LibRabbitMQ\Mutex;
 use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
+use Salesmessage\LibRabbitMQ\Services\Deduplication\AppDeduplicationService;
+use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationService as TransportDeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
-use Salesmessage\LibRabbitMQ\Services\Deduplication\DeduplicationService;
 
 abstract class AbstractVhostsConsumer extends Consumer
 {
@@ -81,8 +83,8 @@ abstract class AbstractVhostsConsumer extends Consumer
      * @param Dispatcher $events
      * @param ExceptionHandler $exceptions
      * @param callable $isDownForMaintenance
+     * @param TransportDeduplicationService $transportDeduplicationService
      * @param callable|null $resetScope
-     * @param ?DeduplicationService $deduplicationService
      */
     public function __construct(
         protected InternalStorageManager $internalStorageManager,
@@ -91,8 +93,8 @@ abstract class AbstractVhostsConsumer extends Consumer
         Dispatcher $events,
         ExceptionHandler $exceptions,
         callable $isDownForMaintenance,
+        protected TransportDeduplicationService $transportDeduplicationService,
         callable $resetScope = null,
-        protected ?DeduplicationService $deduplicationService = null,
     ) {
         parent::__construct($manager, $events, $exceptions, $isDownForMaintenance, $resetScope);
     }
@@ -324,49 +326,23 @@ abstract class AbstractVhostsConsumer extends Consumer
                 $uniqueMessagesForProcessing = [];
                 $batchData = [];
                 foreach ($batchJobMessages as $batchMessage) {
-                    $messageState = $this->deduplicationService?->getState($batchMessage, $this->currentQueueName);
-                    try {
-                        if ($messageState === DeduplicationService::IN_PROGRESS) {
-                            $batchMessage->reject(true);
-                            $this->logWarning('processBatch.message_already_in_progress.requeue', [
-                                'message_id' => $batchMessage->get_properties()['message_id'] ?? null,
-                            ]);
-                            continue;
-                        }
-                        if ($messageState === DeduplicationService::PROCESSED) {
-                            $this->ackMessage($batchMessage);
-                            $this->logWarning('processBatch.message_already_processed', [
-                                'message_id' => $batchMessage->get_properties()['message_id'] ?? null,
-                            ]);
-                            continue;
-                        }
-
-                        $hasPutAsInProgress = $this->deduplicationService?->markAsInProgress($batchMessage, $this->currentQueueName);
-                        if ($hasPutAsInProgress === false) {
-                            $batchMessage->reject(true);
-                            $this->logWarning('processBatch.message_already_in_progress.skip', [
-                                'message_id' => $batchMessage->get_properties()['message_id'] ?? null,
-                            ]);
-                        } else {
+                    $this->transportDeduplicationService->decorateWithDeduplication(
+                        function () use ($batchMessage, $connection, &$uniqueMessagesForProcessing, &$batchData) {
                             $job = $this->getJobByMessage($batchMessage, $connection);
                             $uniqueMessagesForProcessing[] = $batchMessage;
                             $batchData[] = $job->getPayloadData();
-                        }
-
-                    } catch (\Throwable $exception) {
-                        if ($messageState === null) {
-                            $this->deduplicationService?->release($batchMessage, $this->currentQueueName);
-                        }
-
-                        $this->logError('processBatch.message_processing_exception', [
-                            'released_message_id' => $batchMessage->get_properties()['message_id'] ?? null,
-                        ]);
-
-                        throw $exception;
-                    }
+                        },
+                        $batchMessage,
+                        $this->currentQueueName
+                    );
                 }
 
                 try {
+                    if (AppDeduplicationService::isEnabled()) {
+                        /** @var RabbitMQBatchable $batchJobClass */
+                        $batchData = $batchJobClass::getNotDuplicatedBatchedJobs($batchData);
+                    }
+
                     if (!empty($batchData)) {
                         $this->logInfo('processBatch.start', [
                             'batch_job_class' => $batchJobClass,
@@ -385,7 +361,7 @@ abstract class AbstractVhostsConsumer extends Consumer
                     $isBatchSuccess = true;
                 } catch (\Throwable $exception) {
                     foreach ($uniqueMessagesForProcessing as $batchMessage) {
-                        $this->deduplicationService?->release($batchMessage, $this->currentQueueName);
+                        $this->transportDeduplicationService->release($batchMessage, $this->currentQueueName);
                     }
 
                     $isBatchSuccess = false;
@@ -407,7 +383,7 @@ abstract class AbstractVhostsConsumer extends Consumer
             try {
                 if ($isBatchSuccess) {
                     foreach ($uniqueMessagesForProcessing as $batchMessage) {
-                        $this->deduplicationService?->markAsProcessed($batchMessage, $this->currentQueueName);
+                        $this->transportDeduplicationService?->markAsProcessed($batchMessage, $this->currentQueueName);
                     }
 
                     $lastBatchMessage = end($uniqueMessagesForProcessing);
@@ -430,57 +406,56 @@ abstract class AbstractVhostsConsumer extends Consumer
     /**
      * @param AMQPMessage $message
      * @param RabbitMQQueue $connection
-     * @return RabbitMQJob
+     * @return RabbitMQConsumable|RabbitMQJob - since in PHP 8.0 intersection is not supported we use union type
      * @throws \Throwable
      */
-    protected function getJobByMessage(AMQPMessage $message, RabbitMQQueue $connection): RabbitMQJob
+    protected function getJobByMessage(AMQPMessage $message, RabbitMQQueue $connection): RabbitMQJob|RabbitMQConsumable
     {
         $jobClass = $connection->getJobClass();
 
-        return new $jobClass(
+        $job = new $jobClass(
             $this->container,
             $connection,
             $message,
             $this->currentConnectionName,
             $this->currentQueueName
         );
+
+        if (!is_subclass_of($jobClass, RabbitMQConsumable::class)) {
+            throw new \RuntimeException(sprintf('Job class %s must implement %s', $jobClass, RabbitMQConsumable::class));
+        }
+
+        return $job;
     }
 
-    protected function processSingleJob(RabbitMQJob $job, AMQPMessage $message): void
+    protected function processSingleJob(RabbitMQJob|RabbitMQConsumable $job, AMQPMessage $message): void
     {
         $timeStarted = microtime(true);
-        $this->logInfo('processSingleJob.start');
+        $this->logInfo('processSingleJob.start', [
+            'job_consumable_id' => $job->getConsumableId(),
+        ]);
 
         if ($this->supportsAsyncSignals()) {
             $this->registerTimeoutHandler($job, $this->workerOptions);
         }
 
-        $messageState = $this->deduplicationService?->getState($message, $this->currentQueueName);
-        if ($messageState === DeduplicationService::IN_PROGRESS) {
-            $message->reject(true);
-            $this->logWarning('processSingleJob.message_already_in_progress.requeue', [
-                'message_id' => $message->get_properties()['message_id'] ?? null,
-            ]);
+        $this->transportDeduplicationService->decorateWithDeduplication(
+            function () use ($job, $message) {
+                if (AppDeduplicationService::isEnabled() && $job->isDuplicated()) {
+                    $this->logWarning('processSingleJob.job_is_duplicated', [
+                        'job_consumable_id' => $job->getConsumableId(),
+                    ]);
+                    $this->ackMessage($message);
 
-        } elseif ($messageState === DeduplicationService::PROCESSED) {
-            $this->logWarning('processSingleJob.message_already_processed', [
-                'message_id' => $message->get_properties()['message_id'] ?? null,
-            ]);
-            $this->ackMessage($message);
+                } else {
+                    $this->runJob($job, $this->currentConnectionName, $this->workerOptions);
+                }
 
-        } else {
-            $isPutAsInProgress = $this->deduplicationService?->markAsInProgress($message, $this->currentQueueName);
-            if ($isPutAsInProgress === false) {
-                $message->reject(true);
-                $this->logWarning('processSingleJob.message_already_in_progress.skip', [
-                    'message_id' => $message->get_properties()['message_id'] ?? null,
-                ]);
-
-            } else {
-                $this->runJob($job, $this->currentConnectionName, $this->workerOptions);
-                $this->deduplicationService?->markAsProcessed($message, $this->currentQueueName);
-            }
-        }
+                $this->transportDeduplicationService->markAsProcessed($message, $this->currentQueueName);
+            },
+            $message,
+            $this->currentQueueName,
+        );
 
         $this->updateLastProcessedAt();
 

@@ -1,6 +1,6 @@
 <?php
 
-namespace Salesmessage\LibRabbitMQ\Services\Deduplication;
+namespace Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel;
 
 use Illuminate\Redis\Connections\Connection;
 use Illuminate\Support\Facades\Redis;

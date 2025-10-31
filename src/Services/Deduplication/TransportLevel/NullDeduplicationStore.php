@@ -1,6 +1,6 @@
 <?php
 
-namespace Salesmessage\LibRabbitMQ\Services\Deduplication;
+namespace Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel;
 
 class NullDeduplicationStore implements DeduplicationStore
 {

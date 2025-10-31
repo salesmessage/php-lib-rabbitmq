@@ -10,14 +10,14 @@ use Salesmessage\LibRabbitMQ\Console\ConsumeCommand;
 use Salesmessage\LibRabbitMQ\Console\ConsumeVhostsCommand;
 use Salesmessage\LibRabbitMQ\Console\ScanVhostsCommand;
 use Salesmessage\LibRabbitMQ\Queue\Connectors\RabbitMQVhostsConnector;
-use Salesmessage\LibRabbitMQ\Services\Deduplication\DeduplicationService;
+use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationService;
+use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationStore;
+use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\NullDeduplicationStore;
+use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\RedisDeduplicationStore;
 use Salesmessage\LibRabbitMQ\Services\GroupsService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Salesmessage\LibRabbitMQ\Services\QueueService;
 use Salesmessage\LibRabbitMQ\Services\VhostsService;
-use Salesmessage\LibRabbitMQ\Services\Deduplication\DeduplicationStore;
-use Salesmessage\LibRabbitMQ\Services\Deduplication\NullDeduplicationStore;
-use Salesmessage\LibRabbitMQ\Services\Deduplication\RedisDeduplicationStore;
 use Salesmessage\LibRabbitMQ\VhostsConsumers\DirectConsumer as VhostsDirectConsumer;
 use Salesmessage\LibRabbitMQ\VhostsConsumers\QueueConsumer as VhostsQueueConsumer;
 
@@ -68,8 +68,8 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
                     $this->app['events'],
                     $this->app[ExceptionHandler::class],
                     $isDownForMaintenance,
+                    $this->app->get(DeduplicationService::class),
                     null,
-                    $this->app->get(DeduplicationService::class)
                 );
             });
 
@@ -85,8 +85,8 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
                     $this->app['events'],
                     $this->app[ExceptionHandler::class],
                     $isDownForMaintenance,
+                    $this->app->get(DeduplicationService::class),
                     null,
-                    $this->app->get(DeduplicationService::class)
                 );
             });
 
@@ -152,7 +152,7 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
     {
         $this->app->bind(DeduplicationStore::class, static function () {
             /** @var DeduplicationConfig $config */
-            $config = (array) config('queue.connections.rabbitmq_vhosts.deduplication', []);
+            $config = (array) config('queue.connections.rabbitmq_vhosts.deduplication.transport', []);
             $enabled = (bool) ($config['enabled'] ?? false);
             if (!$enabled) {
                 return new NullDeduplicationStore();

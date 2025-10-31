@@ -9,9 +9,9 @@ use Illuminate\Queue\WorkerOptions;
 use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Message\AMQPMessage;
-use Throwable;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
-use Salesmessage\LibRabbitMQ\Services\Deduplication\DeduplicationService;
+use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationService;
+use Throwable;
 
 class Consumer extends Worker
 {
@@ -123,24 +123,16 @@ class Consumer extends Worker
 
                 $jobsProcessed++;
 
-                /** @var DeduplicationService $dedupService */
-                $dedupService = $this->container->make(DeduplicationService::class);
-                $messageState = $dedupService->getState($message, $queue);
-                if ($messageState === DeduplicationService::IN_PROGRESS) {
-                    $message->reject(true);
-
-                } elseif ($messageState === DeduplicationService::PROCESSED) {
-                    $message->ack();
-
-                } else {
-                    $hasPutAsInProgress = $dedupService->markAsInProgress($message, $queue);
-                    if ($hasPutAsInProgress !== false) {
+                /** @var DeduplicationService $transportDedupService */
+                $transportDedupService = $this->container->make(DeduplicationService::class);
+                $transportDedupService->decorateWithDeduplication(
+                    function () use ($job, $message, $connectionName, $queue, $options, $transportDedupService) {
                         $this->runJob($job, $connectionName, $options);
-                        $dedupService->markAsProcessed($message, $queue);
-                    } else {
-                        $message->reject(true);
-                    }
-                }
+                        $transportDedupService->markAsProcessed($message, $queue);
+                    },
+                    $message,
+                    $queue
+                );
 
                 if ($this->supportsAsyncSignals()) {
                     $this->resetTimeoutHandler();
