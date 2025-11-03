@@ -73,6 +73,10 @@ class QueueConfigFactory
             $queueConfig->setQuorumInitialGroupSize((int) Arr::pull($queueOptions, 'quorum_initial_group_size'));
         }
 
+        if ($quorumPostfix = (string) Arr::pull($queueOptions, 'quorum_queue_postfix')) {
+            $queueConfig->setQuorumQueuePostfix($quorumPostfix);
+        }
+
         // All extra options not defined
         $queueConfig->setOptions($queueOptions);
     }

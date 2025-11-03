@@ -32,6 +32,8 @@ class QueueConfig
 
     protected ?int $quorumInitialGroupSize = null;
 
+    protected string $quorumQueuePostfix = '';
+
     protected array $options = [];
 
     /**
@@ -257,7 +259,7 @@ class QueueConfig
         return $this->quorumInitialGroupSize;
     }
 
-    public function setQuorumInitialGroupSize(?int $size): QueueConfig
+    public function setQuorumInitialGroupSize(?int $size): self
     {
         if ($size === null) {
             $this->quorumInitialGroupSize = null;
@@ -270,6 +272,17 @@ class QueueConfig
 
         $this->quorumInitialGroupSize = $size;
 
+        return $this;
+    }
+
+    public function getQuorumQueuePostfix(): string
+    {
+        return $this->quorumQueuePostfix;
+    }
+
+    public function setQuorumQueuePostfix(string $postfix): self
+    {
+        $this->quorumQueuePostfix = $postfix;
         return $this;
     }
 
