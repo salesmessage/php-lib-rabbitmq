@@ -4,6 +4,7 @@ namespace Salesmessage\LibRabbitMQ\Queue\Jobs;
 
 use Illuminate\Contracts\Encryption\Encrypter;
 use Illuminate\Queue\Jobs\JobName;
+use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob as BaseJob;
 
 /**
@@ -35,6 +36,22 @@ class RabbitMQJobBatchable extends BaseJob
         $payload = $this->payload();
 
         return $payload['data']['commandName'];
+    }
+
+    public function release($delay = 0): void
+    {
+        $consumableJob = $this->getPayloadData();
+        if (!($consumableJob instanceof RabbitMQConsumable)) {
+            throw new \RuntimeException('Job must be an instance of RabbitMQJobBatchable');
+        }
+
+        // Always create a new message when this Job is released
+        $this->rabbitmq->laterRaw($delay, $this->message->getBody(), $this->queue, $this->attempts(), $consumableJob->getQueueType());
+
+        // Releasing a Job means the message was failed to process.
+        // Because this Job message is always recreated and pushed as new message, this Job message is correctly handled.
+        // We must tell rabbitMQ this job message can be removed by acknowledging the message.
+        $this->rabbitmq->ack($this);
     }
 
     /**
