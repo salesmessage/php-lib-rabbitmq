@@ -30,6 +30,8 @@ class QueueConfig
 
     protected bool $quorum = false;
 
+    protected ?int $quorumInitialGroupSize = null;
+
     protected array $options = [];
 
     /**
@@ -243,6 +245,30 @@ class QueueConfig
     public function setQuorum($quorum): QueueConfig
     {
         $this->quorum = $this->toBoolean($quorum);
+
+        return $this;
+    }
+
+    /**
+     * When set, used to declare quorum queues with a specific initial group size.
+     */
+    public function getQuorumInitialGroupSize(): ?int
+    {
+        return $this->quorumInitialGroupSize;
+    }
+
+    public function setQuorumInitialGroupSize(?int $size): QueueConfig
+    {
+        if ($size === null) {
+            $this->quorumInitialGroupSize = null;
+            return $this;
+        }
+
+        if ($size <= 0) {
+            throw new \InvalidArgumentException('Invalid quorum group size');
+        }
+
+        $this->quorumInitialGroupSize = $size;
 
         return $this;
     }

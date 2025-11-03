@@ -68,6 +68,11 @@ class QueueConfigFactory
             $queueConfig->setQuorum($quorum);
         }
 
+        // Feature: Quorum initial group size
+        if (Arr::has($queueOptions, 'quorum_initial_group_size')) {
+            $queueConfig->setQuorumInitialGroupSize((int) Arr::pull($queueOptions, 'quorum_initial_group_size'));
+        }
+
         // All extra options not defined
         $queueConfig->setOptions($queueOptions);
     }

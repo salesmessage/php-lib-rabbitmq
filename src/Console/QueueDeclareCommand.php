@@ -11,10 +11,11 @@ class QueueDeclareCommand extends Command
     protected $signature = 'lib-rabbitmq:queue-declare
                            {name : The name of the queue to declare}
                            {connection=rabbitmq : The name of the queue connection to use}
-                           {--max-priority}
+                           {--max-priority : Set x-max-priority (ignored for quorum)}
                            {--durable=1}
                            {--auto-delete=0}
-                           {--quorum=0}';
+                           {--quorum=0 : Declare quorum queue (x-queue-type=quorum)}
+                           {--quorum-initial-group-size= : x-quorum-initial-group-size when quorum is enabled}';
 
     protected $description = 'Declare queue';
 
@@ -36,12 +37,24 @@ class QueueDeclareCommand extends Command
         $arguments = [];
 
         $maxPriority = (int) $this->option('max-priority');
-        if ($maxPriority) {
-            $arguments['x-max-priority'] = $maxPriority;
-        }
+        $isQuorum = (bool) $this->option('quorum');
 
-        if ($this->option('quorum')) {
+        if ($isQuorum) {
             $arguments['x-queue-type'] = 'quorum';
+
+            $initialGroupSize = (int) $this->option('quorum-initial-group-size');
+            if ($initialGroupSize > 0) {
+                $arguments['x-quorum-initial-group-size'] = $initialGroupSize;
+            }
+
+            if ($maxPriority) {
+                // quorum queues do not support priority; ignore and warn
+                $this->warn('Ignoring --max-priority for quorum queue.');
+            }
+        } else {
+            if ($maxPriority) {
+                $arguments['x-max-priority'] = $maxPriority;
+            }
         }
 
         $queue->declareQueue(

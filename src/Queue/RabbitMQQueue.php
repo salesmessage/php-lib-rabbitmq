@@ -649,6 +649,12 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
 
         if ($isQuorum) {
             $arguments['x-queue-type'] = 'quorum';
+
+            // optional: initial group size for quorum queues
+            $initialGroupSize = $this->getConfig()->getQuorumInitialGroupSize();
+            if ($initialGroupSize !== null) {
+                $arguments['x-quorum-initial-group-size'] = $initialGroupSize;
+            }
         }
 
         return $arguments;
