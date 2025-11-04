@@ -12,11 +12,10 @@ use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Connection\AMQPStreamConnection;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
 use PhpAmqpLib\Exception\AMQPConnectionClosedException;
-use PhpAmqpLib\Exception\AMQPProtocolChannelException;
-use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Message\AMQPMessage;
 use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Consumer;
+use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
 use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
 use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
@@ -26,6 +25,8 @@ use Salesmessage\LibRabbitMQ\Interfaces\RabbitMQBatchable;
 use Salesmessage\LibRabbitMQ\Mutex;
 use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
+use Salesmessage\LibRabbitMQ\Services\Deduplication\AppDeduplicationService;
+use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationService as TransportDeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 
 abstract class AbstractVhostsConsumer extends Consumer
@@ -54,6 +55,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     protected ?WorkerOptions $workerOptions = null;
 
+    /** @var array<class-string<RabbitMQBatchable>, array<AMQPMessage>> */
     protected array $batchMessages = [];
 
     protected ?string $processingUuid = null;
@@ -72,6 +74,8 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     protected bool $asyncMode = false;
 
+    protected ?Mutex $connectionMutex = null;
+
     /**
      * @param InternalStorageManager $internalStorageManager
      * @param LoggerInterface $logger
@@ -79,6 +83,7 @@ abstract class AbstractVhostsConsumer extends Consumer
      * @param Dispatcher $events
      * @param ExceptionHandler $exceptions
      * @param callable $isDownForMaintenance
+     * @param TransportDeduplicationService $transportDeduplicationService
      * @param callable|null $resetScope
      */
     public function __construct(
@@ -88,7 +93,8 @@ abstract class AbstractVhostsConsumer extends Consumer
         Dispatcher $events,
         ExceptionHandler $exceptions,
         callable $isDownForMaintenance,
-        callable $resetScope = null
+        protected TransportDeduplicationService $transportDeduplicationService,
+        callable $resetScope = null,
     ) {
         parent::__construct($manager, $events, $exceptions, $isDownForMaintenance, $resetScope);
     }
@@ -223,7 +229,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     /**
      * @return RabbitMQQueue
-     * @throws Exceptions\MutexTimeout
+     * @throws MutexTimeout
      */
     abstract protected function startConsuming(): RabbitMQQueue;
 
@@ -240,7 +246,7 @@ abstract class AbstractVhostsConsumer extends Consumer
             $this->addMessageToBatch($message);
         } else {
             $job = $this->getJobByMessage($message, $connection);
-            $this->processSingleJob($job);
+            $this->processSingleJob($job, $message);
         }
 
         $this->jobsProcessed++;
@@ -262,18 +268,23 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     /**
      * @param AMQPMessage $message
-     * @return string
+     * @return non-empty-string
      */
     protected function getMessageClass(AMQPMessage $message): string
     {
         $body = json_decode($message->getBody(), true);
 
-        return (string) ($body['data']['commandName'] ?? '');
+        $messageClass = (string) ($body['data']['commandName'] ?? '');
+        if (empty($messageClass)) {
+            throw new \RuntimeException('Message class is not defined');
+        }
+        return $messageClass;
     }
 
     /**
-     * @param RabbitMQJob $job
-     * @return void
+     * @param AMQPMessage $message
+     * @return bool
+     * @throws \ReflectionException
      */
     protected function isSupportBatching(AMQPMessage $message): bool
     {
@@ -296,8 +307,8 @@ abstract class AbstractVhostsConsumer extends Consumer
     /**
      * @param RabbitMQQueue $connection
      * @return void
-     * @throws Exceptions\MutexTimeout
-     * @throws Throwable
+     * @throws MutexTimeout
+     * @throws \Throwable
      */
     protected function processBatch(RabbitMQQueue $connection): void
     {
@@ -307,33 +318,52 @@ abstract class AbstractVhostsConsumer extends Consumer
 
         foreach ($this->batchMessages as $batchJobClass => $batchJobMessages) {
             $isBatchSuccess = false;
-
             $batchSize = count($batchJobMessages);
+
             if ($batchSize > 1) {
                 $batchTimeStarted = microtime(true);
 
+                $uniqueMessagesForProcessing = [];
                 $batchData = [];
-                /** @var AMQPMessage $batchMessage */
                 foreach ($batchJobMessages as $batchMessage) {
-                    $job = $this->getJobByMessage($batchMessage, $connection);
-                    $batchData[] = $job->getPayloadData();
+                    $this->transportDeduplicationService->decorateWithDeduplication(
+                        function () use ($batchMessage, $connection, &$uniqueMessagesForProcessing, &$batchData) {
+                            $job = $this->getJobByMessage($batchMessage, $connection);
+                            $uniqueMessagesForProcessing[] = $batchMessage;
+                            $batchData[] = $job->getPayloadData();
+                        },
+                        $batchMessage,
+                        $this->currentQueueName
+                    );
                 }
 
-                $this->logInfo('processBatch.start', [
-                    'batch_job_class' => $batchJobClass,
-                    'batch_size' => $batchSize,
-                ]);
-
                 try {
-                    $batchJobClass::collection($batchData);
-                    $isBatchSuccess = true;
+                    if (AppDeduplicationService::isEnabled()) {
+                        /** @var RabbitMQBatchable $batchJobClass */
+                        $batchData = $batchJobClass::getNotDuplicatedBatchedJobs($batchData);
+                    }
 
-                    $this->logInfo('processBatch.finish', [
-                        'batch_job_class' => $batchJobClass,
-                        'batch_size' => $batchSize,
-                        'executive_batch_time_seconds' => microtime(true) - $batchTimeStarted,
-                    ]);
-                } catch (Throwable $exception) {
+                    if (!empty($batchData)) {
+                        $this->logInfo('processBatch.start', [
+                            'batch_job_class' => $batchJobClass,
+                            'batch_size' => $batchSize,
+                        ]);
+
+                        $batchJobClass::collection($batchData);
+
+                        $this->logInfo('processBatch.finish', [
+                            'batch_job_class' => $batchJobClass,
+                            'batch_size' => $batchSize,
+                            'executive_batch_time_seconds' => microtime(true) - $batchTimeStarted,
+                        ]);
+                    }
+
+                    $isBatchSuccess = true;
+                } catch (\Throwable $exception) {
+                    foreach ($uniqueMessagesForProcessing as $batchMessage) {
+                        $this->transportDeduplicationService->release($batchMessage, $this->currentQueueName);
+                    }
+
                     $isBatchSuccess = false;
 
                     $this->logError('processBatch.exception', [
@@ -345,19 +375,28 @@ abstract class AbstractVhostsConsumer extends Consumer
                 }
 
                 unset($batchData);
+            } else {
+                $uniqueMessagesForProcessing = $batchJobMessages;
             }
 
             $this->connectionMutex->lock(static::MAIN_HANDLER_LOCK);
-            if ($isBatchSuccess) {
-                $lastBatchMessage = end($batchJobMessages);
-                $this->ackMessage($lastBatchMessage, true);
-            } else {
-                foreach ($batchJobMessages as $batchMessage) {
-                    $job = $this->getJobByMessage($batchMessage, $connection);
-                    $this->processSingleJob($job);
+            try {
+                if ($isBatchSuccess && !empty($uniqueMessagesForProcessing)) {
+                    foreach ($uniqueMessagesForProcessing as $batchMessage) {
+                        $this->transportDeduplicationService?->markAsProcessed($batchMessage, $this->currentQueueName);
+                    }
+
+                    $lastBatchMessage = end($uniqueMessagesForProcessing);
+                    $this->ackMessage($lastBatchMessage, true);
+                } else {
+                    foreach ($uniqueMessagesForProcessing as $batchMessage) {
+                        $job = $this->getJobByMessage($batchMessage, $connection);
+                        $this->processSingleJob($job, $batchMessage);
+                    }
                 }
+            } finally {
+                $this->connectionMutex->unlock(static::MAIN_HANDLER_LOCK);
             }
-            $this->connectionMutex->unlock(static::MAIN_HANDLER_LOCK);
         }
         $this->updateLastProcessedAt();
 
@@ -368,26 +407,28 @@ abstract class AbstractVhostsConsumer extends Consumer
      * @param AMQPMessage $message
      * @param RabbitMQQueue $connection
      * @return RabbitMQJob
-     * @throws Throwable
+     * @throws \Throwable
      */
     protected function getJobByMessage(AMQPMessage $message, RabbitMQQueue $connection): RabbitMQJob
     {
         $jobClass = $connection->getJobClass();
 
-        return new $jobClass(
+        $job = new $jobClass(
             $this->container,
             $connection,
             $message,
             $this->currentConnectionName,
             $this->currentQueueName
         );
+
+        if (!is_subclass_of($job->getPayloadClass(), RabbitMQConsumable::class)) {
+            throw new \RuntimeException(sprintf('Job class %s must implement %s', $job->getPayloadClass(), RabbitMQConsumable::class));
+        }
+
+        return $job;
     }
 
-    /**
-     * @param RabbitMQJob $job
-     * @return void
-     */
-    protected function processSingleJob(RabbitMQJob $job): void
+    protected function processSingleJob(RabbitMQJob $job, AMQPMessage $message): void
     {
         $timeStarted = microtime(true);
         $this->logInfo('processSingleJob.start');
@@ -396,7 +437,22 @@ abstract class AbstractVhostsConsumer extends Consumer
             $this->registerTimeoutHandler($job, $this->workerOptions);
         }
 
-        $this->runJob($job, $this->currentConnectionName, $this->workerOptions);
+        $this->transportDeduplicationService->decorateWithDeduplication(
+            function () use ($job, $message) {
+                if (AppDeduplicationService::isEnabled() && $job->getPayloadData()->isDuplicated()) {
+                    $this->logWarning('processSingleJob.job_is_duplicated');
+                    $this->ackMessage($message);
+
+                } else {
+                    $this->runJob($job, $this->currentConnectionName, $this->workerOptions);
+                }
+
+                $this->transportDeduplicationService->markAsProcessed($message, $this->currentQueueName);
+            },
+            $message,
+            $this->currentQueueName,
+        );
+
         $this->updateLastProcessedAt();
 
         if ($this->supportsAsyncSignals()) {
@@ -421,7 +477,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
         try {
             $message->ack($multiple);
-        } catch (Throwable $exception) {
+        } catch (\Throwable $exception) {
             $this->logError('ackMessage.exception', [
                 'message' => $exception->getMessage(),
                 'trace' => $exception->getTraceAsString(),
@@ -432,7 +488,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     /**
      * @return void
-     * @throws Exceptions\MutexTimeout
+     * @throws MutexTimeout
      */
     abstract protected function stopConsuming(): void;
 
@@ -631,7 +687,7 @@ abstract class AbstractVhostsConsumer extends Consumer
     /**
      * @return void
      */
-    protected function updateLastProcessedAt()
+    protected function updateLastProcessedAt(): void
     {
         if ((null === $this->currentVhostName) || (null === $this->currentQueueName)) {
             return;
@@ -690,7 +746,6 @@ abstract class AbstractVhostsConsumer extends Consumer
                 $this->prefetchCount,
                 false
             );
-            $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
 
             $this->channel = $channel;
             $this->connection = $connection;
@@ -709,6 +764,8 @@ abstract class AbstractVhostsConsumer extends Consumer
             $this->goAheadOrWait();
 
             return $this->initConnection();
+        } finally {
+            $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
         }
 
         return $connection;
@@ -725,6 +782,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
         $heartbeatInterval = (int) ($this->config['options']['heartbeat'] ?? 0);
         if (!$heartbeatInterval) {
+            $this->logWarning('startHeartbeatCheck.heartbeat_interval_is_not_set');
             return;
         }
 
@@ -764,10 +822,10 @@ abstract class AbstractVhostsConsumer extends Consumer
                 $connection->checkHeartBeat();
             } catch (MutexTimeout) {
                 $this->logWarning('startHeartbeatCheck.mutex_timeout');
-            } catch (Throwable $exception) {
+            } catch (\Throwable $exception) {
                 $this->logError('startHeartbeatCheck.exception', [
-                    'eroor' => $exception->getMessage(),
-                    'trace' => $e->getTraceAsString(),
+                    'error' => $exception->getMessage(),
+                    'trace' => $exception->getTraceAsString(),
                 ]);
 
                 $this->shouldQuit = true;

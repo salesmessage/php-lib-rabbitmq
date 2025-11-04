@@ -34,7 +34,7 @@
     },
     "extra": {
         "branch-alias": {
-            "dev-master": "1.30-dev"
+            "dev-master": "1.31-dev"
         },
         "laravel": {
             "providers": [
@@ -43,7 +43,9 @@
         }
     },
     "suggest": {
-        "ext-pcntl": "Required to use all features of the queue consumer."
+        "ext-pcntl": "Required to use all features of the queue consumer.",
+        "ext-swoole": "Required to use async mode for healthcheck (alternative is ext-openswoole).",
+        "ext-openswoole": "Required to use async mode for healthcheck (alternative is ext-swoole)."
     },
     "scripts": {
         "test": [

@@ -3,6 +3,7 @@
 namespace Salesmessage\LibRabbitMQ\Queue;
 
 use PhpAmqpLib\Connection\AbstractConnection;
+use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
 use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
@@ -77,7 +78,16 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
 
     public function push($job, $data = '', $queue = null)
     {
-        $queue = $queue ?: $job->onQueue();
+        if (!($job instanceof RabbitMQConsumable)) {
+            throw new \InvalidArgumentException('Job must implement RabbitMQConsumable');
+        }
+
+        if (!$queue) {
+            if (!method_exists($job, 'onQueue')) {
+                throw new \InvalidArgumentException('Job must implement onQueue method');
+            }
+            $queue = $job->onQueue();
+        }
 
         try {
             $result = parent::push($job, $data, $queue);

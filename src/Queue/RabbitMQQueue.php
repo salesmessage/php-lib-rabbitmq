@@ -22,6 +22,7 @@ use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Exchange\AMQPExchangeType;
 use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Wire\AMQPTable;
+use Ramsey\Uuid\Uuid;
 use RuntimeException;
 use Throwable;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQQueueContract;
@@ -521,6 +522,7 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         $currentPayload = json_decode($payload, true);
         if ($correlationId = $currentPayload['id'] ?? null) {
             $properties['correlation_id'] = $correlationId;
+            $properties['message_id'] = Uuid::uuid7()->toString();
         }
 
         if ($this->getConfig()->isPrioritizeDelayed()) {
