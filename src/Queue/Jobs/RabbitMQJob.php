@@ -4,12 +4,14 @@ namespace Salesmessage\LibRabbitMQ\Queue\Jobs;
 
 use Illuminate\Container\Container;
 use Illuminate\Contracts\Container\BindingResolutionException;
+use Illuminate\Contracts\Encryption\Encrypter;
 use Illuminate\Contracts\Queue\Job as JobContract;
 use Illuminate\Queue\Jobs\Job;
 use Illuminate\Support\Arr;
 use PhpAmqpLib\Exception\AMQPProtocolChannelException;
 use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Wire\AMQPTable;
+use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Horizon\RabbitMQQueue as HorizonRabbitMQQueue;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
 
@@ -126,13 +128,51 @@ class RabbitMQJob extends Job implements JobContract
     {
         parent::release();
 
+        $consumableJob = $this->getPayloadData();
+        if (!($consumableJob instanceof RabbitMQConsumable)) {
+            throw new \RuntimeException('Job must be an instance of RabbitMQJobBatchable');
+        }
+
         // Always create a new message when this Job is released
-        $this->rabbitmq->laterRaw($delay, $this->message->getBody(), $this->queue, $this->attempts());
+        $this->rabbitmq->laterRaw($delay, $this->message->getBody(), $this->queue, $this->attempts(), $consumableJob->getQueueType());
 
         // Releasing a Job means the message was failed to process.
         // Because this Job message is always recreated and pushed as new message, this Job message is correctly handled.
         // We must tell rabbitMQ this job message can be removed by acknowledging the message.
         $this->rabbitmq->ack($this);
+    }
+
+    /**
+     * @return object
+     * @throws \RuntimeException
+     */
+    public function getPayloadData(): object
+    {
+        $payload = $this->payload();
+
+        $data = $payload['data'];
+
+        if (str_starts_with($data['command'], 'O:')) {
+            return unserialize($data['command']);
+        }
+
+        if ($this->container->bound(Encrypter::class)) {
+            return unserialize($this->container[Encrypter::class]->decrypt($data['command']));
+        }
+
+        throw new \RuntimeException('Unable to extract job data.');
+    }
+
+    /**
+     * Returns target class name
+     *
+     * @return mixed
+     */
+    public function getPayloadClass(): string
+    {
+        $payload = $this->payload();
+
+        return $payload['data']['commandName'];
     }
 
     /**

@@ -2,7 +2,6 @@
 
 namespace Salesmessage\LibRabbitMQ\Queue;
 
-use PhpAmqpLib\Connection\AbstractConnection;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
 use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
@@ -42,8 +41,7 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         $mandatory = false,
         $immediate = false,
         $ticket = null
-    ): void
-    {
+    ): void {
         try {
             parent::publishBasic($msg, $exchange, $destination, $mandatory, $immediate, $ticket);
         } catch (AMQPConnectionClosedException|AMQPChannelClosedException) {
@@ -89,6 +87,10 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
             $queue = $job->onQueue();
         }
 
+        if ($job->getQueueType() === RabbitMQConsumable::MQ_TYPE_QUORUM) {
+            $queue .= $this->getConfig()->getQuorumQueuePostfix();
+        }
+
         try {
             $result = parent::push($job, $data, $queue);
         } catch (AMQPConnectionClosedException $exception) {
@@ -109,11 +111,6 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         }
 
         return $result;
-    }
-
-    public function pushRaw($payload, $queue = null, array $options = []): int|string|null
-    {
-        return parent::pushRaw($payload, $queue, $options);
     }
 
     /**
@@ -185,4 +182,3 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         return false;
     }
 }
-
