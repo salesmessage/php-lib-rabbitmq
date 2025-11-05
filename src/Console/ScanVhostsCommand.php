@@ -13,7 +13,9 @@ use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 class ScanVhostsCommand extends Command
 {
     protected $signature = 'lib-rabbitmq:scan-vhosts
-                            {--sleep=10 : Number of seconds to sleep}';
+                            {--sleep=10 : Number of seconds to sleep}
+                            {--max-time=0 : Maximum seconds the command can run before stopping}
+                            {--max-memory=0 : Maximum memory usage in megabytes before stopping}';
 
     protected $description = 'Scan and index vhosts';
 
@@ -39,11 +41,45 @@ class ScanVhostsCommand extends Command
     public function handle(): void
     {
         $sleep = (int) $this->option('sleep');
+        $maxTime = max(0, (int) $this->option('max-time'));
+        $maxMemoryMb = max(0, (int) $this->option('max-memory'));
+        $maxMemoryBytes = $maxMemoryMb > 0 ? $maxMemoryMb * 1024 * 1024 : 0;
+
+        $startedAt = microtime(true);
 
         while (true) {
+            $iterationStartedAt = microtime(true);
+
             $this->processVhosts();
 
+            $iterationDuration = microtime(true) - $iterationStartedAt;
+            $totalRuntime = microtime(true) - $startedAt;
+            $memoryUsage = memory_get_usage(true);
+            $memoryPeakUsage = memory_get_peak_usage(true);
+
+            $this->line(sprintf(
+                'Iteration finished in %.2f seconds (total runtime %.2f seconds). Memory usage: %s (peak %s).',
+                $iterationDuration,
+                $totalRuntime,
+                $this->formatBytes($memoryUsage),
+                $this->formatBytes($memoryPeakUsage)
+            ));
+
             if ($sleep === 0) {
+                return;
+            }
+
+            if ($maxTime > 0 && $totalRuntime >= $maxTime) {
+                $this->warn(sprintf('Stopping: reached max runtime of %d seconds.', $maxTime));
+                return;
+            }
+
+            if ($maxMemoryBytes > 0 && $memoryUsage >= $maxMemoryBytes) {
+                $this->warn(sprintf(
+                    'Stopping: memory usage %s exceeded max threshold of %s.',
+                    $this->formatBytes($memoryUsage),
+                    $this->formatBytes($maxMemoryBytes)
+                ));
                 return;
             }
 
@@ -54,10 +90,7 @@ class ScanVhostsCommand extends Command
 
     private function processVhosts(): void
     {
-        $oldVhosts = [];
-        foreach ($this->internalStorageManager->getVhosts() as $idx => $vhost) {
-            $oldVhosts[$vhost] = $idx;
-        }
+        $oldVhostsMap = array_flip($this->internalStorageManager->getVhosts());
 
         foreach ($this->vhostsService->getAllVhosts() as $vhost) {
             $vhostDto = $this->processVhost($vhost);
@@ -65,13 +98,10 @@ class ScanVhostsCommand extends Command
                 continue;
             }
 
-            $oldVhostIndex = $oldVhosts[$vhostDto->getName()] ?? null;
-            if ($oldVhostIndex !== null) {
-                unset($oldVhosts[$oldVhostIndex]);
-            }
+            unset($oldVhostsMap[$vhostDto->getName()]);
         }
 
-        $this->removeOldsVhosts($oldVhosts);
+        $this->removeOldsVhosts(array_keys($oldVhostsMap));
     }
 
     /**
@@ -130,6 +160,11 @@ class ScanVhostsCommand extends Command
         $this->removeOldVhostQueues($vhostDto, $oldVhostQueues);
 
         return $vhostDto;
+    }
+
+    private function formatBytes(int $bytes): string
+    {
+        return number_format($bytes / (1024 * 1024), 2) . ' MB';
     }
 
     /**
