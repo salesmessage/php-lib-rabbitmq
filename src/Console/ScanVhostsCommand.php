@@ -3,9 +3,6 @@
 namespace Salesmessage\LibRabbitMQ\Console;
 
 use Illuminate\Console\Command;
-use Illuminate\Redis\Connections\PredisConnection;
-use Illuminate\Support\Collection;
-use Illuminate\Support\Facades\Redis;
 use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Services\GroupsService;
@@ -19,8 +16,8 @@ class ScanVhostsCommand extends Command
                             {--sleep=10 : Number of seconds to sleep}';
 
     protected $description = 'Scan and index vhosts';
-    
-    private array $groups = [];
+
+    private array $groups;
 
     /**
      * @param GroupsService $groupsService
@@ -39,42 +36,42 @@ class ScanVhostsCommand extends Command
         $this->groups = $this->groupsService->getAllGroupsNames();
     }
 
-    /**
-     * @return int
-     */
-    public function handle()
+    public function handle(): void
     {
         $sleep = (int) $this->option('sleep');
-        
-        $vhosts = $this->vhostsService->getAllVhosts();
-        $oldVhosts = $this->internalStorageManager->getVhosts();
 
-        if ($vhosts->isNotEmpty()) {
-            foreach ($vhosts as $vhost) {
-                $vhostDto = $this->processVhost($vhost);
-                if (null === $vhostDto) {
-                    continue;
-                }
+        while (true) {
+            $this->processVhosts();
 
-                $oldVhostIndex = array_search($vhostDto->getName(), $oldVhosts, true);
-                if (false !== $oldVhostIndex) {
-                    unset($oldVhosts[$oldVhostIndex]);
-                }
+            if ($sleep === 0) {
+                return;
             }
-        } else {
-            $this->warn('Vhosts not found.');
+
+            $this->line(sprintf('Sleep %d seconds...', $sleep));
+            sleep($sleep);
+        }
+    }
+
+    private function processVhosts(): void
+    {
+        $oldVhosts = [];
+        foreach ($this->internalStorageManager->getVhosts() as $idx => $vhost) {
+            $oldVhosts[$vhost] = $idx;
+        }
+
+        foreach ($this->vhostsService->getAllVhosts() as $vhost) {
+            $vhostDto = $this->processVhost($vhost);
+            if (null === $vhostDto) {
+                continue;
+            }
+
+            $oldVhostIndex = $oldVhosts[$vhostDto->getName()] ?? null;
+            if ($oldVhostIndex !== null) {
+                unset($oldVhosts[$oldVhostIndex]);
+            }
         }
 
         $this->removeOldsVhosts($oldVhosts);
-
-        if ($sleep > 0) {
-            $this->line(sprintf('Sleep %d seconds...', $sleep));
-
-            sleep($sleep);
-            return $this->handle();
-        }
-
-        return Command::SUCCESS;
     }
 
     /**
@@ -221,4 +218,3 @@ class ScanVhostsCommand extends Command
         }
     }
 }
-
