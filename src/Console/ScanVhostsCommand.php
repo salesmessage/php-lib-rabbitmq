@@ -15,11 +15,13 @@ class ScanVhostsCommand extends Command
     protected $signature = 'lib-rabbitmq:scan-vhosts
                             {--sleep=10 : Number of seconds to sleep}
                             {--max-time=0 : Maximum seconds the command can run before stopping}
+                            {--with-output=true : Show output details during iteration}
                             {--max-memory=0 : Maximum memory usage in megabytes before stopping}';
 
     protected $description = 'Scan and index vhosts';
 
     private array $groups;
+    private bool $silent = false;
 
     /**
      * @param GroupsService $groupsService
@@ -42,6 +44,8 @@ class ScanVhostsCommand extends Command
     {
         $sleep = (int) $this->option('sleep');
         $maxTime = max(0, (int) $this->option('max-time'));
+        $this->silent = !filter_var($this->option('with-output'), FILTER_VALIDATE_BOOLEAN);
+
         $maxMemoryMb = max(0, (int) $this->option('max-memory'));
         $maxMemoryBytes = $maxMemoryMb > 0 ? $maxMemoryMb * 1024 * 1024 : 0;
 
@@ -63,23 +67,23 @@ class ScanVhostsCommand extends Command
                 $totalRuntime,
                 $this->formatBytes($memoryUsage),
                 $this->formatBytes($memoryPeakUsage)
-            ));
+            ), 'warning', forcePrint: $sleep === 0);
 
             if ($sleep === 0) {
                 return;
             }
 
             if ($maxTime > 0 && $totalRuntime >= $maxTime) {
-                $this->warn(sprintf('Stopping: reached max runtime of %d seconds.', $maxTime));
+                $this->line(sprintf('Stopping: reached max runtime of %d seconds.', $maxTime), 'warning', forcePrint: true);
                 return;
             }
 
             if ($maxMemoryBytes > 0 && $memoryUsage >= $maxMemoryBytes) {
-                $this->warn(sprintf(
+                $this->line(sprintf(
                     'Stopping: memory usage %s exceeded max threshold of %s.',
                     $this->formatBytes($memoryUsage),
                     $this->formatBytes($maxMemoryBytes)
-                ));
+                ), 'warning', forcePrint: true);
                 return;
             }
 
@@ -250,6 +254,13 @@ class ScanVhostsCommand extends Command
                 $queueApiDto->getName(),
                 $queueApiDto->getVhostName()
             ));
+        }
+    }
+
+    public function line($string, $style = null, $verbosity = null, $forcePrint = false): void
+    {
+        if (!$this->silent || $style === 'error' || $forcePrint) {
+            parent::line($string, $style, $verbosity);
         }
     }
 }
