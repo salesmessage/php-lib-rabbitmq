@@ -80,7 +80,7 @@ class DirectConsumer extends AbstractVhostsConsumer
 
                 $this->processBatch($connection);
 
-                $this->goAheadOrWait();
+                $this->goAheadOrWait($this->workerOptions->sleep);
                 $connection = $this->startConsuming();
 
                 continue;
@@ -95,7 +95,7 @@ class DirectConsumer extends AbstractVhostsConsumer
 
                 $this->processBatch($connection);
 
-                $this->goAheadOrWait();
+                $this->goAheadOrWait($this->workerOptions->sleep);
                 $connection = $this->startConsuming();
 
                 continue;

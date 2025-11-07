@@ -153,7 +153,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     public function daemon($connectionName, $queue, WorkerOptions $options)
     {
-        $this->goAheadOrWait();
+        $this->goAheadOrWait($options->sleep);
 
         $this->configConnectionName = (string) $connectionName;
         $this->workerOptions = $options;
@@ -768,7 +768,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
             $this->internalStorageManager->removeVhost($vhostDto);
             $this->loadVhosts();
-            $this->goAheadOrWait();
+            $this->goAheadOrWait($this->workerOptions?->sleep ?? 1);
 
             return $this->initConnection();
         } finally {
