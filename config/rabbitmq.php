@@ -23,6 +23,18 @@ return [
     ],
 
     'options' => [
+        'quorum' => [
+            /**
+             * Max allowed delivery attempts (RabbitMQ x-delivery-count) for quorum queues.
+             * 0 disables the check.
+             */
+            'delivery_limit' => env('RABBITMQ_QUORUM_DELIVERY_LIMIT', 3),
+            /**
+             * Action when delivery_limit is reached.
+             * Possible values: 'ack', 'reject'
+             */
+            'on_limit_action' => env('RABBITMQ_QUORUM_ON_LIMIT_ACTION', 'reject'),
+        ],
     ],
 
     /**

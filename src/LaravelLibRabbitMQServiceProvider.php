@@ -18,6 +18,7 @@ use Salesmessage\LibRabbitMQ\Services\GroupsService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Salesmessage\LibRabbitMQ\Services\QueueService;
 use Salesmessage\LibRabbitMQ\Services\VhostsService;
+use Salesmessage\LibRabbitMQ\Services\DeliveryLimitService;
 use Salesmessage\LibRabbitMQ\VhostsConsumers\DirectConsumer as VhostsDirectConsumer;
 use Salesmessage\LibRabbitMQ\VhostsConsumers\QueueConsumer as VhostsQueueConsumer;
 
@@ -69,6 +70,7 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
                     $this->app[ExceptionHandler::class],
                     $isDownForMaintenance,
                     $this->app->get(DeduplicationService::class),
+                    $this->app->get(DeliveryLimitService::class),
                     null,
                 );
             });
@@ -86,6 +88,7 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
                     $this->app[ExceptionHandler::class],
                     $isDownForMaintenance,
                     $this->app->get(DeduplicationService::class),
+                    $this->app->get(DeliveryLimitService::class),
                     null,
                 );
             });
