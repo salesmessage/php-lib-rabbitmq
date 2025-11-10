@@ -28,6 +28,7 @@ use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\AppDeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationService as TransportDeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
+use Salesmessage\LibRabbitMQ\Services\DeliveryLimitService;
 
 abstract class AbstractVhostsConsumer extends Consumer
 {
@@ -94,6 +95,7 @@ abstract class AbstractVhostsConsumer extends Consumer
         ExceptionHandler $exceptions,
         callable $isDownForMaintenance,
         protected TransportDeduplicationService $transportDeduplicationService,
+        protected DeliveryLimitService $deliveryLimitService,
         callable $resetScope = null,
     ) {
         parent::__construct($manager, $events, $exceptions, $isDownForMaintenance, $resetScope);
@@ -151,7 +153,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     public function daemon($connectionName, $queue, WorkerOptions $options)
     {
-        $this->goAheadOrWait();
+        $this->goAheadOrWait($options->sleep);
 
         $this->configConnectionName = (string) $connectionName;
         $this->workerOptions = $options;
@@ -240,6 +242,11 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function processAmqpMessage(AMQPMessage $message, RabbitMQQueue $connection): void
     {
+        if (!$this->deliveryLimitService->isAllowed($message)) {
+            $this->logWarning('processAMQPMessage.delivery_limit_reached');
+            return;
+        }
+
         $this->hadJobs = true;
         $isSupportBatching = $this->isSupportBatching($message);
         if ($isSupportBatching) {
@@ -761,7 +768,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
             $this->internalStorageManager->removeVhost($vhostDto);
             $this->loadVhosts();
-            $this->goAheadOrWait();
+            $this->goAheadOrWait($this->workerOptions?->sleep ?? 1);
 
             return $this->initConnection();
         } finally {

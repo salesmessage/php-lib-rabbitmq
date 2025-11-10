@@ -81,7 +81,7 @@ class QueueConsumer extends AbstractVhostsConsumer
 
                 $this->processBatch($connection);
 
-                $this->goAheadOrWait();
+                $this->goAheadOrWait($this->workerOptions->sleep);
                 $this->startConsuming();
 
                 $this->sleep($this->workerOptions->sleep);
@@ -139,7 +139,7 @@ class QueueConsumer extends AbstractVhostsConsumer
 
                 $this->processBatch($connection);
 
-                $this->goAheadOrWait();
+                $this->goAheadOrWait($this->workerOptions->sleep);
                 $this->startConsuming();
             }
 
@@ -184,7 +184,7 @@ class QueueConsumer extends AbstractVhostsConsumer
         if (false === $isSuccess) {
             $this->stopConsuming();
 
-            $this->goAheadOrWait();
+            $this->goAheadOrWait($this->workerOptions->sleep);
             return $this->startConsuming();
         }
 
