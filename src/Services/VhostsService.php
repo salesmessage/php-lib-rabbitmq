@@ -2,7 +2,6 @@
 
 namespace Salesmessage\LibRabbitMQ\Services;
 
-use Illuminate\Support\Collection;
 use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Services\Api\RabbitApiClient;
 use Throwable;
@@ -23,52 +22,37 @@ class VhostsService
         $this->rabbitApiClient->setConnectionConfig($connectionConfig);
     }
 
-    /**
-     * @param int $page
-     * @param int $pageSize
-     * @param Collection|null $vhosts
-     * @return Collection
-     */
-    public function getAllVhosts(
-        int $page = 1, 
-        int $pageSize = 500,
-        ?Collection $vhosts = null,
-    ): Collection
+    public function getAllVhosts(int $fromPage = 1): \Generator
     {
-        if (null === $vhosts) {
-            $vhosts = new Collection();
-        }
-        
-        try {
+        while (true) {
             $data = $this->rabbitApiClient->request(
                 'GET',
                 '/api/vhosts', [
-                'page' => $page,
-                'page_size' => $pageSize,
+                'page' => $fromPage,
+                'page_size' => 500,
                 'columns' => 'name,messages,messages_ready,messages_unacknowledged',
             ]);
-        } catch (Throwable $exception) {
-            $this->logger->warning('Salesmessage.LibRabbitMQ.Services.VhostsService.getAllVhosts.exception', [
-                'message' => $exception->getMessage(),
-                'code' => $exception->getCode(),
-                'trace' => $exception->getTraceAsString(),
-            ]);
 
-            $data = [];
+            $items = $data['items'] ?? [];
+            if (!is_array($items) || !isset($data['page_count'])) {
+                throw new \LogicException('Unexpected response from RabbitMQ API');
+            }
+            if (empty($items)) {
+                break;
+            }
+
+            foreach ($items as $item) {
+                yield $item;
+            }
+
+            $nextPage = $fromPage + 1;
+            $totalPages = (int) $data['page_count'];
+            if ($nextPage > $totalPages) {
+                break;
+            }
+
+            $fromPage = $nextPage;
         }
-
-        $items = (array) ($data['items'] ?? []);
-        if (!empty($items)) {
-            $vhosts->push(...$items);
-        }
-
-        $nextPage = $page + 1;
-        $lastPage = (int) ($data['page_count'] ?? 1);
-        if ($lastPage >= $nextPage) {
-            return $this->getAllVhosts($nextPage, $pageSize, $vhosts);
-        }
-
-        return $vhosts;
     }
 
     /**
@@ -120,7 +104,7 @@ class VhostsService
     {
         $vhostName = $this->getVhostName($organizationId);
         $description = $this->getVhostDescription($organizationId);
-        
+
         return $this->createVhost($vhostName, $description);
     }
 

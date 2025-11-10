@@ -3,9 +3,6 @@
 namespace Salesmessage\LibRabbitMQ\Console;
 
 use Illuminate\Console\Command;
-use Illuminate\Redis\Connections\PredisConnection;
-use Illuminate\Support\Collection;
-use Illuminate\Support\Facades\Redis;
 use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Services\GroupsService;
@@ -16,11 +13,15 @@ use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 class ScanVhostsCommand extends Command
 {
     protected $signature = 'lib-rabbitmq:scan-vhosts
-                            {--sleep=10 : Number of seconds to sleep}';
+                            {--sleep=10 : Number of seconds to sleep}
+                            {--max-time=0 : Maximum seconds the command can run before stopping}
+                            {--with-output=true : Show output details during iteration}
+                            {--max-memory=0 : Maximum memory usage in megabytes before stopping}';
 
     protected $description = 'Scan and index vhosts';
-    
-    private array $groups = [];
+
+    private array $groups;
+    private bool $silent = false;
 
     /**
      * @param GroupsService $groupsService
@@ -39,42 +40,72 @@ class ScanVhostsCommand extends Command
         $this->groups = $this->groupsService->getAllGroupsNames();
     }
 
-    /**
-     * @return int
-     */
-    public function handle()
+    public function handle(): void
     {
         $sleep = (int) $this->option('sleep');
-        
-        $vhosts = $this->vhostsService->getAllVhosts();
-        $oldVhosts = $this->internalStorageManager->getVhosts();
+        $maxTime = max(0, (int) $this->option('max-time'));
+        $this->silent = !filter_var($this->option('with-output'), FILTER_VALIDATE_BOOLEAN);
 
-        if ($vhosts->isNotEmpty()) {
-            foreach ($vhosts as $vhost) {
-                $vhostDto = $this->processVhost($vhost);
-                if (null === $vhostDto) {
-                    continue;
-                }
+        $maxMemoryMb = max(0, (int) $this->option('max-memory'));
+        $maxMemoryBytes = $maxMemoryMb > 0 ? $maxMemoryMb * 1024 * 1024 : 0;
 
-                $oldVhostIndex = array_search($vhostDto->getName(), $oldVhosts, true);
-                if (false !== $oldVhostIndex) {
-                    unset($oldVhosts[$oldVhostIndex]);
-                }
+        $startedAt = microtime(true);
+
+        while (true) {
+            $iterationStartedAt = microtime(true);
+
+            $this->processVhosts();
+
+            $iterationDuration = microtime(true) - $iterationStartedAt;
+            $totalRuntime = microtime(true) - $startedAt;
+            $memoryUsage = memory_get_usage(true);
+            $memoryPeakUsage = memory_get_peak_usage(true);
+
+            $this->line(sprintf(
+                'Iteration finished in %.2f seconds (total runtime %.2f seconds). Memory usage: %s (peak %s).',
+                $iterationDuration,
+                $totalRuntime,
+                $this->formatBytes($memoryUsage),
+                $this->formatBytes($memoryPeakUsage)
+            ), 'warning', forcePrint: $sleep === 0);
+
+            if ($sleep === 0) {
+                return;
             }
-        } else {
-            $this->warn('Vhosts not found.');
-        }
 
-        $this->removeOldsVhosts($oldVhosts);
+            if ($maxTime > 0 && $totalRuntime >= $maxTime) {
+                $this->line(sprintf('Stopping: reached max runtime of %d seconds.', $maxTime), 'warning', forcePrint: true);
+                return;
+            }
 
-        if ($sleep > 0) {
+            if ($maxMemoryBytes > 0 && $memoryUsage >= $maxMemoryBytes) {
+                $this->line(sprintf(
+                    'Stopping: memory usage %s exceeded max threshold of %s.',
+                    $this->formatBytes($memoryUsage),
+                    $this->formatBytes($maxMemoryBytes)
+                ), 'warning', forcePrint: true);
+                return;
+            }
+
             $this->line(sprintf('Sleep %d seconds...', $sleep));
-
             sleep($sleep);
-            return $this->handle();
+        }
+    }
+
+    private function processVhosts(): void
+    {
+        $oldVhostsMap = array_flip($this->internalStorageManager->getVhosts());
+
+        foreach ($this->vhostsService->getAllVhosts() as $vhost) {
+            $vhostDto = $this->processVhost($vhost);
+            if (null === $vhostDto) {
+                continue;
+            }
+
+            unset($oldVhostsMap[$vhostDto->getName()]);
         }
 
-        return Command::SUCCESS;
+        $this->removeOldsVhosts(array_keys($oldVhostsMap));
     }
 
     /**
@@ -133,6 +164,11 @@ class ScanVhostsCommand extends Command
         $this->removeOldVhostQueues($vhostDto, $oldVhostQueues);
 
         return $vhostDto;
+    }
+
+    private function formatBytes(int $bytes): string
+    {
+        return number_format($bytes / (1024 * 1024), 2) . ' MB';
     }
 
     /**
@@ -220,5 +256,11 @@ class ScanVhostsCommand extends Command
             ));
         }
     }
-}
 
+    public function line($string, $style = null, $verbosity = null, $forcePrint = false): void
+    {
+        if (!$this->silent || $style === 'error' || $forcePrint) {
+            parent::line($string, $style, $verbosity);
+        }
+    }
+}
