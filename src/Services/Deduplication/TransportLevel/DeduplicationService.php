@@ -249,17 +249,19 @@ class DeduplicationService
         $attempts = (int) ($headers[self::HEADER_LOCK_REQUEUE_COUNT] ?? 0);
         ++$attempts;
 
-        $maxAttempts = ((int) ($this->getConfig('lock_ttl', 30))) / self::WAIT_AFTER_PUBLISH;
+        $maxAttempts = 1 + (((int) ($this->getConfig('lock_ttl', 30))) / self::WAIT_AFTER_PUBLISH);
         if ($attempts > $maxAttempts) {
             $this->logger->warning('DeduplicationService.republishLockedMessage.max_attempts_reached', [
                 'message_id' => $props['message_id'] ?? null,
             ]);
-            $message->ack();
+            $message->reject(false);
 
-            return self::ACTION_ACK;
+            return self::ACTION_REJECT;
         }
 
         $headers[self::HEADER_LOCK_REQUEUE_COUNT] = $attempts;
+        // this header will be added during publishing, and we should not use counter from the previous message
+        unset($headers['x-delivery-count']);
 
         $newProps = $props;
         $newProps['application_headers'] = new AMQPTable($headers);
@@ -275,6 +277,7 @@ class DeduplicationService
         $message->ack();
         // it's necessary to avoid a high redelivery rate
         // normally, such a situation is not expected (or expected very rarely)
+        // for example, when we have OOM
         sleep(self::WAIT_AFTER_PUBLISH);
 
         return self::ACTION_REQUEUE;
