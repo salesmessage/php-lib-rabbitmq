@@ -2,6 +2,7 @@
 
 namespace Salesmessage\LibRabbitMQ\Queue;
 
+use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
 use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
@@ -12,6 +13,7 @@ use PhpAmqpLib\Exception\AMQPConnectionClosedException;
 use PhpAmqpLib\Channel\AMQPChannel;
 use Salesmessage\LibRabbitMQ\Services\GroupsService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
+use Salesmessage\LibRabbitMQ\Services\Lock\LockService;
 use Salesmessage\LibRabbitMQ\Services\VhostsService;
 
 class RabbitMQQueueBatchable extends BaseRabbitMQQueue
@@ -22,6 +24,10 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
 
     private VhostsService $vhostsService;
 
+    private LockService $lockService;
+
+    private LoggerInterface $logger;
+
     /**
      * @param QueueConfig $config
      */
@@ -30,6 +36,8 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         $this->internalStorageManager = app(InternalStorageManager::class);
         $this->groupsService = app(GroupsService::class);
         $this->vhostsService = app(VhostsService::class);
+        $this->lockService = app(LockService::class);
+        $this->logger = app(LoggerInterface::class);
 
         parent::__construct($config);
     }
@@ -113,19 +121,39 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         return $result;
     }
 
-    /**
-     * @return bool
-     * @throws \GuzzleHttp\Exception\GuzzleException
-     * @throws \Salesmessage\LibRabbitMQ\Exceptions\RabbitApiClientException
-     */
-    private function createNotExistsVhost(): bool
+    private function createNotExistsVhost(int $attempts = 0): bool
     {
         $dto = new ConnectionNameDto($this->getConnectionName());
         if (null === $dto->getVhostName()) {
             return false;
         }
 
-        return $this->vhostsService->createVhost($dto->getVhostName(), 'Automatically created vhost');
+        $hasCreated = false;
+        $creationHandler = function () use ($dto, &$hasCreated) {
+            $hasCreated = $this->vhostsService->createVhost($dto->getVhostName(), 'Automatically created vhost');
+        };
+
+        try {
+            $lockKey = 'vhost:' . $dto->getVhostName() . ':creation';
+            $handlerWasRun = $this->lockService->lock($lockKey, $creationHandler, skipHandlingOnLock: true);
+            // if handler was not run, it means that another process has possibly created the vhost
+            // and we need to just re-check if it exists
+            if (!$handlerWasRun) {
+                $hasCreated = isset($this->vhostsService->getVhost($dto->getVhostName(), 'name')['name']);
+            }
+        } catch (\Throwable $e) {
+            $this->logger->error('RabbitMQQueueBatchable.createNotExistsVhost.exception', [
+                'vhost_name' => $dto->getVhostName(),
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+        }
+
+        if (!$hasCreated && $attempts < 3) {
+            return $this->createNotExistsVhost(++$attempts);
+        }
+
+        return $hasCreated;
     }
 
     /**
