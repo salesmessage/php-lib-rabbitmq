@@ -36,11 +36,11 @@ class LockService
             $hadLock = true;
         }
 
-        if ($skipHandlingOnLock && $hadLock) {
-            return false;
-        }
-
         try {
+            if ($skipHandlingOnLock && $hadLock) {
+                return false;
+            }
+
             $handler();
         } finally {
             $lock->release();

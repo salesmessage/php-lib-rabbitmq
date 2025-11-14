@@ -149,7 +149,8 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
             ]);
         }
 
-        if (!$hasCreated && $attempts < 3) {
+        if (!$hasCreated && $attempts < 2) {
+            sleep(1);
             return $this->createNotExistsVhost(++$attempts);
         }
 
