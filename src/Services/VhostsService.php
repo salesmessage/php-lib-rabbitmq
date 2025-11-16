@@ -72,14 +72,16 @@ class VhostsService
      * @throws \GuzzleHttp\Exception\GuzzleException
      * @throws \Salesmessage\LibRabbitMQ\Exceptions\RabbitApiClientException
      */
-    public function getVhost(string $vhostName): array
-    {
+    public function getVhost(
+        string $vhostName,
+        string $columns = 'name,messages,messages_ready,messages_unacknowledged',
+    ): array {
         try {
             $data = $this->rabbitApiClient->request(
                 'GET',
                 '/api/vhosts/' . $vhostName,
                 [
-                    'columns' => 'name,messages,messages_ready,messages_unacknowledged',
+                    'columns' => $columns,
                 ]
             );
         } catch (Throwable $exception) {
@@ -127,7 +129,6 @@ class VhostsService
                     'default_queue_type' => 'classic',
                 ]
             );
-            $isCreated = true;
         } catch (Throwable $exception) {
             $this->logger->warning('Salesmessage.LibRabbitMQ.Services.VhostsService.createVhost.exception', [
                 'vhost_name' => $vhostName,
@@ -136,15 +137,10 @@ class VhostsService
                 'trace' => $exception->getTraceAsString(),
             ]);
 
-            $isCreated = false;
+            return false;
         }
 
-        $isSuccess = false;
-        if ($isCreated) {
-            $isSuccess = $this->setVhostPermissions($vhostName);
-        }
-
-        return $isSuccess;
+        return $this->setVhostPermissions($vhostName);
     }
 
     /**
@@ -165,7 +161,6 @@ class VhostsService
                     'read' => '.*',
                 ]
             );
-            $isSuccess = true;
         } catch (Throwable $exception) {
             $this->logger->warning('Salesmessage.LibRabbitMQ.Services.VhostsService.setVhostPermissions.exception', [
                 'vhost_name' => $vhostName,
@@ -173,11 +168,10 @@ class VhostsService
                 'code' => $exception->getCode(),
                 'trace' => $exception->getTraceAsString(),
             ]);
-
-            $isSuccess = false;
+            return false;
         }
 
-        return $isSuccess;
+        return true;
     }
 
     /**

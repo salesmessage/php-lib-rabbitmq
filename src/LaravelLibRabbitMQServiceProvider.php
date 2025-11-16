@@ -2,6 +2,8 @@
 
 namespace Salesmessage\LibRabbitMQ;
 
+use Illuminate\Cache\RedisStore;
+use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Queue\QueueManager;
 use Illuminate\Support\ServiceProvider;
@@ -36,6 +38,8 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
 
         if ($this->app->runningInConsole()) {
             $this->bindDeduplicationService();
+
+            $this->app->bind(LockProvider::class, RedisStore::class);
 
             $this->app->singleton('rabbitmq.consumer', function () {
                 $isDownForMaintenance = function () {
