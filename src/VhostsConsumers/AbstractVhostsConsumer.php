@@ -303,6 +303,7 @@ abstract class AbstractVhostsConsumer extends Consumer
     protected function processBatch(RabbitMQQueue $connection): void
     {
         if (empty($this->batchMessages)) {
+            $this->logDebug('processBatch.noMessagesInBatch');
             return;
         }
 
@@ -315,6 +316,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
                 $uniqueMessagesForProcessing = [];
                 $batchData = [];
+                $this->logDebug('processBatch.lockingMessagesForProcessing');
                 foreach ($batchJobMessages as $batchMessage) {
                     $this->transportDeduplicationService->decorateWithDeduplication(
                         function () use ($batchMessage, $connection, &$uniqueMessagesForProcessing, &$batchData) {
@@ -326,6 +328,7 @@ abstract class AbstractVhostsConsumer extends Consumer
                         $this->currentQueueName
                     );
                 }
+                $this->logDebug('processBatch.messagesLockedForProcessing');
 
                 try {
                     if (AppDeduplicationService::isEnabled()) {
@@ -353,10 +356,6 @@ abstract class AbstractVhostsConsumer extends Consumer
 
                     $isBatchSuccess = true;
                 } catch (\Throwable $exception) {
-                    foreach ($uniqueMessagesForProcessing as $batchMessage) {
-                        $this->transportDeduplicationService->release($batchMessage, $this->currentQueueName);
-                    }
-
                     $isBatchSuccess = false;
 
                     $this->logError('processBatch.exception', [
@@ -365,6 +364,12 @@ abstract class AbstractVhostsConsumer extends Consumer
                         'trace' => $exception->getTraceAsString(),
                         'error_class' => get_class($exception),
                     ]);
+
+                    foreach ($uniqueMessagesForProcessing as $batchMessage) {
+                        $this->transportDeduplicationService->release($batchMessage, $this->currentQueueName);
+                    }
+
+                    $this->logDebug('processBatch.exception.messagesReleased');
                 } finally {
                     if ($this->supportsAsyncSignals()) {
                         $this->resetTimeoutHandler();
@@ -379,9 +384,11 @@ abstract class AbstractVhostsConsumer extends Consumer
             $this->connectionMutex->lock(static::MAIN_HANDLER_LOCK);
             try {
                 if ($isBatchSuccess && !empty($uniqueMessagesForProcessing)) {
+                    $this->logDebug('processBatch.markingMessagesAsProcessed');
                     foreach ($uniqueMessagesForProcessing as $batchMessage) {
                         $this->transportDeduplicationService?->markAsProcessed($batchMessage, $this->currentQueueName);
                     }
+                    $this->logDebug('processBatch.messagesMarkedAsProcessed');
 
                     $lastBatchMessage = end($uniqueMessagesForProcessing);
                     $this->ackMessage($lastBatchMessage, true);
@@ -398,6 +405,8 @@ abstract class AbstractVhostsConsumer extends Consumer
         $this->updateLastProcessedAt();
 
         $this->batchMessages = [];
+
+        $this->logDebug('processBatch.finished');
     }
 
     /**
@@ -441,10 +450,13 @@ abstract class AbstractVhostsConsumer extends Consumer
                     $this->ackMessage($message);
 
                 } else {
+                    $this->logDebug('processSingleJob.jobStarted');
                     $this->runJob($job, $this->currentConnectionName, $this->workerOptions);
+                    $this->logDebug('processSingleJob.jobFinished');
                 }
 
                 $this->transportDeduplicationService->markAsProcessed($message, $this->currentQueueName);
+                $this->logDebug('processSingleJob.messageMarkedAsProcessed');
             },
             $message,
             $this->currentQueueName,
@@ -474,6 +486,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
         try {
             $message->ack($multiple);
+            $this->logDebug('ackMessage.success');
         } catch (\Throwable $exception) {
             $this->logError('ackMessage.exception', [
                 'message' => $exception->getMessage(),
