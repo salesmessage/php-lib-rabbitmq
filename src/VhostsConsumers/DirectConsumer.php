@@ -20,12 +20,12 @@ class DirectConsumer extends AbstractVhostsConsumer
     {
         $this->logInfo('daemon.start');
 
-        $lastRestart = $this->getTimestampOfLastQueueRestart();
-
-        $startTime = hrtime(true) / 1e9;
         $this->totalJobsProcessed = 0;
 
         $connection = $this->startConsuming();
+        if ($connection === null) {
+            return $this->stopStatusCode;
+        }
 
         while (true) {
             // Before reserving any jobs, we will make sure this queue is not paused and
@@ -34,7 +34,7 @@ class DirectConsumer extends AbstractVhostsConsumer
             if (! $this->daemonShouldRun($this->workerOptions, $this->configConnectionName, $this->currentQueueName)) {
                 $this->logInfo('daemon.consuming_pause_worker');
 
-                $this->pauseWorker($this->workerOptions, $lastRestart);
+                $this->pauseWorker($this->workerOptions, $this->lastRestart);
 
                 continue;
             }
@@ -80,8 +80,14 @@ class DirectConsumer extends AbstractVhostsConsumer
 
                 $this->processBatch($connection);
 
-                $this->goAheadOrWait($this->workerOptions->sleep);
+                $goAhead = $this->goAheadOrWait($this->workerOptions->sleep);
+                if ($goAhead === false) {
+                    return $this->stopStatusCode;
+                }
                 $connection = $this->startConsuming();
+                if ($connection === null) {
+                    return $this->stopStatusCode;
+                }
 
                 continue;
             }
@@ -95,8 +101,14 @@ class DirectConsumer extends AbstractVhostsConsumer
 
                 $this->processBatch($connection);
 
-                $this->goAheadOrWait($this->workerOptions->sleep);
+                $goAhead = $this->goAheadOrWait($this->workerOptions->sleep);
+                if ($goAhead === false) {
+                    return $this->stopStatusCode;
+                }
                 $connection = $this->startConsuming();
+                if ($connection === null) {
+                    return $this->stopStatusCode;
+                }
 
                 continue;
             }
@@ -104,10 +116,10 @@ class DirectConsumer extends AbstractVhostsConsumer
             // Finally, we will check to see if we have exceeded our memory limits or if
             // the queue should restart based on other indications. If so, we'll stop
             // this worker and let whatever is "monitoring" it restart the process.
-            $this->stopStatusCode = $this->getStopStatus(
+            $this->stopStatusCode = $this->stopIfNecessary(
                 $this->workerOptions,
-                $lastRestart,
-                $startTime,
+                $this->lastRestart,
+                $this->startTime,
                 $this->totalJobsProcessed,
                 true
             );
@@ -121,10 +133,7 @@ class DirectConsumer extends AbstractVhostsConsumer
         }
     }
 
-    /**
-     * @return RabbitMQQueue
-     */
-    protected function startConsuming(): RabbitMQQueue
+    protected function startConsuming(): ?RabbitMQQueue
     {
         $this->processingUuid = $this->generateProcessingUuid();
         $this->processingStartedAt = microtime(true);

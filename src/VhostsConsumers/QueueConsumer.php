@@ -25,12 +25,12 @@ class QueueConsumer extends AbstractVhostsConsumer
     {
         $this->logInfo('daemon.start');
 
-        $lastRestart = $this->getTimestampOfLastQueueRestart();
-
-        $startTime = hrtime(true) / 1e9;
         $this->totalJobsProcessed = 0;
 
         $connection = $this->startConsuming();
+        if ($connection === null) {
+            return $this->stopStatusCode;
+        }
 
         while ($this->channel->is_consuming()) {
             // Before reserving any jobs, we will make sure this queue is not paused and
@@ -39,7 +39,7 @@ class QueueConsumer extends AbstractVhostsConsumer
             if (! $this->daemonShouldRun($this->workerOptions, $this->configConnectionName, $this->currentQueueName)) {
                 $this->logInfo('daemon.consuming_pause_worker');
 
-                $this->pauseWorker($this->workerOptions, $lastRestart);
+                $this->pauseWorker($this->workerOptions, $this->lastRestart);
 
                 continue;
             }
@@ -81,8 +81,13 @@ class QueueConsumer extends AbstractVhostsConsumer
 
                 $this->processBatch($connection);
 
-                $this->goAheadOrWait($this->workerOptions->sleep);
-                $this->startConsuming();
+                $goAhead = $this->goAheadOrWait($this->workerOptions->sleep);
+                if ($goAhead === false) {
+                    return $this->stopStatusCode;
+                }
+                if ($this->startConsuming() === null) {
+                    return $this->stopStatusCode;
+                }
 
                 $this->sleep($this->workerOptions->sleep);
             }
@@ -90,12 +95,12 @@ class QueueConsumer extends AbstractVhostsConsumer
             // Finally, we will check to see if we have exceeded our memory limits or if
             // the queue should restart based on other indications. If so, we'll stop
             // this worker and let whatever is "monitoring" it restart the process.
-            $this->stopStatusCode = $this->getStopStatus(
+            $this->stopStatusCode = $this->stopIfNecessary(
                 $this->workerOptions,
-                $lastRestart,
-                $startTime,
+                $this->lastRestart,
+                $this->startTime,
                 $this->totalJobsProcessed,
-                $this->hasJob
+                $this->hasJob ?: null,
             );
             if (! is_null($this->stopStatusCode)) {
                 $this->logWarning('daemon.consuming_stop', [
@@ -109,11 +114,7 @@ class QueueConsumer extends AbstractVhostsConsumer
         }
     }
 
-    /**
-     * @return RabbitMQQueue
-     * @throws MutexTimeout
-     */
-    protected function startConsuming(): RabbitMQQueue
+    protected function startConsuming(int $attempts = 0): ?RabbitMQQueue
     {
         $this->processingUuid = $this->generateProcessingUuid();
         $this->processingStartedAt = microtime(true);
@@ -128,8 +129,12 @@ class QueueConsumer extends AbstractVhostsConsumer
         $this->jobsProcessed = 0;
 
         $connection = $this->initConnection();
+        if ($connection === null) {
+            return null;
+        }
 
-        $callback = function (AMQPMessage $message) use ($connection): void {
+        $stopConsuming = false;
+        $callback = function (AMQPMessage $message) use ($connection, &$stopConsuming): void {
             $this->hasJob = true;
 
             $this->processAMQPMessage($message, $connection);
@@ -139,8 +144,15 @@ class QueueConsumer extends AbstractVhostsConsumer
 
                 $this->processBatch($connection);
 
-                $this->goAheadOrWait($this->workerOptions->sleep);
-                $this->startConsuming();
+                $goAhead = $this->goAheadOrWait($this->workerOptions->sleep);
+                if ($goAhead === false) {
+                    $stopConsuming = true;
+                    return;
+                }
+                if ($this->startConsuming() === null) {
+                    $stopConsuming = true;
+                    return;
+                }
             }
 
             if ($this->workerOptions->rest > 0) {
@@ -181,11 +193,26 @@ class QueueConsumer extends AbstractVhostsConsumer
 
         $this->updateLastProcessedAt();
 
+        if ($stopConsuming) {
+            return null;
+        }
+
         if (false === $isSuccess) {
+            if ($attempts > 10) {
+                $this->logError('startConsuming.failed_to_consume_after_attempts', [
+                    'attempts' => $attempts,
+                ]);
+                return null;
+            }
+
+            $goAhead = $this->goAheadOrWait($this->workerOptions->sleep);
+            if ($goAhead === false) {
+                return null;
+            }
+
             $this->stopConsuming();
 
-            $this->goAheadOrWait($this->workerOptions->sleep);
-            return $this->startConsuming();
+            return $this->startConsuming(++$attempts);
         }
 
         return $connection;

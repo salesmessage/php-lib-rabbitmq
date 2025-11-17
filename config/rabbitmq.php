@@ -6,7 +6,6 @@
  * You need to set proper values in `.env`.
  */
 return [
-
     'driver' => 'rabbitmq_vhosts',
     'queue' => env('RABBITMQ_QUEUE', 'default'),
     'connection' => 'default',
@@ -73,5 +72,5 @@ return [
      * Vhost prefix for organization-specific vhosts.
      */
     'vhost_prefix' => env('RABBITMQ_VHOST_PREFIX', 'organization_'),
-
+    'debug' => env('RABBITMQ_VHOST_DEBUG', false),
 ];
