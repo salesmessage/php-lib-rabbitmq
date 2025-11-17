@@ -538,27 +538,29 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function switchToNextVhost(): bool
     {
-        $nextVhost = $this->getNextVhost();
-        if (null === $nextVhost) {
-            $this->currentVhostName = null;
-            $this->currentQueueName = null;
-            return false;
+        while (true) {
+            $nextVhost = $this->getNextVhost();
+            if (null === $nextVhost) {
+                $this->currentVhostName = null;
+                $this->currentQueueName = null;
+                return false;
+            }
+
+            $this->currentVhostName = $nextVhost;
+            $this->loadVhostQueues();
+
+            $nextQueue = $this->getNextQueue();
+            if (null === $nextQueue) {
+                $this->currentQueueName = null;
+                continue;
+            }
+
+            $this->currentQueueName = $nextQueue;
+
+            $this->logInfo('switchToNextVhost.success');
+
+            return true;
         }
-
-        $this->currentVhostName = $nextVhost;
-        $this->loadVhostQueues();
-
-        $nextQueue = $this->getNextQueue();
-        if (null === $nextQueue) {
-            $this->currentQueueName = null;
-            return $this->switchToNextVhost();
-        }
-
-        $this->currentQueueName = $nextQueue;
-
-        $this->logInfo('switchToNextVhost.success');
-
-        return true;
     }
 
     /**
