@@ -802,6 +802,7 @@ abstract class AbstractVhostsConsumer extends Consumer
     protected function startHeartbeatCheck(): void
     {
         if (false === $this->asyncMode) {
+            $this->logWarning('startHeartbeatCheck.async_mode_is_disabled');
             return;
         }
 
@@ -816,6 +817,8 @@ abstract class AbstractVhostsConsumer extends Consumer
         ]);
 
         $heartbeatHandler = function () {
+            $this->logDebug('startHeartbeatCheck.heartbeat_check_started');
+
             if ($this->shouldQuit || (null !== $this->stopStatusCode)) {
                 $this->logWarning('startHeartbeatCheck.quit', [
                     'should_quit' => $this->shouldQuit,
@@ -845,6 +848,8 @@ abstract class AbstractVhostsConsumer extends Consumer
 
                 $this->connectionMutex->lock(static::HEALTHCHECK_HANDLER_LOCK, 3);
                 $connection->checkHeartBeat();
+
+                $this->logDebug('startHeartbeatCheck.heartbeat_checked');
             } catch (MutexTimeout) {
                 $this->logWarning('startHeartbeatCheck.mutex_timeout');
             } catch (\Throwable $exception) {
@@ -915,6 +920,11 @@ abstract class AbstractVhostsConsumer extends Consumer
         $this->log($message, $data, 'error');
     }
 
+    protected function logDebug(string $message, array $data = []): void
+    {
+        $this->log($message, $data, 'debug');
+    }
+
     /**
      * @param string $message
      * @param array $data
@@ -923,6 +933,10 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function log(string $message, array $data = [], string $logType = 'info'): void
     {
+        if ($logType === 'debug' && !($this->config['debug'] ?? false)) {
+            return;
+        }
+
         if (null !== $this->currentVhostName) {
             $data['vhost_name'] = $this->currentVhostName;
         }
@@ -961,6 +975,7 @@ abstract class AbstractVhostsConsumer extends Consumer
         match ($logType) {
             'error' => $this->logger->error($logMessage, $data),
             'warning' => $this->logger->warning($logMessage, $data),
+            'debug' => $this->logger->debug($logMessage, $data),
             default => $this->logger->info($logMessage, $data)
         };
     }
@@ -972,7 +987,7 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function registerTimeoutHandlerForBatch(string $job, ?WorkerOptions $options): void
     {
-        $timeout = max($job::BATCH_TIMEOUT, (int) $options?->timeout, 0);
+        $timeout = max($job::BATCH_TIMEOUT ?: (int) $options?->timeout, 0);
         if (!$timeout) {
             return;
         }
