@@ -67,6 +67,10 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     protected int $jobsProcessed = 0;
 
+    protected ?float $startTime = null;
+
+    protected ?int $lastRestart = null;
+
     protected bool $hadJobs = false;
 
     protected ?int $stopStatusCode = null;
@@ -153,13 +157,21 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     public function daemon($connectionName, $queue, WorkerOptions $options)
     {
-        $this->goAheadOrWait($options->sleep);
+        if ($this->supportsAsyncSignals()) {
+            $this->logInfo('daemon.asyncSignals.supported');
+            $this->listenForSignals();
+        } else {
+            $this->logInfo('daemon.asyncSignals.notSupported');
+        }
 
+        $this->startTime = hrtime(true) / 1e9;
         $this->configConnectionName = (string) $connectionName;
         $this->workerOptions = $options;
+        $this->lastRestart = $this->getTimestampOfLastQueueRestart();
 
-        if ($this->supportsAsyncSignals()) {
-            $this->listenForSignals();
+        $goAhead = $this->goAheadOrWait($options->sleep);
+        if ($goAhead === false) {
+            return $this->stopStatusCode;
         }
 
         if ($this->asyncMode) {
@@ -179,6 +191,7 @@ abstract class AbstractVhostsConsumer extends Consumer
             if (extension_loaded('swoole')) {
                 $this->logInfo('daemon.AsyncMode.Swoole');
 
+                \Swoole\Runtime::enableCoroutine(true, SWOOLE_HOOK_ALL);
                 \Co\run($coroutineContextHandler);
             } elseif (extension_loaded('openswoole')) {
                 $this->logInfo('daemon.AsyncMode.OpenSwoole');
@@ -203,37 +216,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     abstract protected function vhostDaemon($connectionName, WorkerOptions $options);
 
-    /**
-     * @param WorkerOptions $options
-     * @param $lastRestart
-     * @param $startTime
-     * @param $jobsProcessed
-     * @param $hasJob
-     * @return int|null
-     */
-    protected function getStopStatus(
-        WorkerOptions $options,
-        $lastRestart,
-        $startTime = 0,
-        $jobsProcessed = 0,
-        bool $hasJob = false
-    ): ?int {
-        return match (true) {
-            $this->shouldQuit => static::EXIT_SUCCESS,
-            $this->memoryExceeded($options->memory) => static::EXIT_MEMORY_LIMIT,
-            $this->queueShouldRestart($lastRestart) => static::EXIT_SUCCESS,
-            $options->stopWhenEmpty && !$hasJob => static::EXIT_SUCCESS,
-            $options->maxTime && hrtime(true) / 1e9 - $startTime >= $options->maxTime => static::EXIT_SUCCESS,
-            $options->maxJobs && $jobsProcessed >= $options->maxJobs => static::EXIT_SUCCESS,
-            default => null
-        };
-    }
-
-    /**
-     * @return RabbitMQQueue
-     * @throws MutexTimeout
-     */
-    abstract protected function startConsuming(): RabbitMQQueue;
+    abstract protected function startConsuming(): ?RabbitMQQueue;
 
     /**
      * @param AMQPMessage $message
@@ -356,6 +339,9 @@ abstract class AbstractVhostsConsumer extends Consumer
                             'batch_size' => $batchSize,
                         ]);
 
+                        if ($this->supportsAsyncSignals()) {
+                            $this->registerTimeoutHandlerForBatch($batchJobClass, $this->workerOptions);
+                        }
                         $batchJobClass::collection($batchData);
 
                         $this->logInfo('processBatch.finish', [
@@ -379,6 +365,10 @@ abstract class AbstractVhostsConsumer extends Consumer
                         'trace' => $exception->getTraceAsString(),
                         'error_class' => get_class($exception),
                     ]);
+                } finally {
+                    if ($this->supportsAsyncSignals()) {
+                        $this->resetTimeoutHandler();
+                    }
                 }
 
                 unset($batchData);
@@ -647,7 +637,28 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function goAheadOrWait(int $waitSeconds = 1): bool
     {
-        if (false === $this->goAhead()) {
+        while (true) {
+            $this->stopStatusCode = $this->stopIfNecessary(
+                $this->workerOptions,
+                $this->lastRestart,
+                $this->startTime,
+                $this->totalJobsProcessed,
+                true
+            );
+            if (! is_null($this->stopStatusCode)) {
+                $this->logWarning('daemon.consuming_stop.from_goAheadOrWait', [
+                    'status_code' => $this->stopStatusCode,
+                ]);
+
+                $this->stop($this->stopStatusCode, $this->workerOptions);
+
+                return false;
+            }
+
+            if ($this->goAhead()) {
+                return true;
+            }
+
             if (!$this->hadJobs) {
                 $this->logWarning('goAheadOrWait.no_jobs_during_iteration', [
                     'wait_seconds' => $waitSeconds,
@@ -664,15 +675,11 @@ abstract class AbstractVhostsConsumer extends Consumer
                 ]);
 
                 $this->sleep($waitSeconds);
-
-                return $this->goAheadOrWait($waitSeconds);
+                continue;
             }
 
             $this->logInfo('goAheadOrWait.starting_from_the_first_vhost');
-            return $this->goAheadOrWait($waitSeconds);
         }
-
-        return true;
     }
 
     /**
@@ -723,10 +730,7 @@ abstract class AbstractVhostsConsumer extends Consumer
         $this->internalStorageManager->updateVhostLastProcessedAt($vhostDto);
     }
 
-    /**
-     * @return RabbitMQQueue
-     */
-    protected function initConnection(): RabbitMQQueue
+    protected function initConnection(int $attempts = 0): ?RabbitMQQueue
     {
         if ($this->channel) {
             try {
@@ -768,9 +772,23 @@ abstract class AbstractVhostsConsumer extends Consumer
 
             $this->internalStorageManager->removeVhost($vhostDto);
             $this->loadVhosts();
-            $this->goAheadOrWait($this->workerOptions?->sleep ?? 1);
+            $goAhead = $this->goAheadOrWait($this->workerOptions?->sleep ?? 1);
+            if ($goAhead === false) {
+                return null;
+            }
 
-            return $this->initConnection();
+            if ($attempts > 10) {
+                $this->logError('initConnection.too_many_attempts', [
+                    'attempts' => $attempts,
+                    'original_error' => $exception->getMessage(),
+                    'trace' => $exception->getTraceAsString(),
+                ]);
+                throw new \RuntimeException('Too many connection attempts');
+            }
+
+            sleep(1);
+
+            return $this->initConnection(++$attempts);
         } finally {
             $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
         }
@@ -945,5 +963,39 @@ abstract class AbstractVhostsConsumer extends Consumer
             'warning' => $this->logger->warning($logMessage, $data),
             default => $this->logger->info($logMessage, $data)
         };
+    }
+
+    /**
+     * @param class-string<RabbitMQBatchable> $job
+     * @param WorkerOptions|null $options
+     * @return void
+     */
+    protected function registerTimeoutHandlerForBatch(string $job, ?WorkerOptions $options): void
+    {
+        $timeout = max($job::BATCH_TIMEOUT, (int) $options?->timeout, 0);
+        if (!$timeout) {
+            return;
+        }
+
+        pcntl_signal(SIGALRM, function () use ($job, $options, $timeout) {
+            $this->logError('Timeout reached. Stopping batchable consumer.', [
+                'job' => $job,
+                'timeout' => $timeout,
+            ]);
+
+            $this->kill(static::EXIT_ERROR, $options);
+        }, true);
+
+        pcntl_alarm($timeout);
+    }
+
+    public function kill($status = 0, $options = null)
+    {
+        $this->logger->error('Stopped job execution.', [
+            'status' => $status,
+            'options' => $options,
+        ]);
+
+        parent::kill($status, $options);
     }
 }

@@ -4,6 +4,8 @@ namespace Salesmessage\LibRabbitMQ\Interfaces;
 
 interface RabbitMQBatchable
 {
+    public const BATCH_TIMEOUT = 0;
+
     /**
      * Filter out jobs that have already been processed according to the application logic.
      *

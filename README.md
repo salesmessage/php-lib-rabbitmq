@@ -18,7 +18,7 @@ Only the latest version will get new features. Bug fixes will be provided using 
 You can install this package via composer using this command:
 
 ```
-composer require salesmessage/php-lib-rabbitmq:^1.36 --ignore-platform-reqs
+composer require salesmessage/php-lib-rabbitmq:^1.37 --ignore-platform-reqs
 ```
 
 The package will automatically register itself.
