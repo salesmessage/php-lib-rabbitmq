@@ -937,7 +937,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     protected function logDebug(string $message, array $data = []): void
     {
-        $this->log($message, $data, 'debug');
+        $this->log($message, $data, 'info');
     }
 
     /**
