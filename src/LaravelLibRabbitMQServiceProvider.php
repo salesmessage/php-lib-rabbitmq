@@ -50,7 +50,8 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
                     $this->app['queue'],
                     $this->app['events'],
                     $this->app[ExceptionHandler::class],
-                    $isDownForMaintenance
+                    $isDownForMaintenance,
+                    $this->app[LoggerInterface::class],
                 );
             });
 
