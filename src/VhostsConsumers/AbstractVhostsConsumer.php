@@ -948,10 +948,6 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function log(string $message, array $data = [], string $logType = 'info'): void
     {
-        if ($logType === 'debug' && !($this->config['debug'] ?? false)) {
-            return;
-        }
-
         if (null !== $this->currentVhostName) {
             $data['vhost_name'] = $this->currentVhostName;
         }
