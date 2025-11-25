@@ -4,11 +4,15 @@ namespace Salesmessage\LibRabbitMQ;
 
 use Exception;
 use Illuminate\Container\Container;
+use Illuminate\Contracts\Debug\ExceptionHandler;
+use Illuminate\Contracts\Events\Dispatcher;
+use Illuminate\Contracts\Queue\Factory as QueueManager;
 use Illuminate\Queue\Worker;
 use Illuminate\Queue\WorkerOptions;
 use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Message\AMQPMessage;
+use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationService;
 use Throwable;
@@ -37,6 +41,17 @@ class Consumer extends Worker
 
     /** @var object|null */
     protected $currentJob;
+
+    public function __construct(
+        QueueManager $manager,
+        Dispatcher $events,
+        ExceptionHandler $exceptions,
+        callable $isDownForMaintenance,
+        private LoggerInterface $logger,
+        ?callable $resetScope = null,
+    ) {
+        parent::__construct($manager, $events, $exceptions, $isDownForMaintenance, $resetScope);
+    }
 
     public function setContainer(Container $value): void
     {
@@ -215,7 +230,14 @@ class Consumer extends Worker
     {
         // Tell the server you are going to stop consuming.
         // It will finish up the last message and not send you any more.
-        $this->channel->basic_cancel($this->consumerTag, false, true);
+        try {
+            $this->channel?->basic_cancel($this->consumerTag, false, true);
+        } catch (\Throwable $e) {
+            $this->logger->warning('Consumer. Error on "basic_cancel"', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+        }
 
         return parent::stop($status, $options);
     }

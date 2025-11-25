@@ -102,7 +102,7 @@ abstract class AbstractVhostsConsumer extends Consumer
         protected DeliveryLimitService $deliveryLimitService,
         callable $resetScope = null,
     ) {
-        parent::__construct($manager, $events, $exceptions, $isDownForMaintenance, $resetScope);
+        parent::__construct($manager, $events, $exceptions, $isDownForMaintenance, $logger, $resetScope);
     }
 
     /**
@@ -1008,7 +1008,7 @@ abstract class AbstractVhostsConsumer extends Consumer
         }
 
         pcntl_signal(SIGALRM, function () use ($job, $options, $timeout) {
-            $this->logError('Timeout reached. Stopping batchable consumer.', [
+            $this->logger->error('Timeout reached. Stopping batchable consumer.', [
                 'job' => $job,
                 'timeout' => $timeout,
             ]);
