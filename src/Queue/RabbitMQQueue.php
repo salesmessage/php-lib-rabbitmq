@@ -616,13 +616,20 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     public function close(): void
     {
         if (isset($this->currentJob) && ! $this->currentJob->isDeletedOrReleased()) {
-            $this->reject($this->currentJob, true);
+            try {
+                $this->reject($this->currentJob, true);
+            } catch (AMQPConnectionClosedException|AMQPChannelClosedException|ErrorException) {
+                // Connection or channel already closed, ignore
+            }
         }
 
         try {
-            $this->getConnection()->close();
-        } catch (ErrorException) {
-            // Ignore the exception
+            $connection = $this->getConnection();
+            if ($connection->isConnected()) {
+                $connection->close();
+            }
+        } catch (Throwable) {
+            // This is expected when the connection is already closed or broken
         }
     }
 
