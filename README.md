@@ -11,14 +11,14 @@ Only the latest version will get new features. Bug fixes will be provided using 
 
 | Package Version | Laravel Version | Bug Fixes Until     |                                                                                             |
 |-----------------|-----------------|---------------------|---------------------------------------------------------------------------------------------|
-| 1               | 38              | February 19th, 2026 | [Documentation](https://github.com/vyuldashev/laravel-queue-rabbitmq/blob/master/README.md) |
+| 1               | 38              | February 25th, 2026 | [Documentation](https://github.com/vyuldashev/laravel-queue-rabbitmq/blob/master/README.md) |
 
 ## Installation
 
 You can install this package via composer using this command:
 
 ```
-composer require salesmessage/php-lib-rabbitmq:^1.38 --ignore-platform-reqs
+composer require salesmessage/php-lib-rabbitmq:^1.39 --ignore-platform-reqs
 ```
 
 The package will automatically register itself.
