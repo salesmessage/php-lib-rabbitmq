@@ -33,11 +33,11 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
      */
     public function __construct(QueueConfig $config)
     {
-        $this->internalStorageManager = app(InternalStorageManager::class);
-        $this->groupsService = app(GroupsService::class);
-        $this->vhostsService = app(VhostsService::class);
-        $this->lockService = app(LockService::class);
-        $this->logger = app(LoggerInterface::class);
+        $this->internalStorageManager = resolve(InternalStorageManager::class);
+        $this->groupsService = resolve(GroupsService::class);
+        $this->vhostsService = resolve(VhostsService::class);
+        $this->lockService = resolve(LockService::class);
+        $this->logger = resolve(LoggerInterface::class);
 
         parent::__construct($config);
     }
@@ -96,7 +96,7 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         }
 
         if ($job->getQueueType() === RabbitMQConsumable::MQ_TYPE_QUORUM) {
-            $queue .= $this->getConfig()->getQuorumQueuePostfix();
+            $queue .= $this->getRabbitMQConfig()->getQuorumQueuePostfix();
         }
 
         try {
