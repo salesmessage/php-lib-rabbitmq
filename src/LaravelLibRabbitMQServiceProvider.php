@@ -36,10 +36,10 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
             'queue.connections.rabbitmq'
         );
 
+        $this->app->bind(LockProvider::class, RedisStore::class);
+
         if ($this->app->runningInConsole()) {
             $this->bindDeduplicationService();
-
-            $this->app->bind(LockProvider::class, RedisStore::class);
 
             $this->app->singleton('rabbitmq.consumer', function () {
                 $isDownForMaintenance = function () {
@@ -121,7 +121,6 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
 
             $this->commands([
                 Console\ConsumeCommand::class,
-
                 Console\ConsumeVhostsCommand::class,
                 Console\ScanVhostsCommand::class,
             ]);
