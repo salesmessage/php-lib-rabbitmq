@@ -2,6 +2,7 @@
 
 namespace Salesmessage\LibRabbitMQ\Queue;
 
+use Illuminate\Events\CallQueuedListener;
 use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
@@ -84,18 +85,14 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
 
     public function push($job, $data = '', $queue = null)
     {
-        if (!($job instanceof RabbitMQConsumable)) {
-            throw new \InvalidArgumentException('Job must implement RabbitMQConsumable');
-        }
+        $isListenerJob = $job instanceof CallQueuedListener;
+        $queue = $isListenerJob
+            ? $this->getQueueForListenerJob($job, $queue)
+            : $this->getQueueForConsumableJob($job, $queue);
 
-        if (!$queue) {
-            if (!method_exists($job, 'onQueue')) {
-                throw new \InvalidArgumentException('Job must implement onQueue method');
-            }
-            $queue = $job->onQueue();
-        }
-
-        if ($job->getQueueType() === RabbitMQConsumable::MQ_TYPE_QUORUM) {
+        if (($job instanceof RabbitMQConsumable)
+            && ($job->getQueueType() === RabbitMQConsumable::MQ_TYPE_QUORUM)
+        ) {
             $queue .= $this->getRabbitMQConfig()->getQuorumQueuePostfix();
         }
 
@@ -119,6 +116,33 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         }
 
         return $result;
+    }
+
+    private function getQueueForListenerJob(CallQueuedListener $job, $queue = null)
+    {
+        if (!$queue) {
+            throw new \InvalidArgumentException('Listener must implement viaQueue method');
+        }
+
+        return $queue;
+    }
+
+    private function getQueueForConsumableJob($job, $queue = null)
+    {
+        if (!($job instanceof RabbitMQConsumable)) {
+            throw new \InvalidArgumentException('Job must implement RabbitMQConsumable interface');
+        }
+
+        if ($queue) {
+            return $queue;
+        }
+
+        $queue = method_exists($job, 'onQueue') ? $job->onQueue() : null;
+        if (!$queue) {
+            throw new \InvalidArgumentException('Job must implement onQueue method');
+        }
+
+        return $queue;
     }
 
     private function createNotExistsVhost(int $attempts = 0): bool
