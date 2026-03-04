@@ -5,6 +5,7 @@ namespace Salesmessage\LibRabbitMQ\VhostsConsumers;
 use Illuminate\Console\OutputStyle;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Events\Dispatcher;
+use Illuminate\Events\CallQueuedListener;
 use Illuminate\Queue\QueueManager;
 use Illuminate\Queue\WorkerOptions;
 use Illuminate\Support\Str;
@@ -427,8 +428,15 @@ abstract class AbstractVhostsConsumer extends Consumer
             $this->currentQueueName
         );
 
-        if (!is_subclass_of($job->getPayloadClass(), RabbitMQConsumable::class)) {
-            throw new \RuntimeException(sprintf('Job class %s must implement %s', $job->getPayloadClass(), RabbitMQConsumable::class));
+        $payloadClass = $job->getPayloadClass();
+        if (is_a($payloadClass, CallQueuedListener::class, true)) {
+            return $job;
+        }
+
+        if (!is_subclass_of($payloadClass, RabbitMQConsumable::class)) {
+            throw new \RuntimeException(
+                sprintf('Job class %s must implement %s', $payloadClass, RabbitMQConsumable::class)
+            );
         }
 
         return $job;
@@ -445,7 +453,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
         $this->transportDeduplicationService->decorateWithDeduplication(
             function () use ($job, $message) {
-                if (AppDeduplicationService::isEnabled() && $job->getPayloadData()->isDuplicated()) {
+                if ($this->isDeduplicationEnabled($job)) {
                     $this->logWarning('processSingleJob.job_is_duplicated');
                     $this->ackMessage($message);
 
@@ -471,6 +479,24 @@ abstract class AbstractVhostsConsumer extends Consumer
         $this->logInfo('processSingleJob.finish', [
             'executive_job_time_seconds' => microtime(true) - $timeStarted,
         ]);
+    }
+
+    /**
+     * @param RabbitMQJob $job
+     * @return bool
+     */
+    protected function isDeduplicationEnabled(RabbitMQJob $job): bool
+    {
+        if (false === AppDeduplicationService::isEnabled()) {
+            return false;
+        }
+
+        $payloadData = $job->getPayloadData();
+        if (false === method_exists($payloadData, 'isDuplicated')) {
+            return false;
+        }
+
+        return $payloadData->isDuplicated();
     }
 
     /**
