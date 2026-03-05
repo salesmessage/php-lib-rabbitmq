@@ -8,6 +8,7 @@ use ErrorException;
 use Exception;
 use Illuminate\Contracts\Queue\Queue as QueueContract;
 use Illuminate\Contracts\Queue\ShouldBeEncrypted;
+use Illuminate\Events\CallQueuedListener;
 use Illuminate\Queue\Queue;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Crypt;
@@ -23,11 +24,11 @@ use PhpAmqpLib\Exchange\AMQPExchangeType;
 use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Wire\AMQPTable;
 use Ramsey\Uuid\Uuid;
-use RuntimeException;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
-use Throwable;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQQueueContract;
 use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
+use RuntimeException;
+use Throwable;
 
 class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContract
 {
@@ -103,12 +104,12 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
      */
     public function push($job, $data = '', $queue = null)
     {
-        if (!($job instanceof RabbitMQConsumable)) {
-            throw new \RuntimeException('Job must be an instance of RabbitMQConsumable');
+        if (false === $this->isJobSupported($job)) {
+            throw new \RuntimeException('The job is not supported. RabbitMQQueue.push');
         }
 
         $options = [
-            'queue_type' => $job->getQueueType(),
+            'queue_type' => ($job instanceof RabbitMQConsumable) ? $job->getQueueType() : null,
         ];
 
         return $this->enqueueUsing(
@@ -130,7 +131,9 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     public function pushRaw($payload, $queue = null, array $options = []): int|string|null
     {
         $queueType = $options['queue_type'] ?? null;
-        unset($options['queue_type']);
+        if (array_key_exists('queue_type', $options)) {
+            unset($options['queue_type']);
+        }
 
         [$destination, $exchange, $exchangeType, $attempts] = $this->publishProperties($queue, $options);
 
@@ -150,11 +153,11 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
      */
     public function later($delay, $job, $data = '', $queue = null): mixed
     {
-        if (!($job instanceof RabbitMQConsumable)) {
-            throw new \RuntimeException('Job must be an instance of RabbitMQConsumable');
+        if (false === $this->isJobSupported($job)) {
+            throw new \RuntimeException('The job is not supported. RabbitMQQueue.later');
         }
 
-        $queueType = $job->getQueueType();
+        $queueType = ($job instanceof RabbitMQConsumable) ? $job->getQueueType() : null;
 
         return $this->enqueueUsing(
             $job,
@@ -170,12 +173,21 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     /**
      * @throws AMQPProtocolChannelException
      */
-    public function laterRaw($delay, string $payload, $queue = null, int $attempts = 0, ?string $queueType = null): int|string|null
+    public function laterRaw(
+        $delay,
+        string $payload,
+        $queue = null,
+        int $attempts = 0,
+        ?string $queueType = null
+    ): int|string|null
     {
         $ttl = $this->secondsUntil($delay) * 1000;
 
         // default options
-        $options = ['delay' => $delay, 'attempts' => $attempts];
+        $options = [
+            'delay' => $delay,
+            'attempts' => $attempts,
+        ];
 
         // When no ttl just publish a new message to the exchange or queue
         if ($ttl <= 0) {
@@ -189,9 +201,14 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         [$mainDestination, $exchange, $exchangeType, $attempts] = $this->publishProperties($queue, $options);
         $this->declareDestination($mainDestination, $exchange, $exchangeType, $queueType);
 
-        $destination = $this->getQueue($queue).'.delay.'.$ttl;
+        $destination = $this->getQueue($queue) . '.delay.' . $ttl;
 
-        $this->declareQueue($destination, true, false, $this->getDelayQueueArguments($this->getQueue($queue), $ttl));
+        $this->declareQueue(
+            $destination,
+            true,
+            false,
+            $this->getDelayQueueArguments($this->getQueue($queue), $ttl)
+        );
 
         [$message, $correlationId] = $this->createMessage($payload, $attempts);
 
@@ -217,12 +234,13 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     protected function publishBatch($jobs, $data = '', $queue = null): void
     {
         foreach ($jobs as $job) {
-            if (!($job instanceof RabbitMQConsumable)) {
-                throw new \RuntimeException('Job must be an instance of RabbitMQConsumable');
+            if (false === $this->isJobSupported($job)) {
+                throw new \RuntimeException('The job is not supported. RabbitMQQueue.publishBatch');
             }
+
             $this->bulkRaw($this->createPayload($job, $queue, $data), $queue, [
                 'job' => $job,
-                'queue_type' => $job->getQueueType(),
+                'queue_type' => ($job instanceof RabbitMQConsumable) ? $job->getQueueType() : null,
             ]);
         }
 
@@ -235,7 +253,9 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     public function bulkRaw(string $payload, ?string $queue = null, array $options = []): int|string|null
     {
         $queueType = $options['queue_type'] ?? null;
-        unset($options['queue_type']);
+        if (array_key_exists('queue_type', $options)) {
+            unset($options['queue_type']);
+        }
 
         [$destination, $exchange, $exchangeType, $attempts] = $this->publishProperties($queue, $options);
 
@@ -767,7 +787,12 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         }
 
         // Create a queue for amq.direct publishing.
-        $this->declareQueue($destination, true, false, $this->getQueueArguments($destination, $queueType));
+        $this->declareQueue(
+            $destination,
+            true,
+            false,
+            $this->getQueueArguments($destination, $queueType)
+        );
     }
 
     /**
@@ -791,11 +816,35 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     }
 
     /**
+     * @param $job
+     * @return bool
+     */
+    protected function isJobSupported($job): bool
+    {
+        if ($job instanceof CallQueuedListener) {
+            return true;
+        }
+
+        if ($job instanceof RabbitMQConsumable) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
      * @throws AMQPChannelClosedException
      * @throws AMQPConnectionClosedException
      * @throws AMQPConnectionBlockedException
      */
-    protected function publishBasic($msg, $exchange = '', $destination = '', $mandatory = false, $immediate = false, $ticket = null): void
+    protected function publishBasic(
+        $msg,
+        $exchange = '',
+        $destination = '',
+        $mandatory = false,
+        $immediate = false,
+        $ticket = null
+    ): void
     {
         $this->getChannel()->basic_publish($msg, $exchange, $destination, $mandatory, $immediate, $ticket);
     }

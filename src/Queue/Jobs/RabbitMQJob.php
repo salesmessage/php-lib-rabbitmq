@@ -129,12 +129,16 @@ class RabbitMQJob extends Job implements JobContract
         parent::release();
 
         $consumableJob = $this->getPayloadData();
-        if (!($consumableJob instanceof RabbitMQConsumable)) {
-            throw new \RuntimeException('Job must be an instance of RabbitMQJobBatchable');
-        }
+        $queueType = ($consumableJob instanceof RabbitMQConsumable) ? $consumableJob->getQueueType() : null;
 
         // Always create a new message when this Job is released
-        $this->rabbitmq->laterRaw($delay, $this->message->getBody(), $this->queue, $this->attempts(), $consumableJob->getQueueType());
+        $this->rabbitmq->laterRaw(
+            $delay,
+            $this->message->getBody(),
+            $this->queue,
+            $this->attempts(),
+            $queueType
+        );
 
         // Releasing a Job means the message was failed to process.
         // Because this Job message is always recreated and pushed as new message, this Job message is correctly handled.

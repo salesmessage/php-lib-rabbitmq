@@ -11,14 +11,14 @@ Only the latest version will get new features. Bug fixes will be provided using 
 
 | Package Version | Laravel Version | Bug Fixes Until     |                                                                                             |
 |-----------------|-----------------|---------------------|---------------------------------------------------------------------------------------------|
-| 1               | 43              | February 27th, 2026 | [Documentation](https://github.com/vyuldashev/laravel-queue-rabbitmq/blob/master/README.md) |
+| 1               | 43              | March 5th, 2026     | [Documentation](https://github.com/vyuldashev/laravel-queue-rabbitmq/blob/master/README.md) |
 
 ## Installation
 
 You can install this package via composer using this command:
 
 ```
-composer require salesmessage/php-lib-rabbitmq:^1.39 --ignore-platform-reqs
+composer require salesmessage/php-lib-rabbitmq:^1.43 --ignore-platform-reqs
 ```
 
 The package will automatically register itself.
@@ -28,6 +28,8 @@ The package will automatically register itself.
 Add groups configuration to file `rabbit-groups.yml`:
 
 > This config file is required.
+
+#### Example `rabbit-groups.yml` file
 
 ```php
 groups:
@@ -67,6 +69,245 @@ groups:
     queues_mask: test
     batch_size: 100
     prefetch_count: 100
+```
+
+#### Local `rabbit-groups.yml` file
+
+```php
+groups:
+  hubspot-workflow:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-hubspot-workflow-process
+      - local-vshcherbyna-hubspot-throttled
+    batch_size: 100
+    prefetch_count: 100
+  hubspot-workflow-quorum:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-hubspot-workflow-process-quorum
+      - local-vshcherbyna-hubspot-throttled-quorum
+    batch_size: 100
+    prefetch_count: 100
+  calls-workflow:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-calls-record-detect-voicemail
+    batch_size: 100
+    prefetch_count: 100
+  calls-workflow-quorum:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-calls-record-detect-voicemail-quorum
+    batch_size: 100
+    prefetch_count: 100
+  contacts-phone-checker:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-contacts-phone-checker-lookup
+    batch_size: 100
+    prefetch_count: 100
+  contacts-phone-checker-quorum:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-contacts-phone-checker-lookup-quorum
+    batch_size: 100
+    prefetch_count: 100
+  calls-record-transcribe:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-calls-record-transcribe-ai-summary
+      - local-vshcherbyna-calls-record-transcribe
+      - local-vshcherbyna-calls-record-transcribe-status-check
+    batch_size: 100
+    prefetch_count: 100
+  calls-record-transcribe-quorum:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-calls-record-transcribe-ai-summary-quorum
+      - local-vshcherbyna-calls-record-transcribe-quorum
+      - local-vshcherbyna-calls-record-transcribe-status-check-quorum
+    batch_size: 100
+    prefetch_count: 100
+  calls-record-process:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-calls-record-twilio-process
+      - local-vshcherbyna-calls-record-process
+      - local-vshcherbyna-calls-record-mark-as-ready
+      - local-vshcherbyna-calls-record-twilio-remove
+    batch_size: 100
+    prefetch_count: 100
+  calls-record-process-quorum:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-calls-record-twilio-process-quorum
+      - local-vshcherbyna-calls-record-process-quorum
+      - local-vshcherbyna-calls-record-mark-as-ready-quorum
+      - local-vshcherbyna-calls-record-twilio-remove-quorum
+    batch_size: 100
+    prefetch_count: 100
+  calls-settings:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-calls-settings
+    batch_size: 100
+    prefetch_count: 100
+  calls-settings-quorum:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-calls-settings-quorum
+    batch_size: 100
+    prefetch_count: 100
+  core-hubspot-channel:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-core-hubspot-publish-message-to-channel
+      - local-vshcherbyna-core-hubspot-search-channel-connection
+    batch_size: 100
+    prefetch_count: 100
+  core-hubspot-channel-quorum:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-core-hubspot-publish-message-to-channel-quorum
+      - local-vshcherbyna-core-hubspot-search-channel-connection-quorum
+    batch_size: 100
+    prefetch_count: 100
+  message-media:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-message-media-optimize
+    batch_size: 100
+    prefetch_count: 100
+  message-media-quorum:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-message-media-optimize-quorum
+    batch_size: 100
+    prefetch_count: 100
+  sinch-send-sms:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-sinch-send-sms
+    batch_size: 100
+    prefetch_count: 100
+  sinch-send-sms-quorum:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-sinch-send-sms-quorum
+    batch_size: 100
+    prefetch_count: 100
+  message-processing:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-message-processing
+    batch_size: 100
+    prefetch_count: 100
+  message-processing-quorum:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-message-processing-quorum
+    batch_size: 100
+    prefetch_count: 100
+  calls-queue-clear:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-calls-queue-clear
+    batch_size: 100
+    prefetch_count: 100
+  calls-queue-clear-quorum:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-calls-queue-clear-quorum
+    batch_size: 100
+    prefetch_count: 100
+  calls-queue-end-after-available-time:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-calls-queue-end-after-available-time
+    batch_size: 100
+    prefetch_count: 100
+  calls-queue-end-after-available-time-quorum:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-calls-queue-end-after-available-time-quorum
+    batch_size: 100
+    prefetch_count: 100
+  group-conversations-update:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-core-default-group-conversations-update
+    batch_size: 100
+    prefetch_count: 100
+  group-conversations-update-quorum:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-core-default-group-conversations-update-quorum
+    batch_size: 100
+    prefetch_count: 100
+  caller-id-verification:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-caller-id-verification
+    batch_size: 100
+    prefetch_count: 100
+  caller-id-verification-quorum:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-caller-id-verification-quorum
+    batch_size: 100
+    prefetch_count: 100
+  broadcasts:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-broadcasts
+    batch_size: 100
+    prefetch_count: 100
+  broadcasts-quorum:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-broadcasts-quorum
+    batch_size: 100
+    prefetch_count: 100
+  broadcasts-create-messages:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-broadcasts-create-messages
+    batch_size: 100
+    prefetch_count: 100
+  broadcasts-create-messages-quorum:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-broadcasts-create-messages-quorum
+    batch_size: 100
+    prefetch_count: 100
+  broadcasts-update-messages:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-broadcasts-update-messages
+    batch_size: 100
+    prefetch_count: 100
+  broadcasts-update-messages-quorum:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-broadcasts-update-messages-quorum
+    batch_size: 100
+    prefetch_count: 100
+  test-jobs-group:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-test-single
+      - local-vshcherbyna-test-batch
+    batch_size: 100
+    prefetch_count: 100
+  test-jobs-group-quorum:
+    vhosts_mask: organization
+    queues:
+      - local-vshcherbyna-test-single-quorum
+      - local-vshcherbyna-test-batch-quorum
+    batch_size: 100
+    prefetch_count: 100
+
 ```
 
 ### Configuration

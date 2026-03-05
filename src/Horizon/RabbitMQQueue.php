@@ -51,7 +51,11 @@ class RabbitMQQueue extends BaseRabbitMQQueue
     {
         $payload = (new JobPayload($payload))->prepare($this->lastPushed ?? null)->value;
 
-        if (!isset($options['queue_type']) && isset($this->lastPushed) && is_object($this->lastPushed) && $this->lastPushed instanceof RabbitMQConsumable) {
+        if (!isset($options['queue_type'])
+            && isset($this->lastPushed)
+            && is_object($this->lastPushed)
+            && ($this->lastPushed instanceof RabbitMQConsumable)
+        ) {
             $options['queue_type'] = $this->lastPushed->getQueueType();
         }
 
@@ -71,7 +75,10 @@ class RabbitMQQueue extends BaseRabbitMQQueue
 
         $queueType = ($job instanceof RabbitMQConsumable) ? $job->getQueueType() : null;
 
-        return tap(parent::laterRaw($delay, $payload, $queue, queueType: $queueType), function () use ($payload, $queue): void {
+        return tap(parent::laterRaw($delay, $payload, $queue, queueType: $queueType), function () use (
+            $payload,
+            $queue
+        ): void {
             $this->event($this->getQueue($queue), new JobPushed($payload));
         });
     }
