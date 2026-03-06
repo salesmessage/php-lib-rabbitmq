@@ -90,12 +90,6 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
             ? $this->getQueueForListenerJob($job, $queue)
             : $this->getQueueForConsumableJob($job, $queue);
 
-        if (($job instanceof RabbitMQConsumable)
-            && ($job->getQueueType() === RabbitMQConsumable::MQ_TYPE_QUORUM)
-        ) {
-            $queue .= $this->getRabbitMQConfig()->getQuorumQueuePostfix();
-        }
-
         try {
             $result = parent::push($job, $data, $queue);
         } catch (AMQPConnectionClosedException $exception) {
