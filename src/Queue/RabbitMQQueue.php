@@ -112,6 +112,8 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
             'queue_type' => ($job instanceof RabbitMQConsumable) ? $job->getQueueType() : null,
         ];
 
+        $queue = $this->addQueuePostfix($job, $queue);
+
         return $this->enqueueUsing(
             $job,
             $this->createPayload($job, $this->getQueue($queue), $data),
@@ -158,6 +160,8 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         }
 
         $queueType = ($job instanceof RabbitMQConsumable) ? $job->getQueueType() : null;
+
+        $queue = $this->addQueuePostfix($job, $queue);
 
         return $this->enqueueUsing(
             $job,
@@ -237,6 +241,8 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
             if (false === $this->isJobSupported($job)) {
                 throw new \RuntimeException('The job is not supported. RabbitMQQueue.publishBatch');
             }
+
+            $queue = $this->addQueuePostfix($job, $queue);
 
             $this->bulkRaw($this->createPayload($job, $queue, $data), $queue, [
                 'job' => $job,
@@ -830,6 +836,31 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         }
 
         return false;
+    }
+
+    /**
+     * @param $job
+     * @param $queue
+     * @return mixed|string|null
+     */
+    protected function addQueuePostfix($job, $queue = null)
+    {
+        if ((null === $queue) || ('' === $queue)) {
+            return $queue;
+        }
+
+        $queueType = ($job instanceof RabbitMQConsumable) ? $job->getQueueType() : null;
+
+        $queuePostfix = (RabbitMQConsumable::MQ_TYPE_QUORUM === $queueType)
+            ? $this->getRabbitMQConfig()->getQuorumQueuePostfix()
+            : '';
+        if (('' === $queuePostfix) || str_ends_with($queue, $queuePostfix)) {
+            return $queue;
+        }
+
+        $queue .= $queuePostfix;
+
+        return $queue;
     }
 
     /**
