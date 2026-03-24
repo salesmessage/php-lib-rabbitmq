@@ -175,14 +175,59 @@ class VhostsService
     }
 
     /**
+     * @param string $vhostName
+     * @return bool
+     */
+    public function removeVhost(string $vhostName): bool
+    {
+        try {
+            $this->rabbitApiClient->request(
+                'DELETE',
+                '/api/vhosts/' . $vhostName,
+            );
+        } catch (Throwable $exception) {
+            $this->logger->warning('Salesmessage.LibRabbitMQ.Services.VhostsService.removeVhost.exception', [
+                'vhost_name' => $vhostName,
+                'message' => $exception->getMessage(),
+                'code' => $exception->getCode(),
+                'trace' => $exception->getTraceAsString(),
+            ]);
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * @param string $vhostName
+     * @return int|null
+     */
+    public function getOrganizationIdByVhostName(string $vhostName): ?int
+    {
+        $vhostPrefix = $this->getVhostPrefix();
+        if (('/' === $vhostName)
+            || ('' === $vhostName)
+            || (false === str_contains($vhostName, $vhostPrefix))
+        ) {
+            return null;
+        }
+
+        $organizationId = str_replace($vhostPrefix, '', $vhostName);
+        if (false === is_numeric($organizationId)) {
+            return null;
+        }
+
+        return (int) $organizationId;
+    }
+
+    /**
      * @param int $organizationId
      * @return string
      */
     public function getVhostName(int $organizationId): string
     {
-        $vhostPrefix = config('queue.connections.rabbitmq_vhosts.vhost_prefix', 'organization_');
-
-        return $vhostPrefix . $organizationId;
+        return $this->getVhostPrefix() . $organizationId;
     }
 
     /**
@@ -192,6 +237,14 @@ class VhostsService
     private function getVhostDescription(int $organizationId): string
     {
         return sprintf('Vhost for organization ID: %d', $organizationId);
+    }
+
+    /**
+     * @return string
+     */
+    private function getVhostPrefix(): string
+    {
+        return (string) config('queue.connections.rabbitmq_vhosts.vhost_prefix', 'organization_');
     }
 }
 
