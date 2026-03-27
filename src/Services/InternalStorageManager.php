@@ -76,19 +76,22 @@ class InternalStorageManager
      */
     public function indexVhost(VhostApiDto $vhostDto, array $groups = []): bool
     {
-        if (($vhostDto->getMessagesReady() > 0) || ($vhostDto->getMessagesUnacknowledged() > 0)) {
-            return $this->addVhost($vhostDto, $groups);
+        $isAddVhost = ($vhostDto->getMessagesReady() > 0) || ($vhostDto->getMessagesUnacknowledged() > 0);
+        if ($isAddVhost) {
+            $this->addVhost($vhostDto, $groups);
+        } else {
+            $this->removeVhost($vhostDto);
         }
 
-        return $this->removeVhost($vhostDto);
+        return $isAddVhost;
     }
 
     /**
      * @param VhostApiDto $vhostDto
      * @param array $groups
-     * @return bool
+     * @return void
      */
-    private function addVhost(VhostApiDto $vhostDto, array $groups): bool
+    private function addVhost(VhostApiDto $vhostDto, array $groups): void
     {
         $storageKey = $this->getVhostStorageKey($vhostDto);
 
@@ -99,15 +102,13 @@ class InternalStorageManager
         $this->redis->hmset($storageKey, $vhostDto->toInternalData());
 
         $this->initLastProcessedAtKeys($storageKey, $groups);
-
-        return true;
     }
 
     /**
      * @param VhostApiDto $vhostDto
-     * @return bool
+     * @return void
      */
-    public function removeVhost(VhostApiDto $vhostDto): bool
+    public function removeVhost(VhostApiDto $vhostDto): void
     {
         $storageKey = $this->getVhostStorageKey($vhostDto);
 
@@ -118,8 +119,6 @@ class InternalStorageManager
         if ($this->redis->exists($storageKey)) {
             $this->redis->del($storageKey);
         }
-
-        return true;
     }
 
     /**
@@ -137,7 +136,9 @@ class InternalStorageManager
         $messagesReady = (int) $this->redis->hget($storageKey, 'messages_ready') + 1;
         $vhostDto->setMessagesReady($messagesReady);
 
-        return $this->addVhost($vhostDto, $groups);
+        $this->addVhost($vhostDto, $groups);
+
+        return true;
     }
 
     /**
@@ -186,19 +187,22 @@ class InternalStorageManager
      */
     public function indexQueue(QueueApiDto $queueDto, array $groups): bool
     {
-        if (($queueDto->getMessagesReady() > 0) || ($queueDto->getMessagesUnacknowledged() > 0)) {
-            return $this->addQueue($queueDto, $groups);
+        $isAddQueue = ($queueDto->getMessagesReady() > 0) || ($queueDto->getMessagesUnacknowledged() > 0);
+        if ($isAddQueue) {
+            $this->addQueue($queueDto, $groups);
+        } else {
+            $this->removeQueue($queueDto);
         }
 
-        return $this->removeQueue($queueDto);
+        return $isAddQueue;
     }
 
     /**
      * @param QueueApiDto $queueDto
      * @param array $groups
-     * @return bool
+     * @return void
      */
-    private function addQueue(QueueApiDto $queueDto, array $groups): bool
+    private function addQueue(QueueApiDto $queueDto, array $groups): void
     {
         $storageKey = $this->getQueueStorageKey($queueDto);
         $indexKey = $this->getQueueIndexKey($queueDto->getVhostName());
@@ -210,15 +214,13 @@ class InternalStorageManager
         $this->redis->hmset($storageKey, $queueDto->toInternalData());
 
         $this->initLastProcessedAtKeys($storageKey, $groups);
-
-        return true;
     }
 
     /**
      * @param QueueApiDto $queueDto
-     * @return bool
+     * @return void
      */
-    public function removeQueue(QueueApiDto $queueDto): bool
+    public function removeQueue(QueueApiDto $queueDto): void
     {
         $storageKey = $this->getQueueStorageKey($queueDto);
         $indexKey = $this->getQueueIndexKey($queueDto->getVhostName());
@@ -230,8 +232,6 @@ class InternalStorageManager
         if ($this->redis->exists($storageKey)) {
             $this->redis->del($storageKey);
         }
-
-        return true;
     }
 
     /**
@@ -249,7 +249,9 @@ class InternalStorageManager
         $messagesReady = (int) $this->redis->hget($storageKey, 'messages_ready') + 1;
         $queueDto->setMessagesReady($messagesReady);
 
-        return $this->addQueue($queueDto, $groups);
+        $this->addQueue($queueDto, $groups);
+
+        return true;
     }
 
     /**
