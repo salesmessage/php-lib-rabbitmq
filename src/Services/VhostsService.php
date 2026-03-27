@@ -27,11 +27,15 @@ class VhostsService
         while (true) {
             $data = $this->rabbitApiClient->request(
                 'GET',
-                '/api/vhosts', [
-                'page' => $fromPage,
-                'page_size' => 500,
-                'columns' => 'name,messages,messages_ready,messages_unacknowledged',
-            ]);
+                '/api/vhosts',
+                [
+                    'page' => $fromPage,
+                    'page_size' => 500,
+                    'columns' => 'name,messages,messages_ready,messages_unacknowledged',
+                    'sort' => 'name',
+                    'sort_reverse' => 'false',
+                ]
+            );
 
             $items = $data['items'] ?? [];
             if (!is_array($items) || !isset($data['page_count'])) {

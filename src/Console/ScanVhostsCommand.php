@@ -119,30 +119,21 @@ class ScanVhostsCommand extends Command
             return null;
         }
 
-        $indexedSuccessfully = $this->internalStorageManager->indexVhost($vhostDto, $this->groups);
-        if (!$indexedSuccessfully) {
-            $this->warn(sprintf(
-                'Skip indexation vhost: "%s". Messages ready: %d. Messages unacknowledged: %d.',
-                $vhostDto->getName(),
-                $vhostDto->getMessagesReady(),
-                $vhostDto->getMessagesUnacknowledged()
-            ));
-
-            return null;
-        }
+        $isAddedToIndex = $this->internalStorageManager->indexVhost($vhostDto, $this->groups);
 
         $this->info(sprintf(
-            'Successfully indexed vhost: "%s". Messages ready: %d. Messages unacknowledged: %d.',
+            'Successfully indexed (%s) vhost: "%s". Messages ready: %d. Messages unacknowledged: %d.',
+            $isAddedToIndex ? 'added' : 'removed',
             $vhostDto->getName(),
             $vhostDto->getMessagesReady(),
             $vhostDto->getMessagesUnacknowledged()
         ));
 
-        $vhostQueues = $this->queueService->getAllVhostQueues($vhostDto);
+        $vhostQueues = $isAddedToIndex ? $this->queueService->getAllVhostQueues($vhostDto) : null;
 
         $oldVhostQueues = $this->internalStorageManager->getVhostQueues($vhostDto->getName());
 
-        if ($vhostQueues->isNotEmpty()) {
+        if ($vhostQueues && $vhostQueues->isNotEmpty()) {
             foreach ($vhostQueues as $queueApiData) {
                 $processQueueDto = $this->processVhostQueue($queueApiData);
                 if (null === $processQueueDto) {
@@ -206,21 +197,11 @@ class ScanVhostsCommand extends Command
             return null;
         }
 
-        $indexedSuccessfully = $this->internalStorageManager->indexQueue($queueApiDto, $this->groups);
-        if (!$indexedSuccessfully) {
-            $this->warn(sprintf(
-                'Skip indexation queue: "%s". Vhost: %s. Messages ready: %d. Messages unacknowledged: %d.',
-                $queueApiDto->getName(),
-                $queueApiDto->getVhostName(),
-                $queueApiDto->getMessagesReady(),
-                $queueApiDto->getMessagesUnacknowledged()
-            ));
-
-            return null;
-        }
+        $isAddedToIndex = $this->internalStorageManager->indexQueue($queueApiDto, $this->groups);
 
         $this->info(sprintf(
-            'Successfully indexed queue: "%s". Vhost: %s. Messages ready: %d. Messages unacknowledged: %d.',
+            'Successfully indexed (%s) queue: "%s". Vhost: %s. Messages ready: %d. Messages unacknowledged: %d.',
+            $isAddedToIndex ? 'added' : 'removed',
             $queueApiDto->getName(),
             $queueApiDto->getVhostName(),
             $queueApiDto->getMessagesReady(),
