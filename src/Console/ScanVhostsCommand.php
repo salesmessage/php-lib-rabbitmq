@@ -9,11 +9,17 @@ use Salesmessage\LibRabbitMQ\Services\GroupsService;
 use Salesmessage\LibRabbitMQ\Services\QueueService;
 use Salesmessage\LibRabbitMQ\Services\VhostsService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
+use Generator;
 
 class ScanVhostsCommand extends Command
 {
+    protected const TYPE_API = 'api';
+    protected const TYPE_INTERIM = 'interim';
+
     protected $signature = 'lib-rabbitmq:scan-vhosts
-                            {--sleep=10 : Number of seconds to sleep}
+                            {--type=api : Scan type}
+                            {--filter= : Vhost name filter}
+                            {--sleep=1 : Number of seconds to sleep}
                             {--max-time=0 : Maximum seconds the command can run before stopping}
                             {--with-output=true : Show output details during iteration}
                             {--max-memory=0 : Maximum memory usage in megabytes before stopping}';
@@ -56,8 +62,10 @@ class ScanVhostsCommand extends Command
 
             $this->processVhosts();
 
-            $iterationDuration = microtime(true) - $iterationStartedAt;
-            $totalRuntime = microtime(true) - $startedAt;
+            $iterationEndedAt = microtime(true);
+
+            $iterationDuration = $iterationEndedAt - $iterationStartedAt;
+            $totalRuntime = $iterationEndedAt - $startedAt;
             $memoryUsage = memory_get_usage(true);
             $memoryPeakUsage = memory_get_peak_usage(true);
 
@@ -67,7 +75,7 @@ class ScanVhostsCommand extends Command
                 $totalRuntime,
                 $this->formatBytes($memoryUsage),
                 $this->formatBytes($memoryPeakUsage)
-            ), 'warning', forcePrint: $sleep === 0);
+            ), 'info', forcePrint: $sleep === 0);
 
             if ($sleep === 0) {
                 return;
@@ -92,31 +100,70 @@ class ScanVhostsCommand extends Command
         }
     }
 
+    /**
+     * @return void
+     * @throws \GuzzleHttp\Exception\GuzzleException
+     * @throws \Salesmessage\LibRabbitMQ\Exceptions\RabbitApiClientException
+     */
     private function processVhosts(): void
     {
-        $oldVhostsMap = array_flip($this->internalStorageManager->getVhosts());
+        $filter = trim($this->option('filter', ''));
+        $hasFilter = '' !== $filter;
 
-        foreach ($this->vhostsService->getAllVhosts() as $vhost) {
-            $vhostDto = $this->processVhost($vhost);
-            if (null === $vhostDto) {
+        $shouldRemoveOld = !$hasFilter;
+        $oldVhostsMap = $shouldRemoveOld ? array_flip($this->internalStorageManager->getVhosts()) : [];
+
+        foreach ($this->getAllApiVhosts() as $vhostApiData) {
+            if (is_string($vhostApiData)) {
+                $vhostApiData = (array) json_decode($vhostApiData, true);
+            }
+
+            $vhostDto = new VhostApiDto($vhostApiData);
+            if ($hasFilter && (false === str_contains($vhostDto->getName(), $filter))) {
                 continue;
             }
 
-            unset($oldVhostsMap[$vhostDto->getName()]);
+            $isProcessed = $this->processVhost($vhostDto);
+            if (false === $isProcessed) {
+                continue;
+            }
+
+            if ($shouldRemoveOld && array_key_exists($vhostDto->getName(), $oldVhostsMap)) {
+                unset($oldVhostsMap[$vhostDto->getName()]);
+            }
         }
 
-        $this->removeOldsVhosts(array_keys($oldVhostsMap));
+        if ($shouldRemoveOld) {
+            $this->removeOldVhosts(array_keys($oldVhostsMap));
+        }
+        unset($oldVhostsMap);
     }
 
     /**
-     * @param array $vhostApiData
-     * @return VhostApiDto|null
+     * @return \Generator
      */
-    private function processVhost(array $vhostApiData): ?VhostApiDto
+    private function getAllApiVhosts(): Generator|array
     {
-        $vhostDto = new VhostApiDto($vhostApiData);
+        $type = (string) $this->option('type');
+        if (self::TYPE_INTERIM === $type) {
+            $interimVhosts = $this->internalStorageManager->getInterimVhosts();
+            shuffle($interimVhosts);
+            return $interimVhosts;
+        }
+
+        return $this->vhostsService->getAllVhosts();
+    }
+
+    /**
+     * @param VhostApiDto $vhostDto
+     * @return bool
+     * @throws \GuzzleHttp\Exception\GuzzleException
+     * @throws \Salesmessage\LibRabbitMQ\Exceptions\RabbitApiClientException
+     */
+    private function processVhost(VhostApiDto $vhostDto): bool
+    {
         if ('' === $vhostDto->getName()) {
-            return null;
+            return false;
         }
 
         $isAddedToIndex = $this->internalStorageManager->indexVhost($vhostDto, $this->groups);
@@ -154,7 +201,7 @@ class ScanVhostsCommand extends Command
 
         $this->removeOldVhostQueues($vhostDto, $oldVhostQueues);
 
-        return $vhostDto;
+        return true;
     }
 
     private function formatBytes(int $bytes): string
@@ -166,7 +213,7 @@ class ScanVhostsCommand extends Command
      * @param array $oldVhosts
      * @return void
      */
-    private function removeOldsVhosts(array $oldVhosts): void
+    private function removeOldVhosts(array $oldVhosts): void
     {
         if (empty($oldVhosts)) {
             return;

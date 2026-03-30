@@ -8,6 +8,7 @@ use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Queue\QueueManager;
 use Illuminate\Support\ServiceProvider;
 use Psr\Log\LoggerInterface;
+use Salesmessage\LibRabbitMQ\Console\ActualizeInterimVhostsCommand;
 use Salesmessage\LibRabbitMQ\Console\ConsumeCommand;
 use Salesmessage\LibRabbitMQ\Console\ConsumeVhostsCommand;
 use Salesmessage\LibRabbitMQ\Console\ScanVhostsCommand;
@@ -110,6 +111,13 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
                 );
             });
 
+            $this->app->singleton(ActualizeInterimVhostsCommand::class, static function ($app) {
+                return new ActualizeInterimVhostsCommand(
+                    $app[VhostsService::class],
+                    $app[InternalStorageManager::class]
+                );
+            });
+
             $this->app->singleton(ScanVhostsCommand::class, static function ($app) {
                 return new ScanVhostsCommand(
                     $app[GroupsService::class],
@@ -122,6 +130,7 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
             $this->commands([
                 Console\ConsumeCommand::class,
                 Console\ConsumeVhostsCommand::class,
+                Console\ActualizeInterimVhostsCommand::class,
                 Console\ScanVhostsCommand::class,
             ]);
         }
