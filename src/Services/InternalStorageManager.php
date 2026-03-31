@@ -27,6 +27,48 @@ class InternalStorageManager
     }
 
     /**
+     * @return array
+     */
+    public function getInterimVhosts(): array
+    {
+        return $this->redis->hgetall(self::INTERIM_KEY_VHOSTS);
+    }
+
+    /**
+     * @return int
+     */
+    public function getInterimVhostsCount(): int
+    {
+        return (int) $this->redis->hlen(self::INTERIM_KEY_VHOSTS);
+    }
+
+    /**
+     * @param VhostApiDto $vhostDto
+     * @return void
+     */
+    public function addInterimVhost(VhostApiDto $vhostDto): void
+    {
+        $this->redis->hset(self::INTERIM_KEY_VHOSTS, $vhostDto->getName(), json_encode($vhostDto->toInternalData()));
+    }
+
+    /**
+     * @param array $vhostNames
+     * @return void
+     */
+    public function removeInterimVhost(VhostApiDto $vhostDto): void
+    {
+        if ('' === $vhostDto->getName()) {
+            return;
+        }
+
+        if (!$this->redis->hexists(self::INTERIM_KEY_VHOSTS, $vhostDto->getName())) {
+            return;
+        }
+
+        $this->redis->hdel(self::INTERIM_KEY_VHOSTS, [$vhostDto->getName()]);
+    }
+
+    /**
      * @param string $by
      * @param bool $alpha
      * @return array
