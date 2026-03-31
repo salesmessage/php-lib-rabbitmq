@@ -857,10 +857,19 @@ For Lumen usage the service provider should be registered manually as follow in 
 $app->register(Salesmessage\LibRabbitMQ\LaravelLibRabbitMQServiceProvider::class);
 ```
 
-## Scan Vhosts 
+## Scan Vhosts API
 
 ```bash
-php artisan lib-rabbitmq:scan-vhosts --sleep=10
+php artisan lib-rabbitmq:scan-vhosts --type=api --max-memory=200 --with-output=false --sleep=1
+```
+## Scan Vhosts Interim
+
+```bash
+php artisan lib-rabbitmq:actualize-interim-vhosts --max-memory=200 --with-output=false --sleep=1
+```
+
+```bash
+php artisan lib-rabbitmq:scan-vhosts --type=interim --max-memory=200 --with-output=false --sleep=1
 ```
 
 ## Consuming Messages
