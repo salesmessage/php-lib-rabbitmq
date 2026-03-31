@@ -14,6 +14,7 @@ use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
  */
 class InternalStorageManager
 {
+    private const INTERIM_KEY_VHOSTS = 'rabbitmq_interim_vhosts';
     private const INDEX_KEY_VHOSTS = 'rabbitmq_vhosts_index';
 
     private const INDEX_KEY_QUEUES = 'rabbitmq_queues_index';
