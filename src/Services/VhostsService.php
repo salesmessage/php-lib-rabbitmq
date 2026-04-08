@@ -212,7 +212,7 @@ class VhostsService
         $vhostPrefix = $this->getVhostPrefix();
         if (('/' === $vhostName)
             || ('' === $vhostName)
-            || (false === str_contains($vhostName, $vhostPrefix))
+            || (false === str_starts_with($vhostName, $vhostPrefix))
         ) {
             return null;
         }
