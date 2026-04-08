@@ -701,7 +701,7 @@ abstract class AbstractVhostsConsumer extends Consumer
             }
 
             if (!$this->hadJobs) {
-                $this->logWarning('goAheadOrWait.no_jobs_during_iteration', [
+                $this->logInfo('goAheadOrWait.no_jobs_during_iteration', [
                     'wait_seconds' => $waitSeconds,
                 ]);
 
@@ -711,7 +711,7 @@ abstract class AbstractVhostsConsumer extends Consumer
             $this->loadVhosts();
             $this->hadJobs = false;
             if (empty($this->vhosts)) {
-                $this->logWarning('goAheadOrWait.no_active_vhosts', [
+                $this->logInfo('goAheadOrWait.no_active_vhosts', [
                     'wait_seconds' => $waitSeconds,
                 ]);
 
@@ -974,7 +974,13 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function log(string $message, array $data = [], string $logType = 'info'): void
     {
-        if ($logType === 'debug' && !($this->config['debug'] ?? false)) {
+        $isEnabled = match ($logType) {
+            'debug' => !empty($this->config['debug']),
+            'info' => !empty($this->config['logs_info_enabled']),
+            'warning' => !empty($this->config['logs_warning_enabled']),
+            default => true
+        };
+        if (false === $isEnabled) {
             return;
         }
 
