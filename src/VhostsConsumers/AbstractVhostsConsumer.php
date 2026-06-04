@@ -332,7 +332,7 @@ abstract class AbstractVhostsConsumer extends Consumer
                 $this->logDebug('processBatch.messagesLockedForProcessing');
 
                 try {
-                    if (AppDeduplicationService::isEnabled()) {
+                    if (AppDeduplicationService::isEnabled($this->configConnectionName)) {
                         /** @var RabbitMQBatchable $batchJobClass */
                         $batchData = $batchJobClass::getNotDuplicatedBatchedJobs($batchData);
                     }
@@ -487,7 +487,7 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function isDeduplicationEnabled(RabbitMQJob $job): bool
     {
-        if (false === AppDeduplicationService::isEnabled()) {
+        if (false === AppDeduplicationService::isEnabled($this->configConnectionName)) {
             return false;
         }
 

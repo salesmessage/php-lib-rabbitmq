@@ -105,9 +105,7 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
             $result = parent::push($job, $data, $queue);
         }
 
-        if (config('queue.connections.rabbitmq_vhosts.immediate_indexation')) {
-            $this->addQueueToIndex((string) $queue);
-        }
+        $this->addQueueToIndex((string) $queue);
 
         return $result;
     }
@@ -145,6 +143,8 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         if (null === $dto->getVhostName()) {
             return false;
         }
+
+        $this->vhostsService->setConnection($dto->getConfigName());
 
         $hasCreated = false;
         $creationHandler = function () use ($dto, &$hasCreated) {
@@ -187,9 +187,13 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
 
         $dto = new ConnectionNameDto($this->getConnectionName());
         $vhostName = $dto->getVhostName();
-        if (null === $vhostName) {
+        if ((null === $vhostName)
+            || !config('queue.connections.' . $dto->getConfigName() . '.immediate_indexation')
+        ) {
             return false;
         }
+
+        $this->internalStorageManager->setConnection($dto->getConfigName());
 
         $groups = $this->groupsService->getAllGroupsNames();
 

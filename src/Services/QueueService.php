@@ -11,6 +11,11 @@ use Throwable;
 class QueueService
 {
     /**
+     * @var string
+     */
+    private string $connectionName = 'rabbitmq_vhosts';
+
+    /**
      * @param RabbitApiClient $rabbitApiClient
      * @param LoggerInterface $logger
      */
@@ -19,9 +24,21 @@ class QueueService
         private LoggerInterface $logger
     )
     {
-        $connectionConfig = (array) config('queue.connections.rabbitmq_vhosts', []);
+        $this->setConnection($this->connectionName);
+    }
 
+    /**
+     * @param string $connectionName
+     * @return $this
+     */
+    public function setConnection(string $connectionName): self
+    {
+        $this->connectionName = $connectionName;
+
+        $connectionConfig = (array) config('queue.connections.' . $this->connectionName, []);
         $this->rabbitApiClient->setConnectionConfig($connectionConfig);
+
+        return $this;
     }
 
     /**

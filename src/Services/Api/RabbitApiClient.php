@@ -32,6 +32,23 @@ class RabbitApiClient
     }
 
     /**
+     * @return string
+     */
+    public function getManagementVersion(): string
+    {
+        return (string) ($this->connectionConfig['management_version'] ?? '');
+    }
+
+    /**
+     * @param int $version
+     * @return bool
+     */
+    public function isVersionCorrespond(int $version): bool
+    {
+        return $version === (int) $this->getManagementVersion();
+    }
+
+    /**
      * @param string $method
      * @param string $uri
      * @param array $query
