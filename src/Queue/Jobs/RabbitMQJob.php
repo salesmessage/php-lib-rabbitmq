@@ -38,6 +38,18 @@ class RabbitMQJob extends Job implements JobContract
      */
     protected $decoded;
 
+    /**
+     * Memoized, unserialized command for this message.
+     *
+     * The command is unserialized more than once per message (e.g. the deduplication
+     * check and then the actual execution). Each unserialize restores every Eloquent
+     * model carried by the job via SerializesModels, which is a DB query per model.
+     * Caching the restored command keeps that to a single restoration per message.
+     *
+     * @var object|null
+     */
+    protected ?object $payloadData = null;
+
     public function __construct(
         Container $container,
         RabbitMQQueue $rabbitmq,
@@ -152,16 +164,20 @@ class RabbitMQJob extends Job implements JobContract
      */
     public function getPayloadData(): object
     {
+        if (null !== $this->payloadData) {
+            return $this->payloadData;
+        }
+
         $payload = $this->payload();
 
         $data = $payload['data'];
 
         if (str_starts_with($data['command'], 'O:')) {
-            return unserialize($data['command']);
+            return $this->payloadData = unserialize($data['command']);
         }
 
         if ($this->container->bound(Encrypter::class)) {
-            return unserialize($this->container[Encrypter::class]->decrypt($data['command']));
+            return $this->payloadData = unserialize($this->container[Encrypter::class]->decrypt($data['command']));
         }
 
         throw new \RuntimeException('Unable to extract job data.');
