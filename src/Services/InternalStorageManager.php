@@ -14,11 +14,14 @@ use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
  */
 class InternalStorageManager
 {
-    private const INTERIM_KEY_VHOSTS = 'rabbitmq_interim_vhosts';
-    private const INDEX_KEY_VHOSTS = 'rabbitmq_vhosts_index';
+    /**
+     * @var string
+     */
+    private string $connectionName = 'rabbitmq_vhosts';
 
-    private const INDEX_KEY_QUEUES = 'rabbitmq_queues_index';
-
+    /**
+     * @var PredisConnection
+     */
     private PredisConnection $redis;
 
     public function __construct() {
@@ -28,11 +31,22 @@ class InternalStorageManager
     }
 
     /**
+     * @param string $connectionName
+     * @return $this
+     */
+    public function setConnection(string $connectionName): self
+    {
+        $this->connectionName = $connectionName;
+
+        return $this;
+    }
+
+    /**
      * @return array
      */
     public function getInterimVhosts(): array
     {
-        return $this->redis->hgetall(self::INTERIM_KEY_VHOSTS);
+        return $this->redis->hgetall($this->getInterimKeyVhosts());
     }
 
     /**
@@ -40,7 +54,7 @@ class InternalStorageManager
      */
     public function getInterimVhostsCount(): int
     {
-        return (int) $this->redis->hlen(self::INTERIM_KEY_VHOSTS);
+        return (int) $this->redis->hlen($this->getInterimKeyVhosts());
     }
 
     /**
@@ -49,7 +63,7 @@ class InternalStorageManager
      */
     public function addInterimVhost(VhostApiDto $vhostDto): void
     {
-        $this->redis->hset(self::INTERIM_KEY_VHOSTS, $vhostDto->getName(), json_encode($vhostDto->toInternalData()));
+        $this->redis->hset($this->getInterimKeyVhosts(), $vhostDto->getName(), json_encode($vhostDto->toInternalData()));
     }
 
     /**
@@ -62,11 +76,12 @@ class InternalStorageManager
             return;
         }
 
-        if (!$this->redis->hexists(self::INTERIM_KEY_VHOSTS, $vhostDto->getName())) {
+        $interimKeyVhosts = $this->getInterimKeyVhosts();
+        if (!$this->redis->hexists($interimKeyVhosts, $vhostDto->getName())) {
             return;
         }
 
-        $this->redis->hdel(self::INTERIM_KEY_VHOSTS, [$vhostDto->getName()]);
+        $this->redis->hdel($interimKeyVhosts, [$vhostDto->getName()]);
     }
 
     /**
@@ -76,7 +91,7 @@ class InternalStorageManager
      */
     public function getVhosts(string $by = 'name', bool $alpha = true): array
     {
-        $vhosts = $this->redis->sort(self::INDEX_KEY_VHOSTS, [
+        $vhosts = $this->redis->sort($this->getIndexKeyVhosts(), [
             'by' => '*->' . $by,
             'alpha' => $alpha,
             'sort' => 'asc',
@@ -138,8 +153,9 @@ class InternalStorageManager
     {
         $storageKey = $this->getVhostStorageKey($vhostDto);
 
-        if (!$this->redis->sismember(self::INDEX_KEY_VHOSTS, $storageKey)) {
-            $this->redis->sadd(self::INDEX_KEY_VHOSTS, $storageKey);
+        $indexKeyVhosts = $this->getIndexKeyVhosts();
+        if (!$this->redis->sismember($indexKeyVhosts, $storageKey)) {
+            $this->redis->sadd($indexKeyVhosts, $storageKey);
         }
 
         $this->redis->hmset($storageKey, $vhostDto->toInternalData());
@@ -155,8 +171,9 @@ class InternalStorageManager
     {
         $storageKey = $this->getVhostStorageKey($vhostDto);
 
-        if ($this->redis->sismember(self::INDEX_KEY_VHOSTS, $storageKey)) {
-            $this->redis->srem(self::INDEX_KEY_VHOSTS, $storageKey);
+        $indexKeyVhosts = $this->getIndexKeyVhosts();
+        if ($this->redis->sismember($indexKeyVhosts, $storageKey)) {
+            $this->redis->srem($indexKeyVhosts, $storageKey);
         }
 
         if ($this->redis->exists($storageKey)) {
@@ -220,7 +237,11 @@ class InternalStorageManager
      */
     private function getVhostStorageKeyPrefix(): string
     {
-        return 'rabbitmq_vhost|';
+        if ($this->isVhostsConnection()) {
+            return 'rabbitmq_vhost|';
+        }
+
+        return $this->connectionName . '_vhost|';
     }
 
     /**
@@ -321,7 +342,7 @@ class InternalStorageManager
     }
 
     /**
-     * @param VhostApiDto $vhostDto
+     * @param QueueApiDto $queueDto
      * @return string
      */
     private function getQueueStorageKey(QueueApiDto $queueDto): string
@@ -335,7 +356,11 @@ class InternalStorageManager
      */
     private function getQueueStorageKeyPrefix(string $vhostName): string
     {
-        return sprintf('rabbitmq_queue|%s|', $vhostName);
+        $queueKey = $this->isVhostsConnection()
+            ? 'rabbitmq_queue'
+            : $this->connectionName . '_queue';
+
+        return sprintf('%s|%s|', $queueKey, $vhostName);
     }
 
     /**
@@ -344,7 +369,7 @@ class InternalStorageManager
      */
     private function getQueueIndexKey(string $vhostName): string
     {
-        return sprintf('%s:%s', self::INDEX_KEY_QUEUES, $vhostName);
+        return sprintf('%s:%s', $this->getIndexKeyQueues(), $vhostName);
     }
 
     /**
@@ -381,6 +406,50 @@ class InternalStorageManager
     public function getLastProcessedAtKeyName(string $groupName): string
     {
         return sprintf('last_processed_at:%s', $groupName);
+    }
+
+    /**
+     * @return string
+     */
+    private function getInterimKeyVhosts(): string
+    {
+        if ($this->isVhostsConnection()) {
+            return 'rabbitmq_interim_vhosts';
+        }
+
+        return $this->connectionName . '_interim_vhosts';
+    }
+
+    /**
+     * @return string
+     */
+    private function getIndexKeyVhosts(): string
+    {
+        if ($this->isVhostsConnection()) {
+            return 'rabbitmq_vhosts_index';
+        }
+
+        return $this->connectionName . '_vhosts_index';
+    }
+
+    /**
+     * @return string
+     */
+    private function getIndexKeyQueues(): string
+    {
+        if ($this->isVhostsConnection()) {
+            return 'rabbitmq_queues_index';
+        }
+
+        return $this->connectionName . '_queues_index';
+    }
+
+    /**
+     * @return bool
+     */
+    private function isVhostsConnection(): bool
+    {
+        return 'rabbitmq_vhosts' === $this->connectionName;
     }
 }
 

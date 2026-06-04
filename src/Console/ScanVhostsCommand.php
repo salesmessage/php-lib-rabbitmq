@@ -17,6 +17,7 @@ class ScanVhostsCommand extends Command
     protected const TYPE_INTERIM = 'interim';
 
     protected $signature = 'lib-rabbitmq:scan-vhosts
+                            {--connection=rabbitmq_vhosts : The name of the queue connection to work}
                             {--type=api : Scan type}
                             {--filter= : Vhost name filter}
                             {--sleep=1 : Number of seconds to sleep}
@@ -48,6 +49,13 @@ class ScanVhostsCommand extends Command
 
     public function handle(): void
     {
+        $connectionName = (string) $this->option('connection');
+        if ($connectionName) {
+            $this->vhostsService->setConnection($connectionName);
+            $this->queueService->setConnection($connectionName);
+            $this->internalStorageManager->setConnection($connectionName);
+        }
+
         $sleep = (int) $this->option('sleep');
         $maxTime = max(0, (int) $this->option('max-time'));
         $this->silent = !filter_var($this->option('with-output'), FILTER_VALIDATE_BOOLEAN);

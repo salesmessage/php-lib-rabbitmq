@@ -9,6 +9,11 @@ use Throwable;
 class VhostsService
 {
     /**
+     * @var string
+     */
+    private string $connectionName = 'rabbitmq_vhosts';
+
+    /**
      * @param RabbitApiClient $rabbitApiClient
      * @param LoggerInterface $logger
      */
@@ -17,29 +22,56 @@ class VhostsService
         private LoggerInterface $logger
     )
     {
-        $connectionConfig = (array) config('queue.connections.rabbitmq_vhosts', []);
-
-        $this->rabbitApiClient->setConnectionConfig($connectionConfig);
+        $this->setConnection($this->connectionName);
     }
 
+    /**
+     * @param string $connectionName
+     * @return $this
+     */
+    public function setConnection(string $connectionName): self
+    {
+        $this->connectionName = $connectionName;
+
+        $connectionConfig = (array) config('queue.connections.' . $this->connectionName, []);
+        $this->rabbitApiClient->setConnectionConfig($connectionConfig);
+
+        return $this;
+    }
+
+    /**
+     * @param int $fromPage
+     * @return \Generator
+     * @throws \Salesmessage\LibRabbitMQ\Exceptions\RabbitApiClientException
+     */
     public function getAllVhosts(int $fromPage = 1): \Generator
     {
+        $isSupportPagination = false === $this->rabbitApiClient->isVersionCorrespond(4);
+
         while (true) {
+            $queryParams = [
+                'columns' => 'name,messages,messages_ready,messages_unacknowledged',
+                'sort' => 'name',
+                'sort_reverse' => 'false',
+            ];
+            if ($isSupportPagination) {
+                $queryParams['page'] = $fromPage;
+                $queryParams['page_size'] = 500;
+            }
+
             $data = $this->rabbitApiClient->request(
                 'GET',
                 '/api/vhosts',
-                [
-                    'page' => $fromPage,
-                    'page_size' => 500,
-                    'columns' => 'name,messages,messages_ready,messages_unacknowledged',
-                    'sort' => 'name',
-                    'sort_reverse' => 'false',
-                ]
+                $queryParams
             );
 
-            $items = $data['items'] ?? [];
-            if (!is_array($items) || !isset($data['page_count'])) {
-                throw new \LogicException('Unexpected response from RabbitMQ API');
+            $items = $isSupportPagination ? ($data['items'] ?? []) : $data;
+            $totalPages = $isSupportPagination ? (int) ($data['page_count'] ?? 0) : 1;
+            if (!is_array($items) || !$totalPages) {
+                throw new \LogicException(sprintf(
+                    'Unexpected response from RabbitMQ API: %s',
+                    $this->rabbitApiClient->getManagementVersion()
+                ));
             }
             if (empty($items)) {
                 break;
@@ -50,7 +82,6 @@ class VhostsService
             }
 
             $nextPage = $fromPage + 1;
-            $totalPages = (int) $data['page_count'];
             if ($nextPage > $totalPages) {
                 break;
             }
@@ -62,6 +93,7 @@ class VhostsService
     /**
      * @param int $organizationId
      * @return array
+     * @throws \Salesmessage\LibRabbitMQ\Exceptions\RabbitApiClientException
      */
     public function getVhostForOrganization(int $organizationId): array
     {
@@ -226,6 +258,14 @@ class VhostsService
     }
 
     /**
+     * @return string
+     */
+    public function getVhostPrefix(): string
+    {
+        return (string) config('queue.connections.' . $this->connectionName . '.vhost_prefix', 'organization_');
+    }
+
+    /**
      * @param int $organizationId
      * @return string
      */
@@ -241,14 +281,6 @@ class VhostsService
     private function getVhostDescription(int $organizationId): string
     {
         return sprintf('Vhost for organization ID: %d', $organizationId);
-    }
-
-    /**
-     * @return string
-     */
-    private function getVhostPrefix(): string
-    {
-        return (string) config('queue.connections.rabbitmq_vhosts.vhost_prefix', 'organization_');
     }
 }
 
