@@ -43,18 +43,19 @@ class ScanVhostsCommand extends Command
         private InternalStorageManager $internalStorageManager
     ) {
         parent::__construct();
-
-        $this->groups = $this->groupsService->getAllGroupsNames();
     }
 
     public function handle(): void
     {
         $connectionName = (string) $this->option('connection');
         if ($connectionName) {
+            $this->groupsService->setConnection($connectionName);
             $this->vhostsService->setConnection($connectionName);
             $this->queueService->setConnection($connectionName);
             $this->internalStorageManager->setConnection($connectionName);
         }
+
+        $this->groups = $this->groupsService->getAllGroupsNames();
 
         $sleep = (int) $this->option('sleep');
         $maxTime = max(0, (int) $this->option('max-time'));
@@ -64,6 +65,8 @@ class ScanVhostsCommand extends Command
         $maxMemoryBytes = $maxMemoryMb > 0 ? $maxMemoryMb * 1024 * 1024 : 0;
 
         $startedAt = microtime(true);
+
+        $this->line(sprintf('Started... Connection: %s', $connectionName), 'info');
 
         while (true) {
             $iterationStartedAt = microtime(true);
@@ -300,3 +303,4 @@ class ScanVhostsCommand extends Command
         }
     }
 }
+

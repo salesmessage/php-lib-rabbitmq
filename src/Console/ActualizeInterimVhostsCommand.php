@@ -4,14 +4,13 @@ namespace Salesmessage\LibRabbitMQ\Console;
 
 use Illuminate\Console\Command;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
-use Salesmessage\LibRabbitMQ\Services\GroupsService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
-use Salesmessage\LibRabbitMQ\Services\QueueService;
 use Salesmessage\LibRabbitMQ\Services\VhostsService;
 
 class ActualizeInterimVhostsCommand extends Command
 {
     protected $signature = 'lib-rabbitmq:actualize-interim-vhosts
+                            {--connection=rabbitmq_vhosts : The name of the queue connection to work}
                             {--sleep=1 : Number of seconds to sleep}
                             {--max-time=0 : Maximum seconds the command can run before stopping}
                             {--with-output=true : Show output details during iteration}
@@ -37,6 +36,12 @@ class ActualizeInterimVhostsCommand extends Command
      */
     public function handle(): void
     {
+        $connectionName = (string) $this->option('connection');
+        if ($connectionName) {
+            $this->vhostsService->setConnection($connectionName);
+            $this->internalStorageManager->setConnection($connectionName);
+        }
+
         $sleep = (int) $this->option('sleep');
         $maxTime = max(0, (int) $this->option('max-time'));
         $this->silent = !filter_var($this->option('with-output'), FILTER_VALIDATE_BOOLEAN);
@@ -45,6 +50,8 @@ class ActualizeInterimVhostsCommand extends Command
         $maxMemoryBytes = $maxMemoryMb > 0 ? $maxMemoryMb * 1024 * 1024 : 0;
 
         $startedAt = microtime(true);
+
+        $this->line(sprintf('Scan started. Connection: %s', $connectionName), 'info');
 
         while (true) {
             $iterationStartedAt = microtime(true);

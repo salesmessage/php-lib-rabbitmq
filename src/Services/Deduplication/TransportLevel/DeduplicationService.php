@@ -290,7 +290,7 @@ class DeduplicationService
 
     protected function getConfig(string $key, mixed $default = null): mixed
     {
-        $value = config("queue.connections.rabbitmq_vhosts.deduplication.transport.$key");
+        $value = config("queue.drivers.rabbitmq_vhosts.deduplication.transport.$key");
 
         return $value !== null ? $value : $default;
     }

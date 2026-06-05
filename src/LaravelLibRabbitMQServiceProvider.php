@@ -100,7 +100,7 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
             });
 
             $this->app->singleton(ConsumeVhostsCommand::class, static function ($app) {
-                $consumerClass = ('direct' === config('queue.connections.rabbitmq_vhosts.consumer_type'))
+                $consumerClass = ('direct' === config('queue.drivers.rabbitmq_vhosts.consumer_type'))
                     ? VhostsDirectConsumer::class
                     : VhostsQueueConsumer::class;
 
@@ -168,7 +168,7 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
     {
         $this->app->bind(DeduplicationStore::class, static function () {
             /** @var DeduplicationConfig $config */
-            $config = (array) config('queue.connections.rabbitmq_vhosts.deduplication.transport', []);
+            $config = (array) config('queue.drivers.rabbitmq_vhosts.deduplication.transport', []);
             $enabled = (bool) ($config['enabled'] ?? false);
             if (!$enabled) {
                 return new NullDeduplicationStore();

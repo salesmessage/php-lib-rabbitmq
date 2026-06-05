@@ -226,7 +226,7 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function processAmqpMessage(AMQPMessage $message, RabbitMQQueue $connection): void
     {
-        if (!$this->deliveryLimitService->isAllowed($message)) {
+        if (!$this->deliveryLimitService->isAllowed($message, $this->configConnectionName)) {
             $this->logWarning('processAMQPMessage.delivery_limit_reached');
             return;
         }
@@ -332,7 +332,7 @@ abstract class AbstractVhostsConsumer extends Consumer
                 $this->logDebug('processBatch.messagesLockedForProcessing');
 
                 try {
-                    if (AppDeduplicationService::isEnabled($this->configConnectionName)) {
+                    if (AppDeduplicationService::isEnabled()) {
                         /** @var RabbitMQBatchable $batchJobClass */
                         $batchData = $batchJobClass::getNotDuplicatedBatchedJobs($batchData);
                     }
@@ -487,7 +487,7 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function isDeduplicationEnabled(RabbitMQJob $job): bool
     {
-        if (false === AppDeduplicationService::isEnabled($this->configConnectionName)) {
+        if (false === AppDeduplicationService::isEnabled()) {
             return false;
         }
 

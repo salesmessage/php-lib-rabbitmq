@@ -194,6 +194,7 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         }
 
         $this->internalStorageManager->setConnection($dto->getConfigName());
+        $this->groupsService->setConnection($dto->getConfigName());
 
         $groups = $this->groupsService->getAllGroupsNames();
 
