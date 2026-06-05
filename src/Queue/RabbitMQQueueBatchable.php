@@ -51,36 +51,63 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         $immediate = false,
         $ticket = null
     ): void {
-        try {
-            parent::publishBasic($msg, $exchange, $destination, $mandatory, $immediate, $ticket);
-        } catch (AMQPConnectionClosedException|AMQPChannelClosedException) {
-            $this->reconnect();
-            parent::publishBasic($msg, $exchange, $destination, $mandatory, $immediate, $ticket);
-        }
+        $this->withConnectionRetry(
+            fn() => parent::publishBasic($msg, $exchange, $destination, $mandatory, $immediate, $ticket)
+        );
     }
 
     protected function publishBatch($jobs, $data = '', $queue = null): void
     {
-        try {
-            parent::publishBatch($jobs, $data, $queue);
-        } catch (AMQPConnectionClosedException|AMQPChannelClosedException) {
-            $this->reconnect();
-            parent::publishBatch($jobs, $data, $queue);
+        // Phase 1: build all AMQPMessages with stable UUIDs - no network I/O here
+        $prepared = $this->prepareMessages($jobs, $data, $queue);
+
+        // Phase 2: declare + publish as a single retried unit. The same pre-built
+        // messages (and their message_id / deduplication keys) are reused on every
+        // reconnect retry; declaration is idempotent and re-run after a reconnect.
+        $this->withConnectionRetry(function () use ($prepared): void {
+            foreach ($prepared as [$message, $exchange, $destination, $exchangeType, $queueType]) {
+                $this->declareDestination($destination, $exchange, $exchangeType, $queueType);
+                $this->getChannel()->batch_basic_publish($message, $exchange, $destination);
+            }
+            $this->getChannel()->publish_batch();
+        });
+    }
+
+    /**
+     * Builds AMQPMessage objects for all jobs without performing any network publish.
+     * Separating this from declaration/transport lets reconnect retries reuse the
+     * same messages (and therefore the same message_id / deduplication key).
+     *
+     * @return array<array{0: \PhpAmqpLib\Message\AMQPMessage, 1: string, 2: string, 3: string, 4: string|null, 5: int|string|null}>
+     */
+    private function prepareMessages($jobs, $data, $queue): array
+    {
+        $prepared = [];
+        foreach ($jobs as $job) {
+            if (false === $this->isJobSupported($job)) {
+                throw new \RuntimeException('The job is not supported. RabbitMQQueueBatchable.prepareMessages');
+            }
+
+            $q = $this->addQueuePostfix($job, $queue);
+
+            // Identical per-job logic to RabbitMQQueue::publishBatch (via bulkRaw),
+            // but the message is only built here - declaration and the actual
+            // batch_basic_publish happen later so a reconnect retry reuses the same
+            // message/UUID.
+            $prepared[] = $this->buildMessage(
+                $this->createPayload($job, $q, $data),
+                $q,
+                [
+                    'queue_type' => ($job instanceof RabbitMQConsumable) ? $job->getQueueType() : null,
+                ]
+            );
         }
+        return $prepared;
     }
 
     protected function createChannel(): AMQPChannel
     {
-        try {
-            return parent::createChannel();
-        } catch (AMQPConnectionClosedException $exception) {
-            if ($this->isVhostFailedException($exception) && (false === $this->createNotExistsVhost())) {
-                throw $exception;
-            }
-
-            $this->reconnect();
-            return parent::createChannel();
-        }
+        return $this->withConnectionRetry(fn() => parent::createChannel());
     }
 
     public function push($job, $data = '', $queue = null)
@@ -90,20 +117,33 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
             ? $this->getQueueForListenerJob($job, $queue)
             : $this->getQueueForConsumableJob($job, $queue);
 
-        try {
-            $result = parent::push($job, $data, $queue);
-        } catch (AMQPConnectionClosedException $exception) {
-            if (530 !== $exception->getCode()) {
-                throw $exception;
-            }
+        $options = [
+            'queue_type' => ($job instanceof RabbitMQConsumable) ? $job->getQueueType() : null,
+        ];
 
-            // vhost not found
-            if (false === $this->createNotExistsVhost()) {
-                throw $exception;
-            }
+        // Same publish path as RabbitMQQueue::push (postfix + enqueueUsing + pushRaw),
+        // but the AMQPMessage is built ONCE up front so the initial attempt and every
+        // reconnect retry publish the same message_id - necessary for transport-level
+        // deduplication. Declaration + publish are the only retried steps (reusing the
+        // pre-built message); parent::publishBasic is called directly to avoid the
+        // extra retry layer in the overridden publishBasic.
+        $publishQueue = $this->addQueuePostfix($job, $queue);
+        $payload = $this->createPayload($job, $this->getQueue($publishQueue), $data);
+        [$message, $exchange, $destination, $exchangeType, $queueType, $correlationId] =
+            $this->buildMessage($payload, $publishQueue, $options);
 
-            $result = parent::push($job, $data, $queue);
-        }
+        $result = $this->enqueueUsing(
+            $job,
+            $payload,
+            $publishQueue,
+            null,
+            fn() => $this->withConnectionRetry(function () use ($message, $exchange, $destination, $exchangeType, $queueType, $correlationId) {
+                $this->declareDestination($destination, $exchange, $exchangeType, $queueType);
+                parent::publishBasic($message, $exchange, $destination, true);
+
+                return $correlationId;
+            })
+        );
 
         $this->addQueueToIndex((string) $queue);
 
@@ -222,7 +262,11 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         $vhostName = (string) $dto->getVhostName();
 
         $notFoundErrorMessage = sprintf('NOT_ALLOWED - vhost %s not found', $vhostName);
-        if ((403 === $exception->getCode()) && str_contains($exception->getMessage(), $notFoundErrorMessage)) {
+        // 530 = connection-level NOT_ALLOWED (vhost missing at connection.open),
+        // 403 = channel-level ACCESS_REFUSED for the same missing vhost.
+        if (in_array($exception->getCode(), [403, 530], true)
+            && str_contains($exception->getMessage(), $notFoundErrorMessage)
+        ) {
             return true;
         }
 
@@ -232,5 +276,41 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         }
 
         return false;
+    }
+
+    /**
+     * Run a transport-only operation, retrying it after a connection/channel failure.
+     *
+     * The callable must contain only network I/O - message building must happen
+     * before this call so the same payload (and UUID) is reused on every attempt.
+     *
+     * @param callable $operation         Transport-only operation to run.
+     * @param int      $reconnectAttempts Total reconnect attempts before giving up,
+     *                                    passed through to reconnect() (default 1).
+     * @param int      $operationAttempts Number of times to retry the operation after a
+     *                                    connection failure (0 = run once, no retry).
+     */
+    private function withConnectionRetry(
+        callable $operation,
+        int $reconnectAttempts = 2,
+        int $operationAttempts = 2
+    ): mixed {
+        for ($attempt = 0; ; $attempt++) {
+            try {
+                return $operation();
+            } catch (AMQPConnectionClosedException|AMQPChannelClosedException $exception) {
+                // No retries left - surface the failure.
+                if ($attempt >= $operationAttempts) {
+                    throw $exception;
+                }
+
+                // Recover before retrying: recreate a missing vhost, then reconnect.
+                if ($this->isVhostFailedException($exception) && (false === $this->createNotExistsVhost())) {
+                    throw $exception;
+                }
+
+                $this->reconnect($reconnectAttempts);
+            }
+        }
     }
 }
