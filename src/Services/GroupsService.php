@@ -8,13 +8,34 @@ use Throwable;
 class GroupsService
 {
     /**
+     * @var string
+     */
+    private string $connectionName = 'rabbitmq_vhosts';
+
+    /**
      * @var array
      */
     private array $configData = [];
 
-    public function __construct()
+    /**
+     * @var bool
+     */
+    private bool $isConfigLoaded = false;
+
+
+    /**
+     * @param string $connectionName
+     * @return $this
+     */
+    public function setConnection(string $connectionName): self
     {
+        $this->connectionName = $connectionName;
+
         $this->configData = $this->loadConfigData();
+
+        $this->isConfigLoaded = true;
+
+        return $this;
     }
 
     /**
@@ -23,6 +44,10 @@ class GroupsService
      */
     public function getGroupConfig(string $groupName): array
     {
+        if (false === $this->isConfigLoaded) {
+            $this->setConnection($this->connectionName);
+        }
+
         return (array) ($this->configData['groups'][$groupName] ?? []);
     }
 
@@ -31,6 +56,10 @@ class GroupsService
      */
     public function getAllGroupsNames(): array
     {
+        if (false === $this->isConfigLoaded) {
+            $this->setConnection($this->connectionName);
+        }
+
         if (!isset($this->configData['groups']) || !is_array($this->configData['groups'])) {
             return [];
         }
@@ -43,7 +72,7 @@ class GroupsService
      */
     private function loadConfigData(): array
     {
-        $filePath = base_path() . '/rabbit-groups.yml';
+        $filePath = $this->getConfigFilePath();
         if (!file_exists($filePath)) {
             return [];
         }
@@ -55,6 +84,18 @@ class GroupsService
         }
 
         return $configData;
+    }
+
+    /**
+     * @return string
+     */
+    private function getConfigFilePath(): string
+    {
+        $fileName = ('rabbitmq_vhosts' === $this->connectionName)
+            ? 'rabbit-groups.yml'
+            : str_replace('_', '-', $this->connectionName) . '-groups.yml';
+
+        return base_path() . '/' . $fileName;
     }
 }
 

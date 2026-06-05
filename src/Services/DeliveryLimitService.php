@@ -11,12 +11,13 @@ class DeliveryLimitService
 {
     public function __construct(
         private ConfigRepository $config,
-        private LoggerInterface $logger,
-    ) {}
+        private LoggerInterface  $logger,
+    ) {
+    }
 
-    public function isAllowed(AMQPMessage $message): bool
+    public function isAllowed(AMQPMessage $message, string $connectionName = 'rabbitmq_vhosts'): bool
     {
-        $config = (array) $this->config->get('queue.connections.rabbitmq_vhosts.options', []);
+        $config = (array) $this->config->get('queue.connections.' . $connectionName . '.options', []);
         $limit = (int) ($config['quorum']['delivery_limit'] ?? 0);
         if ($limit <= 0) {
             return true;

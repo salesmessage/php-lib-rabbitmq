@@ -5,27 +5,24 @@ namespace Salesmessage\LibRabbitMQ\Services\Deduplication;
 class AppDeduplicationService
 {
     /**
-     * @param string $connectionName
      * @return bool
      */
-    public static function isEnabled(string $connectionName = 'rabbitmq_vhosts'): bool
+    public static function isEnabled(): bool
     {
-        return (bool) static::getConfig('enabled', true, $connectionName);
+        return (bool) static::getConfig('enabled', true);
     }
 
     /**
      * @param string $key
      * @param mixed|null $default
-     * @param string $connectionName
      * @return mixed
      */
     protected static function getConfig(
         string $key,
-        mixed $default = null,
-        string $connectionName = 'rabbitmq_vhosts'
+        mixed $default = null
     ): mixed
     {
-        $value = config("queue.connections.$connectionName.deduplication.application.$key");
+        $value = config("queue.drivers.rabbitmq_vhosts.deduplication.application.$key");
 
         return $value !== null ? $value : $default;
     }

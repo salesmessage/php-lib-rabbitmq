@@ -57,9 +57,15 @@ class ConsumeVhostsCommand extends WorkCommand
     {
         $group = trim($this->argument('group'));
 
+        $queueConfigData = $this->laravel['config']['queue'] ?? [];
+        $connectionName = (string) ($this->argument('connection') ?: ($queueConfigData['default'] ?? ''));
+
+        $this->groupsService->setConnection($connectionName);
+
         $groupConfigData = $this->groupsService->getGroupConfig($group);
         if (empty($groupConfigData)) {
             $this->error(sprintf('Config for consumer group "%s" is not specified', $group));
+
             return;
         }
 
@@ -97,9 +103,6 @@ class ConsumeVhostsCommand extends WorkCommand
         // which jobs are coming through a queue and be informed on its progress.
         $this->listenForEvents();
 
-        $queueConfigData = $this->laravel['config']['queue'];
-        $connectionName = $this->argument('connection') ?: ($queueConfigData['default'] ?? '');
-
         $consumer->setConfig((array) ($queueConfigData['connections'][$connectionName] ?? []));
 
         if (Terminal::hasSttyAvailable()) {
@@ -131,5 +134,4 @@ class ConsumeVhostsCommand extends WorkCommand
         return Str::substr($consumerTag, 0, 255);
     }
 }
-
 

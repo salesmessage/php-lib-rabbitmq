@@ -9,16 +9,16 @@ RabbitMQ Queue driver for Laravel
 
 Only the latest version will get new features. Bug fixes will be provided using the following scheme:
 
-| Package Version | Laravel Version | Bug Fixes Until   |                                                                                             |
-|-----------------|-----------------|-------------------|---------------------------------------------------------------------------------------------|
-| 1               | 50              | June 4th, 2026    | [Documentation](https://github.com/vyuldashev/laravel-queue-rabbitmq/blob/master/README.md) |
+| Package Version | Laravel Version | Bug Fixes Until |                                                                                             |
+|-----------------|-----------------|-----------------|---------------------------------------------------------------------------------------------|
+| 1               | 52              | June 5th, 2026  | [Documentation](https://github.com/vyuldashev/laravel-queue-rabbitmq/blob/master/README.md) |
 
 ## Installation
 
 You can install this package via composer using this command:
 
 ```
-composer require salesmessage/php-lib-rabbitmq:^1.51 --ignore-platform-reqs
+composer require salesmessage/php-lib-rabbitmq:^1.52 --ignore-platform-reqs
 ```
 
 The package will automatically register itself.
@@ -310,7 +310,7 @@ groups:
 
 ```
 
-### Configuration
+### Connection Configuration
 
 Add connection to `config/queue.php`:
 
@@ -321,9 +321,8 @@ Add connection to `config/queue.php`:
     // ...
 
     'rabbitmq_vhosts' => [
-    
        'driver' => 'rabbitmq_vhosts',
-       'consumer_type' => env('RABBITMQ_VHOSTS_CONSUMER_TYPE', 'direct'),
+       'management_version' => env('RABBITMQ_VHOSTS_MANAGEMENT_VERSION', '3.12.8'),
        'hosts' => [
            [
                'host' => env('RABBITMQ_HOST', '127.0.0.1'),
@@ -341,6 +340,49 @@ Add connection to `config/queue.php`:
     // ...    
 ],
 ```
+
+### Driver Configuration
+
+Add connection to `config/queue.php`:
+
+```php
+'drivers' => [
+    // ...
+
+   'rabbitmq_vhosts' => [
+        'consumer_type' => env('RABBITMQ_VHOSTS_CONSUMER_TYPE', 'direct'),
+        /**
+         * Provided on 2 levels: transport and application.
+         */
+        'deduplication' => [
+            'transport' => [
+                'enabled' => env('RABBITMQ_DEDUP_TRANSPORT_ENABLED', true),
+                'ttl' => env('RABBITMQ_DEDUP_TRANSPORT_TTL', 3600),
+                'lock_ttl' => env('RABBITMQ_DEDUP_TRANSPORT_LOCK_TTL', 60),
+                /**
+                 * Possible: ack, reject
+                 */
+                'action_on_duplication' => env('RABBITMQ_DEDUP_TRANSPORT_ACTION', 'ack'),
+                /**
+                 * Possible: ack, reject, requeue
+                 */
+                'action_on_lock' => env('RABBITMQ_DEDUP_TRANSPORT_LOCK_ACTION', 'requeue'),
+                'connection' => [
+                    'driver' => env('RABBITMQ_DEDUP_TRANSPORT_DRIVER', 'redis'),
+                    'name' => env('RABBITMQ_DEDUP_TRANSPORT_CONNECTION_NAME', 'persistent'),
+                    'key_prefix' => env('RABBITMQ_DEDUP_TRANSPORT_KEY_PREFIX', 'core_mq_dedup'),
+                ],
+            ],
+            'application' => [
+                'enabled' => env('RABBITMQ_DEDUP_APP_ENABLED', true),
+            ],
+        ],
+    ]
+
+    // ...    
+],
+```
+
 
 ### Optional Queue Config
 
@@ -862,6 +904,7 @@ $app->register(Salesmessage\LibRabbitMQ\LaravelLibRabbitMQServiceProvider::class
 ```bash
 php artisan lib-rabbitmq:scan-vhosts --type=api --max-memory=200 --with-output=false --sleep=1
 ```
+
 ## Scan Vhosts Interim
 
 ```bash
@@ -870,6 +913,12 @@ php artisan lib-rabbitmq:actualize-interim-vhosts --max-memory=200 --with-output
 
 ```bash
 php artisan lib-rabbitmq:scan-vhosts --type=interim --max-memory=200 --with-output=false --sleep=1
+```
+
+## Scan Vhosts Other Connection
+
+```bash
+php artisan lib-rabbitmq:scan-vhosts --connection=rabbitmq_neoteric
 ```
 
 ## Consuming Messages
