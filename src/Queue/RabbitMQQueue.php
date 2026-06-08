@@ -130,16 +130,9 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
      */
     public function pushRaw($payload, $queue = null, array $options = []): int|string|null
     {
-        $queueType = $options['queue_type'] ?? null;
-        if (array_key_exists('queue_type', $options)) {
-            unset($options['queue_type']);
-        }
-
-        [$destination, $exchange, $exchangeType, $attempts] = $this->publishProperties($queue, $options);
+        [$message, $exchange, $destination, $exchangeType, $queueType, $correlationId] = $this->buildMessage($payload, $queue, $options);
 
         $this->declareDestination($destination, $exchange, $exchangeType, $queueType);
-
-        [$message, $correlationId] = $this->createMessage($payload, $attempts);
 
         $this->publishBasic($message, $exchange, $destination, true);
 
@@ -240,9 +233,9 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
                 throw new \RuntimeException('The job is not supported. RabbitMQQueue.publishBatch');
             }
 
-            $queue = $this->addQueuePostfix($job, $queue);
+            $q = $this->addQueuePostfix($job, $queue);
 
-            $this->bulkRaw($this->createPayload($job, $queue, $data), $queue, [
+            $this->bulkRaw($this->createPayload($job, $q, $data), $q, [
                 'job' => $job,
                 'queue_type' => ($job instanceof RabbitMQConsumable) ? $job->getQueueType() : null,
             ]);
@@ -256,6 +249,26 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
      */
     public function bulkRaw(string $payload, ?string $queue = null, array $options = []): int|string|null
     {
+        [$message, $exchange, $destination, $exchangeType, $queueType, $correlationId] = $this->buildMessage($payload, $queue, $options);
+
+        $this->declareDestination($destination, $exchange, $exchangeType, $queueType);
+
+        $this->getChannel()->batch_basic_publish($message, $exchange, $destination);
+
+        return $correlationId;
+    }
+
+    /**
+     * Build the AMQP message and resolve its routing for a publish, WITHOUT any
+     * network I/O - no destination declaration and no publish happen here.
+     * Separating message construction from declaration/transport lets callers build
+     * a message once and reuse it - together with its message_id / deduplication key -
+     * across reconnect retries of the declaration/publish step.
+     *
+     * @return array{0: AMQPMessage, 1: string, 2: string, 3: string, 4: string|null, 5: int|string|null}
+     */
+    protected function buildMessage(string $payload, ?string $queue = null, array $options = []): array
+    {
         $queueType = $options['queue_type'] ?? null;
         if (array_key_exists('queue_type', $options)) {
             unset($options['queue_type']);
@@ -263,13 +276,9 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
 
         [$destination, $exchange, $exchangeType, $attempts] = $this->publishProperties($queue, $options);
 
-        $this->declareDestination($destination, $exchange, $exchangeType, $queueType);
-
         [$message, $correlationId] = $this->createMessage($payload, $attempts);
 
-        $this->getChannel()->batch_basic_publish($message, $exchange, $destination);
-
-        return $correlationId;
+        return [$message, $exchange, $destination, $exchangeType, $queueType, $correlationId];
     }
 
     /**
@@ -896,13 +905,29 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     }
 
     /**
+     * Reconnect using the original connection settings, retrying up to $attempts
+     * times when the reconnect itself fails with a connection/channel error.
+     *
+     * @param int $attempts Total reconnect attempts before giving up (default 1).
+     *
      * @throws Exception
      */
-    protected function reconnect(): void
+    protected function reconnect(int $attempts = 1): void
     {
-        // Reconnects using the original connection settings.
-        $this->getConnection()->reconnect();
-        // Create a new main channel because all old channels are removed.
-        $this->getChannel(true);
+        $attempt = 1;
+        while (true) {
+            try {
+                // Reconnects using the original connection settings.
+                $this->getConnection()->reconnect();
+                // Create a new main channel because all old channels are removed.
+                $this->getChannel(true);
+                return;
+            } catch (AMQPConnectionClosedException|AMQPChannelClosedException $exception) {
+                if ($attempt >= $attempts) {
+                    throw $exception;
+                }
+                $attempt++;
+            }
+        }
     }
 }

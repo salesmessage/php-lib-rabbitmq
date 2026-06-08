@@ -18,6 +18,11 @@ return [
              * Possible: ack, reject, requeue
              */
             'action_on_lock' => env('RABBITMQ_DEDUP_TRANSPORT_LOCK_ACTION', 'requeue'),
+            /**
+             * Max times a locked ("in_progress") message is requeued via the TTL delay
+             * queue before it is rejected. Only used when action_on_lock = requeue.
+             */
+            'lock_requeue_max_attempts' => env('RABBITMQ_DEDUP_TRANSPORT_LOCK_REQUEUE_MAX_ATTEMPTS', 1),
             'connection' => [
                 'driver' => env('RABBITMQ_DEDUP_TRANSPORT_DRIVER', 'redis'),
                 'name' => env('RABBITMQ_DEDUP_TRANSPORT_CONNECTION_NAME', 'persistent'),

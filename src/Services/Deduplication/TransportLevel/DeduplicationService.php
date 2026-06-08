@@ -16,6 +16,7 @@ use Salesmessage\LibRabbitMQ\Services\DlqDetector;
  *     enabled: bool,
  *     ttl: int,
  *     lock_ttl: int,
+ *     lock_requeue_max_attempts: int,
  *     action_on_duplication: 'ack'|'reject',
  *     action_on_lock: 'ack'|'reject'|'requeue',
  *     connection: array{
@@ -26,6 +27,7 @@ use Salesmessage\LibRabbitMQ\Services\DlqDetector;
  * } - {
  *     "ttl": TTL in seconds for the message to be considered as processed,
  *     "lock_ttl": TTL in seconds for the lock to be acquired for the message during in_progress,
+ *     "lock_requeue_max_attempts": Max times a locked message is requeued with delay before rejecting (default 1),
  *     "connection.driver": "Only redis is supported now",
  *     "connection.name": "Connection name from config('database.redis.{connection_name}')",
  * }
@@ -44,9 +46,9 @@ class DeduplicationService
 
     private const MAX_LOCK_TTL = 180;
     private const MAX_TTL = 7 * 24 * 60 * 60;
-    private const WAIT_AFTER_PUBLISH = 1;
 
     private const HEADER_LOCK_REQUEUE_COUNT = 'x-dup-lock-requeue-count';
+    private const DEFAULT_LOCK_REQUEUE_MAX_ATTEMPTS = 1;
 
     public function __construct(
         private DeduplicationStore $store,
@@ -65,7 +67,7 @@ class DeduplicationService
         $messageState = $this->getState($message, $queueName);
         try {
             if ($messageState === DeduplicationService::IN_PROGRESS) {
-                $action = $this->applyActionOnLock($message);
+                $action = $this->applyActionOnLock($message, $queueName);
                 $this->logger->warning('DeduplicationService.message_already_in_progress', [
                     'action' => $action,
                     'message_id' => $message->get_properties()['message_id'] ?? null,
@@ -86,7 +88,7 @@ class DeduplicationService
 
             $hasPutAsInProgress = $this->markAsInProgress($message, $queueName);
             if ($hasPutAsInProgress === false) {
-                $action = $this->applyActionOnLock($message);
+                $action = $this->applyActionOnLock($message, $queueName);
                 $this->logger->warning('DeduplicationService.message_already_in_progress.skip', [
                     'action' => $action,
                     'message_id' => $message->get_properties()['message_id'] ?? null,
@@ -204,7 +206,7 @@ class DeduplicationService
         return $messageId;
     }
 
-    protected function applyActionOnLock(AMQPMessage $message): string
+    protected function applyActionOnLock(AMQPMessage $message, ?string $queueName = null): string
     {
         $action = $this->getConfig('action_on_lock', self::ACTION_REQUEUE);
         if ($action === self::ACTION_REJECT) {
@@ -212,7 +214,7 @@ class DeduplicationService
         } elseif ($action === self::ACTION_ACK) {
             $message->ack();
         } else {
-            $action = $this->republishLockedMessage($message);
+            $action = $this->republishLockedMessage($message, $queueName);
         }
 
         return $action;
@@ -232,13 +234,14 @@ class DeduplicationService
 
     /**
      * Such a situation normally should not happen or can happen very rarely.
-     * Republish the locked message with a retry-count guard.
-     * It's necessary to avoid infinite redelivery loop.
+     * Republish the locked message into a TTL delay queue that dead-letters back
+     * to the original destination after lock_ttl seconds, with a retry-count guard.
      *
      * @param AMQPMessage $message
+     * @param string|null $queueName
      * @return string
      */
-    protected function republishLockedMessage(AMQPMessage $message): string
+    protected function republishLockedMessage(AMQPMessage $message, ?string $queueName = null): string
     {
         $props = $message->get_properties();
         $headers = [];
@@ -249,7 +252,7 @@ class DeduplicationService
         $attempts = (int) ($headers[self::HEADER_LOCK_REQUEUE_COUNT] ?? 0);
         ++$attempts;
 
-        $maxAttempts = 1 + (((int) ($this->getConfig('lock_ttl', 30))) / self::WAIT_AFTER_PUBLISH);
+        $maxAttempts = (int) ($this->getConfig('lock_requeue_max_attempts') ?: self::DEFAULT_LOCK_REQUEUE_MAX_ATTEMPTS);
         if ($attempts > $maxAttempts) {
             $this->logger->warning('DeduplicationService.republishLockedMessage.max_attempts_reached', [
                 'message_id' => $props['message_id'] ?? null,
@@ -268,17 +271,39 @@ class DeduplicationService
 
         $newMessage = new AMQPMessage($message->getBody(), $newProps);
         $channel = $message->getChannel();
-        $channel->basic_publish($newMessage, $message->getExchange(), $message->getRoutingKey());
+
+        $lockTtl = (int) ($this->getConfig('lock_ttl', self::DEFAULT_LOCK_TTL));
+        $deltaMs = 5000;
+        $lockTtlMs = ($lockTtl * 1000) + $deltaMs;
+        $baseQueue = $queueName ?? $message->getRoutingKey();
+        $delayQueue = $baseQueue . '.dedup-lock-delay.' . $lockTtlMs;
+
+        $channel->queue_declare(
+            $delayQueue,
+            false,
+            true,
+            false,
+            false,
+            false,
+            new AMQPTable([
+                'x-message-ttl' => $lockTtlMs,
+                'x-dead-letter-exchange' => $message->getExchange(),
+                'x-dead-letter-routing-key' => $message->getRoutingKey(),
+                // Must exceed x-message-ttl so the queue is not auto-deleted at the
+                // exact moment its messages dead-letter back (matches getDelayQueueArguments).
+                'x-expires' => $lockTtlMs * 2,
+            ])
+        );
+
+        $channel->basic_publish($newMessage, '', $delayQueue);
 
         $this->logger->warning('DeduplicationService.republishLockedMessage.republish', [
             'message_id' => $props['message_id'] ?? null,
             'attempts' => $attempts,
+            'delay_ms' => $lockTtlMs,
+            'delay_queue' => $delayQueue,
         ]);
         $message->ack();
-        // it's necessary to avoid a high redelivery rate
-        // normally, such a situation is not expected (or expected very rarely)
-        // for example, when we have OOM
-        sleep(self::WAIT_AFTER_PUBLISH);
 
         return self::ACTION_REQUEUE;
     }
