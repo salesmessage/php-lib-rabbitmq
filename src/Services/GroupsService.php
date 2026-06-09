@@ -95,7 +95,7 @@ class GroupsService
             ? 'rabbit-groups.yml'
             : str_replace('_', '-', $this->connectionName) . '-groups.yml';
 
-        return base_path() . '/' . $fileName;
+        return rtrim(base_path(), '/') . '/' . $fileName;
     }
 }
 
