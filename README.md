@@ -11,14 +11,14 @@ Only the latest version will get new features. Bug fixes will be provided using 
 
 | Package Version | Laravel Version | Bug Fixes Until |                                                                                             |
 |-----------------|-----------------|-----------------|---------------------------------------------------------------------------------------------|
-| 1               | 52              | June 5th, 2026  | [Documentation](https://github.com/vyuldashev/laravel-queue-rabbitmq/blob/master/README.md) |
+| 1               | 54              | June 9th, 2026  | [Documentation](https://github.com/vyuldashev/laravel-queue-rabbitmq/blob/master/README.md) |
 
 ## Installation
 
 You can install this package via composer using this command:
 
 ```
-composer require salesmessage/php-lib-rabbitmq:^1.53 --ignore-platform-reqs
+composer require salesmessage/php-lib-rabbitmq:^1.54 --ignore-platform-reqs
 ```
 
 The package will automatically register itself.
@@ -918,7 +918,7 @@ php artisan lib-rabbitmq:scan-vhosts --type=interim --max-memory=200 --with-outp
 ## Scan Vhosts Other Connection
 
 ```bash
-php artisan lib-rabbitmq:scan-vhosts --connection=rabbitmq_neoteric
+php artisan lib-rabbitmq:scan-vhosts --connection=rabbitmq_cluster
 ```
 
 ## Consuming Messages
