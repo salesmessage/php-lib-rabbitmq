@@ -253,10 +253,10 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
     }
 
     /**
-     * @param AMQPConnectionClosedException $exception
+     * @param AMQPConnectionClosedException|AMQPChannelClosedException $exception
      * @return bool
      */
-    private function isVhostFailedException(AMQPConnectionClosedException $exception): bool
+    private function isVhostFailedException(AMQPConnectionClosedException|AMQPChannelClosedException $exception): bool
     {
         $dto = new ConnectionNameDto($this->getConnectionName());
         $vhostName = (string) $dto->getVhostName();
