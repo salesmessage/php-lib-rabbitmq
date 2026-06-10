@@ -170,6 +170,8 @@ abstract class AbstractVhostsConsumer extends Consumer
         $this->workerOptions = $options;
         $this->lastRestart = $this->getTimestampOfLastQueueRestart();
 
+        $this->internalStorageManager->setConnection($this->configConnectionName);
+
         $goAhead = $this->goAheadOrWait($options->sleep);
         if ($goAhead === false) {
             return $this->stopStatusCode;
