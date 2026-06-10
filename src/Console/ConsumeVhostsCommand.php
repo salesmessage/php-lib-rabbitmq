@@ -7,6 +7,7 @@ use Illuminate\Queue\Console\WorkCommand;
 use Illuminate\Queue\Worker;
 use Illuminate\Support\Str;
 use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
+use Salesmessage\LibRabbitMQ\Exceptions\RabbitVhostsGroupsException;
 use Salesmessage\LibRabbitMQ\Services\GroupsService;
 use Salesmessage\LibRabbitMQ\VhostsConsumers\AbstractVhostsConsumer;
 use Symfony\Component\Console\Terminal;
@@ -60,9 +61,14 @@ class ConsumeVhostsCommand extends WorkCommand
         $queueConfigData = $this->laravel['config']['queue'] ?? [];
         $connectionName = (string) ($this->argument('connection') ?: ($queueConfigData['default'] ?? ''));
 
-        $this->groupsService->setConnection($connectionName);
+        try {
+            $this->groupsService->setConnection($connectionName);
+            $groupConfigData = $this->groupsService->getGroupConfig($group);
+        } catch (RabbitVhostsGroupsException $exception) {
+            $this->error($exception->getMessage());
 
-        $groupConfigData = $this->groupsService->getGroupConfig($group);
+            $groupConfigData = [];
+        }
         if (empty($groupConfigData)) {
             $this->error(sprintf('Config for consumer group "%s" is not specified', $group));
 

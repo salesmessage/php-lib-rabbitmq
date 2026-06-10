@@ -2,6 +2,7 @@
 
 namespace Salesmessage\LibRabbitMQ\Services;
 
+use Salesmessage\LibRabbitMQ\Exceptions\RabbitVhostsGroupsException;
 use Symfony\Component\Yaml\Yaml;
 use Throwable;
 
@@ -26,6 +27,7 @@ class GroupsService
     /**
      * @param string $connectionName
      * @return $this
+     * @throws RabbitVhostsGroupsException
      */
     public function setConnection(string $connectionName): self
     {
@@ -41,6 +43,7 @@ class GroupsService
     /**
      * @param string $groupName
      * @return array
+     * @throws RabbitVhostsGroupsException
      */
     public function getGroupConfig(string $groupName): array
     {
@@ -53,6 +56,7 @@ class GroupsService
 
     /**
      * @return array
+     * @throws RabbitVhostsGroupsException
      */
     public function getAllGroupsNames(): array
     {
@@ -69,18 +73,19 @@ class GroupsService
 
     /**
      * @return array
+     * @throws RabbitVhostsGroupsException
      */
     private function loadConfigData(): array
     {
         $filePath = $this->getConfigFilePath();
         if (!file_exists($filePath)) {
-            return [];
+            throw new RabbitVhostsGroupsException(sprintf('Group config file "%s" not found', $filePath));
         }
 
         try {
             $configData = (array) Yaml::parseFile($filePath);
         } catch (Throwable $exception) {
-            $configData = [];
+            throw new RabbitVhostsGroupsException($exception->getMessage());
         }
 
         return $configData;
