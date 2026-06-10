@@ -5,6 +5,7 @@ namespace Salesmessage\LibRabbitMQ\Console;
 use Illuminate\Console\Command;
 use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
+use Salesmessage\LibRabbitMQ\Exceptions\RabbitVhostsGroupsException;
 use Salesmessage\LibRabbitMQ\Services\GroupsService;
 use Salesmessage\LibRabbitMQ\Services\QueueService;
 use Salesmessage\LibRabbitMQ\Services\VhostsService;
@@ -48,14 +49,21 @@ class ScanVhostsCommand extends Command
     public function handle(): void
     {
         $connectionName = (string) $this->option('connection');
-        if ($connectionName) {
+
+        try {
             $this->groupsService->setConnection($connectionName);
-            $this->vhostsService->setConnection($connectionName);
-            $this->queueService->setConnection($connectionName);
-            $this->internalStorageManager->setConnection($connectionName);
+            $groups = $this->groupsService->getAllGroupsNames();
+        } catch (RabbitVhostsGroupsException $exception) {
+            $this->warn($exception->getMessage());
+
+            $groups = [];
         }
 
-        $this->groups = $this->groupsService->getAllGroupsNames();
+        $this->groups = $groups;
+
+        $this->vhostsService->setConnection($connectionName);
+        $this->queueService->setConnection($connectionName);
+        $this->internalStorageManager->setConnection($connectionName);
 
         $sleep = (int) $this->option('sleep');
         $maxTime = max(0, (int) $this->option('max-time'));
@@ -298,7 +306,7 @@ class ScanVhostsCommand extends Command
 
     public function line($string, $style = null, $verbosity = null, $forcePrint = false): void
     {
-        if (!$this->silent || $style === 'error' || $forcePrint) {
+        if (!$this->silent || ('error' === $style) || $forcePrint) {
             parent::line($string, $style, $verbosity);
         }
     }

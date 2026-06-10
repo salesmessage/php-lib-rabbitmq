@@ -8,6 +8,7 @@ use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
 use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
+use Salesmessage\LibRabbitMQ\Exceptions\RabbitVhostsGroupsException;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue as BaseRabbitMQQueue;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
 use PhpAmqpLib\Exception\AMQPConnectionClosedException;
@@ -234,9 +235,13 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         }
 
         $this->internalStorageManager->setConnection($dto->getConfigName());
-        $this->groupsService->setConnection($dto->getConfigName());
 
-        $groups = $this->groupsService->getAllGroupsNames();
+        try {
+            $this->groupsService->setConnection($dto->getConfigName());
+            $groups = $this->groupsService->getAllGroupsNames();
+        } catch (RabbitVhostsGroupsException $exception) {
+            $groups = [];
+        }
 
         $queueApiDto = new QueueApiDto([
             'name' => $queue,
