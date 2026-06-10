@@ -65,7 +65,7 @@ class ConsumeVhostsCommand extends WorkCommand
             $this->groupsService->setConnection($connectionName);
             $groupConfigData = $this->groupsService->getGroupConfig($group);
         } catch (RabbitVhostsGroupsException $exception) {
-            $this->error($exception->getMessage());
+            $this->warn($exception->getMessage());
 
             $groupConfigData = [];
         }
