@@ -346,7 +346,7 @@ abstract class AbstractVhostsConsumer extends Consumer
                         ]);
 
                         if ($this->supportsAsyncSignals()) {
-                            $this->registerTimeoutHandlerForBatch($batchJobClass, $this->workerOptions);
+                            $this->registerTimeoutHandlerForBatch($batchJobClass, $this->workerOptions, $batchData);
                         }
                         $batchJobClass::collection($batchData);
 
@@ -1032,20 +1032,36 @@ abstract class AbstractVhostsConsumer extends Consumer
     /**
      * @param class-string<RabbitMQBatchable> $job
      * @param WorkerOptions|null $options
+     * @param array $batch The batch passed to {@see RabbitMQBatchable::collection()}.
      * @return void
      */
-    protected function registerTimeoutHandlerForBatch(string $job, ?WorkerOptions $options): void
+    protected function registerTimeoutHandlerForBatch(string $job, ?WorkerOptions $options, array $batch = []): void
     {
         $timeout = max($job::BATCH_TIMEOUT ?: (int) $options?->timeout, 0);
         if (!$timeout) {
             return;
         }
 
-        pcntl_signal(SIGALRM, function () use ($job, $options, $timeout) {
+        pcntl_signal(SIGALRM, function () use ($job, $options, $timeout, $batch) {
             $this->logger->error('Timeout reached. Stopping batchable consumer.', [
                 'job' => $job,
                 'timeout' => $timeout,
             ]);
+
+            if (method_exists($job, 'failedOnTimeout')) {
+                try {
+                    $job::failedOnTimeout($batch, new \RuntimeException(sprintf(
+                        'Batchable job [%s] timed out after %d seconds.',
+                        $job,
+                        $timeout
+                    )));
+                } catch (\Throwable $e) {
+                    $this->logger->error('Timeout callback failed for batchable consumer.', [
+                        'job' => $job,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            }
 
             $this->kill(static::EXIT_ERROR, $options);
         }, true);
