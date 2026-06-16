@@ -99,7 +99,9 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
                 $this->createPayload($job, $q, $data),
                 $q,
                 [
-                    'queue_type' => ($job instanceof RabbitMQConsumable) ? $job->getQueueType() : null,
+                    'queue_type' => ($job instanceof RabbitMQConsumable)
+                        ? $job->getQueueType()
+                        : RabbitMQConsumable::MQ_TYPE_QUORUM,
                 ]
             );
         }
@@ -119,7 +121,9 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
             : $this->getQueueForConsumableJob($job, $queue);
 
         $options = [
-            'queue_type' => ($job instanceof RabbitMQConsumable) ? $job->getQueueType() : null,
+            'queue_type' => ($job instanceof RabbitMQConsumable)
+                ? $job->getQueueType()
+                : RabbitMQConsumable::MQ_TYPE_QUORUM,
         ];
 
         // Same publish path as RabbitMQQueue::push (postfix + enqueueUsing + pushRaw),

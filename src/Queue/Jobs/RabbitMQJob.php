@@ -141,7 +141,9 @@ class RabbitMQJob extends Job implements JobContract
         parent::release();
 
         $consumableJob = $this->getPayloadData();
-        $queueType = ($consumableJob instanceof RabbitMQConsumable) ? $consumableJob->getQueueType() : null;
+        $queueType = ($consumableJob instanceof RabbitMQConsumable)
+            ? $consumableJob->getQueueType()
+            : RabbitMQConsumable::MQ_TYPE_QUORUM;
 
         // Always create a new message when this Job is released
         $this->rabbitmq->laterRaw(

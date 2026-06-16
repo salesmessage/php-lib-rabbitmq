@@ -107,7 +107,9 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         }
 
         $options = [
-            'queue_type' => ($job instanceof RabbitMQConsumable) ? $job->getQueueType() : null,
+            'queue_type' => ($job instanceof RabbitMQConsumable)
+                ? $job->getQueueType()
+                : RabbitMQConsumable::MQ_TYPE_QUORUM,
         ];
 
         $queue = $this->addQueuePostfix($job, $queue);
@@ -150,7 +152,9 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
             throw new \RuntimeException('The job is not supported. RabbitMQQueue.later');
         }
 
-        $queueType = ($job instanceof RabbitMQConsumable) ? $job->getQueueType() : null;
+        $queueType = ($job instanceof RabbitMQConsumable)
+            ? $job->getQueueType()
+            : RabbitMQConsumable::MQ_TYPE_QUORUM;
 
         $queue = $this->addQueuePostfix($job, $queue);
 
@@ -237,7 +241,9 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
 
             $this->bulkRaw($this->createPayload($job, $q, $data), $q, [
                 'job' => $job,
-                'queue_type' => ($job instanceof RabbitMQConsumable) ? $job->getQueueType() : null,
+                'queue_type' => ($job instanceof RabbitMQConsumable)
+                    ? $job->getQueueType()
+                    : RabbitMQConsumable::MQ_TYPE_QUORUM,
             ]);
         }
 
@@ -854,7 +860,9 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
             return $queue;
         }
 
-        $queueType = ($job instanceof RabbitMQConsumable) ? $job->getQueueType() : null;
+        $queueType = ($job instanceof RabbitMQConsumable)
+            ? $job->getQueueType()
+            : RabbitMQConsumable::MQ_TYPE_QUORUM;
 
         $queuePostfix = (RabbitMQConsumable::MQ_TYPE_QUORUM === $queueType)
             ? $this->getRabbitMQConfig()->getQuorumQueuePostfix()

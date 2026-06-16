@@ -73,7 +73,9 @@ class RabbitMQQueue extends BaseRabbitMQQueue
     {
         $payload = (new JobPayload($this->createPayload($job, $data)))->prepare($job)->value;
 
-        $queueType = ($job instanceof RabbitMQConsumable) ? $job->getQueueType() : null;
+        $queueType = ($job instanceof RabbitMQConsumable)
+            ? $job->getQueueType()
+            : RabbitMQConsumable::MQ_TYPE_QUORUM;
 
         return tap(parent::laterRaw($delay, $payload, $queue, queueType: $queueType), function () use (
             $payload,

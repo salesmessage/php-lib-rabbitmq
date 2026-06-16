@@ -162,7 +162,7 @@ class VhostsService
                 [],
                 [
                     'description' => $description,
-                    'default_queue_type' => 'classic',
+                    'default_queue_type' => 'quorum',
                 ]
             );
         } catch (Throwable $exception) {
