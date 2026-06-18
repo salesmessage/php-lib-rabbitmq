@@ -181,6 +181,9 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     ): int|string|null
     {
         $ttl = $this->secondsUntil($delay) * 1000;
+        if (null === $queueType) {
+            $queueType = RabbitMQConsumable::MQ_TYPE_QUORUM;
+        }
 
         // default options
         $options = [
@@ -190,9 +193,8 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
 
         // When no ttl just publish a new message to the exchange or queue
         if ($ttl <= 0) {
-            if ($queueType !== null) {
-                $options['queue_type'] = $queueType;
-            }
+            $options['queue_type'] = $queueType;
+
             return $this->pushRaw($payload, $queue, $options);
         }
 
@@ -206,7 +208,7 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
             $destination,
             true,
             false,
-            $this->getDelayQueueArguments($this->getQueue($queue), $ttl)
+            $this->getDelayQueueArguments($this->getQueue($queue), $ttl, $queueType)
         );
 
         [$message, $correlationId] = $this->createMessage($payload, $attempts);
@@ -275,7 +277,7 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
      */
     protected function buildMessage(string $payload, ?string $queue = null, array $options = []): array
     {
-        $queueType = $options['queue_type'] ?? null;
+        $queueType = $options['queue_type'] ?? RabbitMQConsumable::MQ_TYPE_QUORUM;
         if (array_key_exists('queue_type', $options)) {
             unset($options['queue_type']);
         }
@@ -706,15 +708,29 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
 
     /**
      * Get the Delay queue arguments.
+     *
+     * @param string $destination
+     * @param int $ttl
+     * @param string|null $queueType
+     * @return array
      */
-    protected function getDelayQueueArguments(string $destination, int $ttl): array
+    protected function getDelayQueueArguments(
+        string $destination,
+        int $ttl,
+        ?string $queueType = null
+    ): array
     {
-        return [
+        $arguments = [
             'x-dead-letter-exchange' => $this->getExchange(),
             'x-dead-letter-routing-key' => $this->getRoutingKey($destination),
             'x-message-ttl' => $ttl,
             'x-expires' => $ttl * 2,
         ];
+        if (null !== $queueType) {
+            $arguments['x-queue-type'] = $queueType;
+        }
+
+        return $arguments;
     }
 
     /**
