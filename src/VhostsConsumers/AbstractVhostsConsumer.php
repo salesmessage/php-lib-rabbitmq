@@ -882,8 +882,8 @@ abstract class AbstractVhostsConsumer extends Consumer
                     $this->logWarning('startHeartbeatCheck.incorrect_connection', [
                         'has_connection' => (null !== $connection) ? 'Y' : 'N',
                         'is_connected' => $connection?->isConnected() ? 'Y' : 'N',
-                        'is_writing' => $connection->isWriting() ? 'Y' : 'N',
-                        'is_blocked' => $connection->isBlocked() ? 'Y' : 'N',
+                        'is_writing' => $connection?->isWriting() ? 'Y' : 'N',
+                        'is_blocked' => $connection?->isBlocked() ? 'Y' : 'N',
                     ]);
 
                     return;
