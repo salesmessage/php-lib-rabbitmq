@@ -264,7 +264,9 @@ class DeduplicationService
 
         $headers[self::HEADER_LOCK_REQUEUE_COUNT] = $attempts;
         // this header will be added during publishing, and we should not use counter from the previous message
-        unset($headers['x-delivery-count']);
+        if (array_key_exists('x-delivery-count', $headers)) {
+            unset($headers['x-delivery-count']);
+        }
 
         $newProps = $props;
         $newProps['application_headers'] = new AMQPTable($headers);
@@ -292,6 +294,7 @@ class DeduplicationService
                 // Must exceed x-message-ttl so the queue is not auto-deleted at the
                 // exact moment its messages dead-letter back (matches getDelayQueueArguments).
                 'x-expires' => $lockTtlMs * 2,
+                'x-queue-type' => RabbitMQConsumable::MQ_TYPE_QUORUM,
             ])
         );
 
