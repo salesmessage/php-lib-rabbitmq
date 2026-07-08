@@ -2,6 +2,8 @@
 
 namespace Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel;
 
+use PhpAmqpLib\Channel\AMQPChannel;
+use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Wire\AMQPTable;
 use Psr\Log\LoggerInterface;
@@ -50,10 +52,14 @@ class DeduplicationService
     private const HEADER_LOCK_REQUEUE_COUNT = 'x-dup-lock-requeue-count';
     private const DEFAULT_LOCK_REQUEUE_MAX_ATTEMPTS = 1;
 
+    private \WeakMap $confirmedChannels;
+
     public function __construct(
         private DeduplicationStore $store,
         private LoggerInterface $logger,
-    ) {}
+    ) {
+        $this->confirmedChannels = new \WeakMap();
+    }
 
     /**
      * @param \Closure $handler
@@ -298,7 +304,17 @@ class DeduplicationService
             ])
         );
 
+        // The lock-requeue republish always uses publisher confirms: there is no job here to
+        // opt in, and the message must be confirmed on the delay queue before the original is
+        // acked below, otherwise it would be lost. A nack/timeout throws, leaving the original
+        // unacked so it is redelivered instead of being lost at the ack.
+        $this->enablePublisherConfirms($channel);
+
         $channel->basic_publish($newMessage, '', $delayQueue);
+
+        $channel->wait_for_pending_acks_returns(
+            $this->getPublisherConfirmTimeout()
+        );
 
         $this->logger->warning('DeduplicationService.republishLockedMessage.republish', [
             'message_id' => $props['message_id'] ?? null,
@@ -311,6 +327,39 @@ class DeduplicationService
         return self::ACTION_REQUEUE;
     }
 
+    private function enablePublisherConfirms(AMQPChannel $channel): void
+    {
+        if (isset($this->confirmedChannels[$channel])) {
+            return;
+        }
+
+        $channel->confirm_select();
+
+        $channel->set_nack_handler(function (AMQPMessage $message): void {
+            throw new AMQPRuntimeException(
+                'Transport dedup republish: message was nacked by the broker.'
+            );
+        });
+
+        $channel->set_return_listener(function (
+            int $replyCode,
+            string $replyText,
+            string $exchange,
+            string $routingKey,
+            AMQPMessage $message
+        ): void {
+            throw new AMQPRuntimeException(sprintf(
+                'Transport dedup republish: message returned as unroutable (%d %s), exchange "%s", routing key "%s".',
+                $replyCode,
+                $replyText,
+                $exchange,
+                $routingKey
+            ));
+        });
+
+        $this->confirmedChannels[$channel] = true;
+    }
+
     protected function isEnabled(): bool
     {
         return (bool) $this->getConfig('enabled', false);
@@ -321,5 +370,12 @@ class DeduplicationService
         $value = config("queue.drivers.rabbitmq_vhosts.deduplication.transport.$key");
 
         return $value !== null ? $value : $default;
+    }
+
+    protected function getPublisherConfirmTimeout(): float
+    {
+        $value = config('queue.connections.rabbitmq_vhosts.options.queue.publisher_confirm_timeout');
+
+        return $value !== null ? (float) $value : 5.0;
     }
 }

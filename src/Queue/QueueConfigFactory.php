@@ -68,13 +68,24 @@ class QueueConfigFactory
             $queueConfig->setQuorum($quorum);
         }
 
-        // Feature: Quorum initial group size
+        // Feature: Quorum initial group size (number of quorum queue members / nodes that
+        // replicate the queue). A null/empty value leaves it unset so RabbitMQ applies its
+        // own default instead of throwing on an invalid (0) size.
         if (Arr::has($queueOptions, 'quorum_initial_group_size')) {
-            $queueConfig->setQuorumInitialGroupSize((int) Arr::pull($queueOptions, 'quorum_initial_group_size'));
+            $size = Arr::pull($queueOptions, 'quorum_initial_group_size');
+            if ($size !== null && $size !== '') {
+                $queueConfig->setQuorumInitialGroupSize((int) $size);
+            }
         }
 
         if ($quorumPostfix = (string) Arr::pull($queueOptions, 'quorum_queue_postfix')) {
             $queueConfig->setQuorumQueuePostfix($quorumPostfix);
+        }
+
+        // Publisher confirms are opted into per job via shouldConfirmOnPublish(); only the
+        // wait timeout is configured at the connection level.
+        if (Arr::has($queueOptions, 'publisher_confirm_timeout')) {
+            $queueConfig->setPublisherConfirmTimeout((float) Arr::pull($queueOptions, 'publisher_confirm_timeout'));
         }
 
         // All extra options not defined

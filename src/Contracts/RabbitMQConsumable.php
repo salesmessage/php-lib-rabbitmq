@@ -17,4 +17,6 @@ interface RabbitMQConsumable
     public function isDuplicated(): bool;
 
     public function getQueueType(): string;
+
+    public function shouldConfirmOnPublish(): bool;
 }

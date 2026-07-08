@@ -18,7 +18,7 @@ Only the latest version will get new features. Bug fixes will be provided using 
 You can install this package via composer using this command:
 
 ```
-composer require salesmessage/php-lib-rabbitmq:^1.62 --ignore-platform-reqs
+composer require salesmessage/php-lib-rabbitmq:^1.63 --ignore-platform-reqs
 ```
 
 The package will automatically register itself.
@@ -470,6 +470,68 @@ by adding extra options.
                 'reroute_failed' => true,
                 'failed_exchange' => 'failed-exchange',
                 'failed_routing_key' => 'application-x.%s',
+            ],
+        ],
+    ],
+
+    // ...    
+],
+```
+
+By default a publish is fire-and-forget: `dispatch()` returns as soon as the message is written to
+the socket, without any guarantee that RabbitMQ accepted it. When you want the broker to acknowledge
+a produced message ("ack on producing"), opt the job into
+[publisher confirms](https://www.rabbitmq.com/confirms.html#publisher-confirms) by implementing a
+`shouldConfirmOnPublish(): bool` method on it.
+
+- Confirms are decided **per job**, not per connection: when a job returns `true`, its publish is
+  routed to a dedicated channel kept in confirm mode and blocks until the broker confirms the
+  message. Jobs that return `false` (or do not implement the method) keep the fire-and-forget path
+  on a separate, non-confirm channel.
+- A broker `nack` (the broker could not take responsibility for the message), an unroutable
+  (returned) message, or a wait timeout throws an `AMQPRuntimeException` / `AMQPTimeoutException`, so
+  an unconfirmed publish fails the dispatch instead of being silently lost.
+- The method is detected via `method_exists`, so existing `RabbitMQConsumable` jobs do not need to
+  change - they simply keep publishing without confirms.
+- It is honored across all publish paths: `push`, `later`, `bulk`/batch, and job release/retry. The
+  transport-level deduplication lock-requeue republish always uses confirms (there is no job there to
+  opt in, and the message must be confirmed before the original is acked).
+- For quorum queues, a confirm is issued once a majority of the queue's members have persisted the
+  message. The number of members is controlled by `quorum_initial_group_size`
+  (`x-quorum-initial-group-size`); leave it unset to use RabbitMQ's default (3).
+
+> Note: publisher confirms add a synchronous broker round-trip per confirmed publish. This is the
+> intended trade-off for delivery guarantees, but it is noticeable in tight loops / bulk publishing.
+
+```php
+use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
+
+class SendCriticalThing implements RabbitMQConsumable
+{
+    // ...
+
+    public function shouldConfirmOnPublish(): bool
+    {
+        return true;
+    }
+}
+```
+
+Only the confirm wait timeout is configured at the connection level (seconds; `0` waits
+indefinitely):
+
+```php
+'connections' => [
+    // ...
+
+    'rabbitmq_vhosts' => [
+        // ...
+
+        'options' => [
+            'queue' => [
+                // ...
+
+                'publisher_confirm_timeout' => 5.0,
             ],
         ],
     ],
