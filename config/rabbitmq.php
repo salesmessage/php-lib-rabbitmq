@@ -22,6 +22,28 @@ return [
     ],
 
     'options' => [
+        'queue' => [
+            /**
+             * Publisher confirms (ack on producing) are opted into per job by implementing
+             * shouldConfirmOnPublish(): bool. When a job returns true, its publish is routed
+             * to a confirm-mode channel and blocks until the broker confirms the message; a
+             * broker nack, an unroutable (returned) message, or a timeout throws, so an
+             * unconfirmed publish fails the dispatch instead of being silently lost.
+             *
+             * This option only sets the seconds to wait for a broker confirm before giving
+             * up; 0 waits indefinitely. Adds a synchronous round-trip per confirmed publish.
+             *
+             * @see https://www.rabbitmq.com/confirms.html#publisher-confirms
+             */
+            'publisher_confirm_timeout' => env('RABBITMQ_PUBLISHER_CONFIRM_TIMEOUT', 5.0),
+            /**
+             * Quorum queues only: initial number of queue members (nodes) that replicate the
+             * queue - set as x-quorum-initial-group-size. A publisher confirm is issued once a
+             * majority of these members have persisted the message, so this governs how many
+             * nodes must ack a publish. Leave null to use RabbitMQ's own default (3).
+             */
+            'quorum_initial_group_size' => env('RABBITMQ_QUORUM_INITIAL_GROUP_SIZE'),
+        ],
         'quorum' => [
             /**
              * Max allowed delivery attempts (RabbitMQ x-delivery-count) for quorum queues.

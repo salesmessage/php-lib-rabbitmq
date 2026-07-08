@@ -34,6 +34,8 @@ class QueueConfig
 
     protected string $quorumQueuePostfix = '';
 
+    protected float $publisherConfirmTimeout = 5.0;
+
     protected array $options = [];
 
     /**
@@ -283,6 +285,18 @@ class QueueConfig
     public function setQuorumQueuePostfix(string $postfix): self
     {
         $this->quorumQueuePostfix = $postfix;
+        return $this;
+    }
+
+    public function getPublisherConfirmTimeout(): float
+    {
+        return $this->publisherConfirmTimeout;
+    }
+
+    public function setPublisherConfirmTimeout(float $timeout): QueueConfig
+    {
+        $this->publisherConfirmTimeout = max($timeout, 1);
+
         return $this;
     }
 

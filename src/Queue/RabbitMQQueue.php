@@ -36,9 +36,15 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     protected ?AbstractConnection $connection = null;
 
     /**
-     * The RabbitMQ channel instance.
+     * The RabbitMQ channel instance used for regular (non-confirmed) publishing.
      */
     protected ?AMQPChannel $channel = null;
+
+    /**
+     * A separate channel kept in publisher-confirm mode, used only for publishes that
+     * request confirms. Kept apart from the plain channel because confirm mode is setup now per job not globally via configs
+     */
+    protected ?AMQPChannel $confirmChannel = null;
 
     /**
      * List of already declared exchanges.
@@ -110,6 +116,7 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
             'queue_type' => ($job instanceof RabbitMQConsumable)
                 ? $job->getQueueType()
                 : RabbitMQConsumable::MQ_TYPE_QUORUM,
+            'confirm' => $this->jobRequestsConfirm($job),
         ];
 
         $queue = $this->addQueuePostfix($job, $queue);
@@ -132,11 +139,13 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
      */
     public function pushRaw($payload, $queue = null, array $options = []): int|string|null
     {
+        $confirm = (bool) ($options['confirm'] ?? false);
+
         [$message, $exchange, $destination, $exchangeType, $queueType, $correlationId] = $this->buildMessage($payload, $queue, $options);
 
         $this->declareDestination($destination, $exchange, $exchangeType, $queueType);
 
-        $this->publishBasic($message, $exchange, $destination, true);
+        $this->publishBasic($message, $exchange, $destination, true, confirm: $confirm);
 
         return $correlationId;
     }
@@ -156,6 +165,8 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
             ? $job->getQueueType()
             : RabbitMQConsumable::MQ_TYPE_QUORUM;
 
+        $confirm = $this->jobRequestsConfirm($job);
+
         $queue = $this->addQueuePostfix($job, $queue);
 
         return $this->enqueueUsing(
@@ -163,8 +174,8 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
             $this->createPayload($job, $this->getQueue($queue), $data),
             $queue,
             $delay,
-            function ($payload, $queue, $delay) use ($queueType) {
-                return $this->laterRaw($delay, $payload, $queue, queueType: $queueType);
+            function ($payload, $queue, $delay) use ($queueType, $confirm) {
+                return $this->laterRaw($delay, $payload, $queue, queueType: $queueType, confirm: $confirm);
             }
         );
     }
@@ -177,7 +188,8 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         string $payload,
         $queue = null,
         int $attempts = 0,
-        ?string $queueType = null
+        ?string $queueType = null,
+        bool $confirm = false
     ): int|string|null
     {
         $ttl = $this->secondsUntil($delay) * 1000;
@@ -194,6 +206,7 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         // When no ttl just publish a new message to the exchange or queue
         if ($ttl <= 0) {
             $options['queue_type'] = $queueType;
+            $options['confirm'] = $confirm;
 
             return $this->pushRaw($payload, $queue, $options);
         }
@@ -214,7 +227,7 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         [$message, $correlationId] = $this->createMessage($payload, $attempts);
 
         // Publish directly on the delayQueue, no need to publish through an exchange.
-        $this->publishBasic($message, null, $destination, true);
+        $this->publishBasic($message, null, $destination, true, confirm: $confirm);
 
         return $correlationId;
     }
@@ -246,6 +259,7 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
                 'queue_type' => ($job instanceof RabbitMQConsumable)
                     ? $job->getQueueType()
                     : RabbitMQConsumable::MQ_TYPE_QUORUM,
+                'confirm' => $this->jobRequestsConfirm($job),
             ]);
         }
 
@@ -257,11 +271,13 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
      */
     public function bulkRaw(string $payload, ?string $queue = null, array $options = []): int|string|null
     {
+        $confirm = (bool) ($options['confirm'] ?? false);
+
         [$message, $exchange, $destination, $exchangeType, $queueType, $correlationId] = $this->buildMessage($payload, $queue, $options);
 
         $this->declareDestination($destination, $exchange, $exchangeType, $queueType);
 
-        $this->getChannel()->batch_basic_publish($message, $exchange, $destination);
+        $this->getChannel(false, $confirm)->batch_basic_publish($message, $exchange, $destination);
 
         return $correlationId;
     }
@@ -903,24 +919,105 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         $destination = '',
         $mandatory = false,
         $immediate = false,
-        $ticket = null
+        $ticket = null,
+        bool $confirm = false
     ): void
     {
-        $this->getChannel()->basic_publish($msg, $exchange, $destination, $mandatory, $immediate, $ticket);
+        $channel = $this->getChannel(false, $confirm);
+        $channel->basic_publish($msg, $exchange, $destination, $mandatory, $immediate, $ticket);
+
+        if ($confirm) {
+            $this->waitForConfirms($channel);
+        }
     }
 
+    /**
+     * Flush both channel batch buffers. Messages were buffered onto the plain or the
+     * confirm channel by bulkRaw() depending on their confirm flag; publish_batch() is a
+     * no-op on a channel with an empty buffer. Only the confirm channel is waited on.
+     */
     protected function batchPublish(): void
     {
-        $this->getChannel()->publish_batch();
+        if ($this->channel !== null) {
+            $this->channel->publish_batch();
+        }
+
+        if ($this->confirmChannel !== null) {
+            $this->confirmChannel->publish_batch();
+            $this->waitForConfirms($this->confirmChannel);
+        }
     }
 
-    public function getChannel($forceNew = false): AMQPChannel
+    /**
+     * Return the publishing channel. When $confirm is true a dedicated channel kept in
+     * publisher-confirm mode is returned; otherwise the plain channel. Both are created
+     * lazily and recreated when $forceNew is set.
+     */
+    public function getChannel($forceNew = false, bool $confirm = false): AMQPChannel
     {
+        if ($confirm) {
+            if (! $this->confirmChannel || $forceNew) {
+                $this->confirmChannel = $this->createChannel();
+                $this->enablePublisherConfirms($this->confirmChannel);
+            }
+
+            return $this->confirmChannel;
+        }
+
         if (! $this->channel || $forceNew) {
             $this->channel = $this->createChannel();
         }
 
         return $this->channel;
+    }
+
+    /**
+     * Put the given channel into publisher-confirm mode. A broker nack or an unroutable
+     * returned message is turned into an exception so an unconfirmed publish fails loudly.
+     */
+    protected function enablePublisherConfirms(AMQPChannel $channel): void
+    {
+        $channel->confirm_select();
+
+        $channel->set_nack_handler(static function (AMQPMessage $message): void {
+            throw new AMQPRuntimeException(
+                'RabbitMQ publisher confirm: message was nacked by the broker.'
+            );
+        });
+
+        $channel->set_return_listener(static function (
+            int $replyCode,
+            string $replyText,
+            string $exchange,
+            string $routingKey,
+            AMQPMessage $message
+        ): void {
+            throw new AMQPRuntimeException(sprintf(
+                'RabbitMQ publisher confirm: message returned as unroutable (%d %s), exchange "%s", routing key "%s".',
+                $replyCode,
+                $replyText,
+                $exchange,
+                $routingKey
+            ));
+        });
+    }
+
+    /**
+     * Block until the broker confirms every message published on the given channel.
+     *
+     * @throws \PhpAmqpLib\Exception\AMQPTimeoutException When no confirm arrives within the configured timeout.
+     * @throws AMQPRuntimeException                       When the broker nacks or returns a message.
+     */
+    protected function waitForConfirms(AMQPChannel $channel): void
+    {
+        $channel->wait_for_pending_acks_returns(
+            $this->getRabbitMQConfig()->getPublisherConfirmTimeout()
+        );
+    }
+
+    protected function jobRequestsConfirm($job): bool
+    {
+        return $job instanceof RabbitMQConsumable && $job->shouldConfirmOnPublish();
     }
 
     protected function createChannel(): AMQPChannel
@@ -945,6 +1042,10 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
                 $this->getConnection()->reconnect();
                 // Create a new main channel because all old channels are removed.
                 $this->getChannel(true);
+                // Recreate the confirm channel too, but only if it was already in use.
+                if ($this->confirmChannel !== null) {
+                    $this->getChannel(true, true);
+                }
                 return;
             } catch (AMQPConnectionClosedException|AMQPChannelClosedException $exception) {
                 if ($attempt >= $attempts) {

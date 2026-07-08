@@ -50,10 +50,11 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         $destination = '',
         $mandatory = false,
         $immediate = false,
-        $ticket = null
+        $ticket = null,
+        bool $confirm = false
     ): void {
         $this->withConnectionRetry(
-            fn() => parent::publishBasic($msg, $exchange, $destination, $mandatory, $immediate, $ticket)
+            fn() => parent::publishBasic($msg, $exchange, $destination, $mandatory, $immediate, $ticket, $confirm)
         );
     }
 
@@ -66,11 +67,23 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         // messages (and their message_id / deduplication keys) are reused on every
         // reconnect retry; declaration is idempotent and re-run after a reconnect.
         $this->withConnectionRetry(function () use ($prepared): void {
-            foreach ($prepared as [$message, $exchange, $destination, $exchangeType, $queueType]) {
+            $hasConfirm = false;
+            $hasPlain = false;
+
+            foreach ($prepared as [$message, $exchange, $destination, $exchangeType, $queueType, $correlationId, $confirm]) {
                 $this->declareDestination($destination, $exchange, $exchangeType, $queueType);
-                $this->getChannel()->batch_basic_publish($message, $exchange, $destination);
+                $this->getChannel(false, $confirm)->batch_basic_publish($message, $exchange, $destination);
+                $confirm ? $hasConfirm = true : $hasPlain = true;
             }
-            $this->getChannel()->publish_batch();
+
+            if ($hasPlain) {
+                $this->getChannel(false, false)->publish_batch();
+            }
+            if ($hasConfirm) {
+                $confirmChannel = $this->getChannel(false, true);
+                $confirmChannel->publish_batch();
+                $this->waitForConfirms($confirmChannel);
+            }
         });
     }
 
@@ -79,7 +92,7 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
      * Separating this from declaration/transport lets reconnect retries reuse the
      * same messages (and therefore the same message_id / deduplication key).
      *
-     * @return array<array{0: \PhpAmqpLib\Message\AMQPMessage, 1: string, 2: string, 3: string, 4: string|null, 5: int|string|null}>
+     * @return array<array{0: \PhpAmqpLib\Message\AMQPMessage, 1: string, 2: string, 3: string, 4: string|null, 5: int|string|null, 6: bool}>
      */
     private function prepareMessages($jobs, $data, $queue): array
     {
@@ -95,7 +108,7 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
             // but the message is only built here - declaration and the actual
             // batch_basic_publish happen later so a reconnect retry reuses the same
             // message/UUID.
-            $prepared[] = $this->buildMessage(
+            $built = $this->buildMessage(
                 $this->createPayload($job, $q, $data),
                 $q,
                 [
@@ -104,6 +117,9 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
                         : RabbitMQConsumable::MQ_TYPE_QUORUM,
                 ]
             );
+
+            $built[] = $this->jobRequestsConfirm($job);
+            $prepared[] = $built;
         }
         return $prepared;
     }
@@ -132,6 +148,8 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         // deduplication. Declaration + publish are the only retried steps (reusing the
         // pre-built message); parent::publishBasic is called directly to avoid the
         // extra retry layer in the overridden publishBasic.
+        $confirm = $this->jobRequestsConfirm($job);
+
         $publishQueue = $this->addQueuePostfix($job, $queue);
         $payload = $this->createPayload($job, $this->getQueue($publishQueue), $data);
         [$message, $exchange, $destination, $exchangeType, $queueType, $correlationId] =
@@ -142,9 +160,9 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
             $payload,
             $publishQueue,
             null,
-            fn() => $this->withConnectionRetry(function () use ($message, $exchange, $destination, $exchangeType, $queueType, $correlationId) {
+            fn() => $this->withConnectionRetry(function () use ($message, $exchange, $destination, $exchangeType, $queueType, $correlationId, $confirm) {
                 $this->declareDestination($destination, $exchange, $exchangeType, $queueType);
-                parent::publishBasic($message, $exchange, $destination, true);
+                parent::publishBasic($message, $exchange, $destination, true, confirm: $confirm);
 
                 return $correlationId;
             })
