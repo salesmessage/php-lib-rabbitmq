@@ -1069,13 +1069,13 @@ abstract class AbstractVhostsConsumer extends Consumer
         pcntl_alarm($timeout);
     }
 
-    public function kill($status = 0, $options = null)
+    public function kill($status = 0, $options = null, $reason = null)
     {
         $this->logger->error('Stopped job execution.', [
             'status' => $status,
             'options' => $options,
         ]);
 
-        parent::kill($status, $options);
+        parent::kill($status, $options, $reason);
     }
 }
