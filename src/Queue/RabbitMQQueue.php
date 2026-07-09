@@ -1017,7 +1017,9 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
 
     protected function jobRequestsConfirm($job): bool
     {
-        return $job instanceof RabbitMQConsumable && $job->shouldConfirmOnPublish();
+        return $job instanceof RabbitMQConsumable
+            && method_exists($job, 'shouldConfirmOnPublish')
+            && $job->shouldConfirmOnPublish();
     }
 
     protected function createChannel(): AMQPChannel

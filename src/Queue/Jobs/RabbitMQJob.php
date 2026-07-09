@@ -145,7 +145,9 @@ class RabbitMQJob extends Job implements JobContract
             ? $consumableJob->getQueueType()
             : RabbitMQConsumable::MQ_TYPE_QUORUM;
 
-        $confirm = ($consumableJob instanceof RabbitMQConsumable) && $consumableJob->shouldConfirmOnPublish();
+        $confirm = ($consumableJob instanceof RabbitMQConsumable)
+            && method_exists($consumableJob, 'shouldConfirmOnPublish')
+            && $consumableJob->shouldConfirmOnPublish();
 
         // Always create a new message when this Job is released
         $this->rabbitmq->laterRaw(
