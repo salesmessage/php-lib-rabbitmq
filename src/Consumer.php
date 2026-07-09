@@ -224,9 +224,10 @@ class Consumer extends Worker
      *
      * @param  int  $status
      * @param  WorkerOptions|null  $options
+     * @param  \Illuminate\Queue\WorkerStopReason|null  $reason
      * @return int
      */
-    public function stop($status = 0, $options = null)
+    public function stop($status = 0, $options = null, $reason = null)
     {
         // Tell the server you are going to stop consuming.
         // It will finish up the last message and not send you any more.
@@ -239,6 +240,6 @@ class Consumer extends Worker
             ]);
         }
 
-        return parent::stop($status, $options);
+        return parent::stop($status, $options, $reason);
     }
 }
