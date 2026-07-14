@@ -105,6 +105,36 @@ class InternalStorageManager
     }
 
     /**
+     * Ordered vhosts together with the numeric weight they were sorted by.
+     * Returns a list of ['name' => string, 'weight' => float] ascending by weight.
+     * A missing weight field is treated as 0.
+     *
+     * @param string $by
+     * @return array
+     */
+    public function getVhostsWithWeights(string $by): array
+    {
+        $rows = $this->redis->sort($this->getIndexKeyVhosts(), [
+            'by' => '*->' . $by,
+            'get' => ['#', '*->' . $by],
+            'alpha' => false,
+            'sort' => 'asc',
+        ]);
+
+        $prefix = $this->getVhostStorageKeyPrefix();
+
+        $result = [];
+        for ($i = 0, $len = count($rows); $i < $len; $i += 2) {
+            $result[] = [
+                'name' => Str::replaceFirst($prefix, '', (string) $rows[$i]),
+                'weight' => (float) ($rows[$i + 1] ?? 0),
+            ];
+        }
+
+        return $result;
+    }
+
+    /**
      * @param string $vhostName
      * @param string $by
      * @param bool $alpha
@@ -406,6 +436,139 @@ class InternalStorageManager
     public function getLastProcessedAtKeyName(string $groupName): string
     {
         return sprintf('last_processed_at:%s', $groupName);
+    }
+
+    /**
+     * Update the last_processed_at timestamp for a vhost and one of its queues
+     * within a group.
+     *
+     * @param string $group
+     * @param string $vhost
+     * @param string $queue
+     * @return void
+     */
+    public function touchLastProcessedAt(string $group, string $vhost, string $queue): void
+    {
+        $timestamp = time();
+
+        $queueDto = new QueueApiDto([
+            'name' => $queue,
+            'vhost' => $vhost,
+        ]);
+        $queueDto
+            ->setGroupName($group)
+            ->setLastProcessedAt($timestamp);
+        $this->updateQueueLastProcessedAt($queueDto);
+
+        $vhostDto = new VhostApiDto([
+            'name' => $vhost,
+        ]);
+        $vhostDto
+            ->setGroupName($group)
+            ->setLastProcessedAt($timestamp);
+        $this->updateVhostLastProcessedAt($vhostDto);
+    }
+
+    /**
+     * Hash field on a vhost holding its processing time (integer milliseconds)
+     * within the sliding window for a group. Used as the sort key in
+     * time_spent_based mode.
+     *
+     * @param string $groupName
+     * @return string
+     */
+    public function getWindowCostKeyName(string $groupName): string
+    {
+        return sprintf('window_cost:%s', $groupName);
+    }
+
+    /**
+     * Add processing time (integer milliseconds) to the current sliding-window
+     * bucket of a vhost and refresh the materialized window cost. The amount may
+     * be negative to reconcile a previously added provisional (reservation)
+     * estimate. Integer math keeps reconciliation exact and allows HINCRBY.
+     *
+     * @param string $group
+     * @param string $vhost
+     * @param int $milliseconds
+     * @param int $window
+     * @param int $bucket
+     * @return void
+     */
+    public function recordProcessingTime(
+        string $group,
+        string $vhost,
+        int $milliseconds,
+        int $window,
+        int $bucket
+    ): void {
+        $bucketsKey = $this->getProcessingBucketsKey($group, $vhost);
+        $bucketId = intdiv(time(), $bucket);
+
+        $this->redis->hincrby($bucketsKey, (string) $bucketId, $milliseconds);
+        $this->redis->expire($bucketsKey, $window + $bucket);
+
+        $this->refreshWindowCost($group, $vhost, $window, $bucket);
+    }
+
+    /**
+     * Recompute a vhost's window cost (integer milliseconds) from its live
+     * buckets (trimming expired ones) and store it on the vhost hash. Returns
+     * the recomputed cost.
+     *
+     * @param string $group
+     * @param string $vhost
+     * @param int $window
+     * @param int $bucket
+     * @return int
+     */
+    public function refreshWindowCost(
+        string $group,
+        string $vhost,
+        int $window,
+        int $bucket
+    ): int {
+        $bucketsKey = $this->getProcessingBucketsKey($group, $vhost);
+        $buckets = $this->redis->hgetall($bucketsKey);
+
+        $oldestValidBucket = intdiv(time() - $window, $bucket);
+
+        $cost = 0;
+        $expired = [];
+        foreach ($buckets as $bucketId => $value) {
+            if ((int) $bucketId < $oldestValidBucket) {
+                $expired[] = $bucketId;
+                continue;
+            }
+            $cost += (int) $value;
+        }
+
+        if (!empty($expired)) {
+            $this->redis->hdel($bucketsKey, $expired);
+        }
+
+        // buckets may sum to a negative value when a provisional charge expired
+        // before its refund/reconciliation; a vhost cannot cost less than zero
+        $cost = max(0, $cost);
+
+        $storageKey = $this->getVhostStorageKeyPrefix() . $vhost;
+        if ($this->redis->exists($storageKey)) {
+            $this->redis->hset($storageKey, $this->getWindowCostKeyName($group), $cost);
+        }
+
+        return $cost;
+    }
+
+    /**
+     * @param string $group
+     * @param string $vhost
+     * @return string
+     */
+    private function getProcessingBucketsKey(string $group, string $vhost): string
+    {
+        $prefix = $this->isVhostsConnection() ? 'rabbitmq' : $this->connectionName;
+
+        return sprintf('%s_proc_buckets|%s|%s', $prefix, $group, $vhost);
     }
 
     /**

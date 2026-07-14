@@ -352,6 +352,19 @@ Add connection to `config/queue.php`:
    'rabbitmq_vhosts' => [
         'consumer_type' => env('RABBITMQ_VHOSTS_CONSUMER_TYPE', 'direct'),
         /**
+         * Vhost round-robin scheduler. See "Vhost Scheduler" section below.
+         */
+        'scheduler' => [
+            'type' => env('RABBITMQ_VHOSTS_SCHEDULER', 'last_processing_based'),
+            'options' => [
+                'time_spent_based' => [
+                    'window' => env('RABBITMQ_VHOSTS_SCHEDULER_WINDOW', 600), // seconds
+                    'bucket' => env('RABBITMQ_VHOSTS_SCHEDULER_BUCKET', 60),  // seconds
+                    'reservation_estimate' => env('RABBITMQ_VHOSTS_SCHEDULER_RESERVATION_ESTIMATE', 5),
+                ],
+            ],
+        ],
+        /**
          * Provided on 2 levels: transport and application.
          */
         'deduplication' => [
@@ -383,6 +396,54 @@ Add connection to `config/queue.php`:
 ],
 ```
 
+
+### Vhost Scheduler
+
+When a group is consumed across many vhosts, the scheduler decides which vhost a
+worker picks next. Two modes are available via `scheduler.type`, and everything is
+tracked per `(group, vhost)` so a vhost shared by several groups is scheduled
+independently in each.
+
+- `last_processing_based` (default) - recency-based round-robin. The next vhost is
+  the one whose last processing happened longest ago. Distributes worker turns by
+  count, so a vhost with a huge workload is only pushed back one slot per turn and
+  can dominate the workers.
+
+- `time_spent_based` - time-based fair round-robin. The next vhost is the one that
+  consumed the least *processing time* for the group within a sliding window. This
+  distributes worker capacity by time rather than by message count, preventing one
+  large workload from monopolizing the workers.
+
+`time_spent_based` options:
+
+| Option | Env | Default | Meaning |
+|--------|-----|---------|---------|
+| `window` | `RABBITMQ_VHOSTS_SCHEDULER_WINDOW` | `600` | How far back (seconds) fairness looks. |
+| `bucket` | `RABBITMQ_VHOSTS_SCHEDULER_BUCKET` | `60` | Resolution (seconds) of the window; keep `bucket <= window / 5`. |
+| `reservation_estimate` | `RABBITMQ_VHOSTS_SCHEDULER_RESERVATION_ESTIMATE` | `5` | Provisional cost (seconds) charged on pick to spread simultaneous workers; `0` disables. |
+
+Notes for `time_spent_based`:
+
+- Processing time is accumulated as integer milliseconds into per-bucket counters
+  in Redis and summed over the window; the resulting cost is used as the ordering
+  key. Integer math keeps provisional reconciliation exact. Idle vhosts decay
+  towards zero as their buckets fall out of the window.
+- The `lib-rabbitmq:scan-vhosts` command refreshes this decay for indexed vhosts, so
+  it should be running for idle vhosts to become eligible again promptly.
+- Fairness is applied at the vhost level; queue ordering within a vhost stays
+  recency-based.
+- Anti-stampede (when many workers start at once): vhosts with equal cost are
+  shuffled so workers do not all begin on the same vhost, and picking a vhost
+  charges it a provisional `reservation_estimate` cost immediately. The
+  provisional is reconciled exactly once real time is recorded, refunded when
+  the worker leaves without doing any work (empty queue), and self-heals via
+  bucket expiry if a worker dies mid-batch. If a single job can run much longer
+  than the estimate and workers still pile onto its vhost, raise
+  `reservation_estimate`.
+
+Switching modes only requires changing the config/env and restarting the workers.
+Switching back is safe - the extra Redis keys created by `time_spent_based` are
+TTL-bounded and expire on their own.
 
 ### Optional Queue Config
 
@@ -1015,6 +1076,17 @@ composer test:style
 
 # To run only unit tests.
 composer test:unit
+```
+
+Scheduler and storage tests run against an in-memory Redis fake by default.
+To run the same tests against a live Redis instead:
+
+```bash
+# keys are prefixed with sm_test_rabbitmq_lib_ and purged before/after each test
+USE_REAL_REDIS=1 vendor/bin/phpunit tests/Unit
+
+# non-default host/port
+USE_REAL_REDIS=1 TEST_REDIS_HOST=127.0.0.1 TEST_REDIS_PORT=6379 vendor/bin/phpunit tests/Unit
 ```
 
 If you receive any errors from the style tests, you can automatically fix most,

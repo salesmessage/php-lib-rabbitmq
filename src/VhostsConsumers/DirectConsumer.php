@@ -144,7 +144,7 @@ class DirectConsumer extends AbstractVhostsConsumer
 
         $connection = $this->initConnection();
 
-        $this->updateLastProcessedAt();
+        $this->reserveCurrentSelection();
 
         return $connection;
     }

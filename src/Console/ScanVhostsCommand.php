@@ -30,6 +30,9 @@ class ScanVhostsCommand extends Command
 
     private array $groups;
     private bool $silent = false;
+    private bool $timeSpentScheduler = false;
+    private int $schedulerWindow = 600;
+    private int $schedulerBucket = 60;
 
     /**
      * @param GroupsService $groupsService
@@ -60,6 +63,12 @@ class ScanVhostsCommand extends Command
         }
 
         $this->groups = $groups;
+
+        $schedulerConfig = (array) config('queue.drivers.rabbitmq_vhosts.scheduler', []);
+        $this->timeSpentScheduler = 'time_spent_based' === ($schedulerConfig['type'] ?? 'last_processing_based');
+        $schedulerOptions = (array) ($schedulerConfig['options']['time_spent_based'] ?? []);
+        $this->schedulerWindow = max(1, (int) ($schedulerOptions['window'] ?? 600));
+        $this->schedulerBucket = max(1, (int) ($schedulerOptions['bucket'] ?? 60));
 
         $this->vhostsService->setConnection($connectionName);
         $this->queueService->setConnection($connectionName);
@@ -195,6 +204,10 @@ class ScanVhostsCommand extends Command
             $vhostDto->getMessagesUnacknowledged()
         ));
 
+        if ($isAddedToIndex && $this->timeSpentScheduler) {
+            $this->refreshWindowCosts($vhostDto->getName());
+        }
+
         $vhostQueues = $isAddedToIndex ? $this->queueService->getAllVhostQueues($vhostDto) : null;
 
         $oldVhostQueues = $this->internalStorageManager->getVhostQueues($vhostDto->getName());
@@ -221,6 +234,25 @@ class ScanVhostsCommand extends Command
         $this->removeOldVhostQueues($vhostDto, $oldVhostQueues);
 
         return true;
+    }
+
+    /**
+     * Recompute the sliding-window processing cost for a vhost across all groups
+     * so idle vhosts decay towards zero even while no worker is recording time.
+     *
+     * @param string $vhostName
+     * @return void
+     */
+    private function refreshWindowCosts(string $vhostName): void
+    {
+        foreach ($this->groups as $groupName) {
+            $this->internalStorageManager->refreshWindowCost(
+                $groupName,
+                $vhostName,
+                $this->schedulerWindow,
+                $this->schedulerBucket
+            );
+        }
     }
 
     private function formatBytes(int $bytes): string

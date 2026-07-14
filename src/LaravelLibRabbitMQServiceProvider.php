@@ -22,6 +22,9 @@ use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Salesmessage\LibRabbitMQ\Services\QueueService;
 use Salesmessage\LibRabbitMQ\Services\VhostsService;
 use Salesmessage\LibRabbitMQ\Services\DeliveryLimitService;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\LastProcessingBasedScheduler;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\TimeSpentBasedScheduler;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\VhostSchedulerInterface;
 use Salesmessage\LibRabbitMQ\VhostsConsumers\DirectConsumer as VhostsDirectConsumer;
 use Salesmessage\LibRabbitMQ\VhostsConsumers\QueueConsumer as VhostsQueueConsumer;
 
@@ -39,8 +42,11 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
 
         $this->app->bind(LockProvider::class, RedisStore::class);
 
+        $this->app->singleton(InternalStorageManager::class);
+
         if ($this->app->runningInConsole()) {
             $this->bindDeduplicationService();
+            $this->bindVhostScheduler();
 
             $this->app->singleton('rabbitmq.consumer', function () {
                 $isDownForMaintenance = function () {
@@ -77,6 +83,7 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
                     $isDownForMaintenance,
                     $this->app->get(DeduplicationService::class),
                     $this->app->get(DeliveryLimitService::class),
+                    $this->app->get(VhostSchedulerInterface::class),
                     null,
                 );
             });
@@ -95,6 +102,7 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
                     $isDownForMaintenance,
                     $this->app->get(DeduplicationService::class),
                     $this->app->get(DeliveryLimitService::class),
+                    $this->app->get(VhostSchedulerInterface::class),
                     null,
                 );
             });
@@ -155,6 +163,31 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
 
         $queue->addConnector('rabbitmq_vhosts', function () {
             return new RabbitMQVhostsConnector($this->app['events']);
+        });
+    }
+
+    /**
+     * Bind the vhost scheduler strategy selected via
+     * queue.drivers.rabbitmq_vhosts.scheduler.type.
+     *
+     * @return void
+     */
+    private function bindVhostScheduler(): void
+    {
+        $this->app->singleton(VhostSchedulerInterface::class, function () {
+            $config = (array) config('queue.drivers.rabbitmq_vhosts.scheduler', []);
+            $type = (string) ($config['type'] ?? 'last_processing_based');
+
+            /** @var InternalStorageManager $storage */
+            $storage = $this->app[InternalStorageManager::class];
+
+            return match ($type) {
+                'time_spent_based' => new TimeSpentBasedScheduler(
+                    $storage,
+                    (array) ($config['options']['time_spent_based'] ?? [])
+                ),
+                default => new LastProcessingBasedScheduler($storage),
+            };
         });
     }
 

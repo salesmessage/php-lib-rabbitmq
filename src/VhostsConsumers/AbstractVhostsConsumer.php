@@ -19,7 +19,6 @@ use Salesmessage\LibRabbitMQ\Consumer;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
 use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
-use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Exceptions\MutexTimeout;
 use Salesmessage\LibRabbitMQ\Interfaces\RabbitMQBatchable;
@@ -30,6 +29,7 @@ use Salesmessage\LibRabbitMQ\Services\Deduplication\AppDeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationService as TransportDeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Salesmessage\LibRabbitMQ\Services\DeliveryLimitService;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\VhostSchedulerInterface;
 
 abstract class AbstractVhostsConsumer extends Consumer
 {
@@ -90,6 +90,8 @@ abstract class AbstractVhostsConsumer extends Consumer
      * @param ExceptionHandler $exceptions
      * @param callable $isDownForMaintenance
      * @param TransportDeduplicationService $transportDeduplicationService
+     * @param DeliveryLimitService $deliveryLimitService
+     * @param VhostSchedulerInterface $scheduler
      * @param callable|null $resetScope
      */
     public function __construct(
@@ -101,6 +103,7 @@ abstract class AbstractVhostsConsumer extends Consumer
         callable $isDownForMaintenance,
         protected TransportDeduplicationService $transportDeduplicationService,
         protected DeliveryLimitService $deliveryLimitService,
+        protected VhostSchedulerInterface $scheduler,
         callable $resetScope = null,
     ) {
         parent::__construct($manager, $events, $exceptions, $isDownForMaintenance, $logger, $resetScope);
@@ -310,6 +313,9 @@ abstract class AbstractVhostsConsumer extends Consumer
             return;
         }
 
+        $processingStartedAt = microtime(true);
+        $singleJobsSeconds = 0.0;
+
         foreach ($this->batchMessages as $batchJobClass => $batchJobMessages) {
             $isBatchSuccess = false;
             $batchSize = count($batchJobMessages);
@@ -398,14 +404,16 @@ abstract class AbstractVhostsConsumer extends Consumer
                 } else {
                     foreach ($uniqueMessagesForProcessing as $batchMessage) {
                         $job = $this->getJobByMessage($batchMessage, $connection);
-                        $this->processSingleJob($job, $batchMessage);
+                        // processSingleJob records its own duration, so it is
+                        // excluded from this method's total to avoid double counting
+                        $singleJobsSeconds += $this->processSingleJob($job, $batchMessage);
                     }
                 }
             } finally {
                 $this->connectionMutex->unlock(static::MAIN_HANDLER_LOCK);
             }
         }
-        $this->updateLastProcessedAt();
+        $this->recordProcessing(microtime(true) - $processingStartedAt - $singleJobsSeconds);
 
         $this->batchMessages = [];
 
@@ -444,7 +452,10 @@ abstract class AbstractVhostsConsumer extends Consumer
         return $job;
     }
 
-    protected function processSingleJob(RabbitMQJob $job, AMQPMessage $message): void
+    /**
+     * @return float Seconds spent on the job (already recorded to the scheduler).
+     */
+    protected function processSingleJob(RabbitMQJob $job, AMQPMessage $message): float
     {
         $timeStarted = microtime(true);
         $this->logInfo('processSingleJob.start');
@@ -472,15 +483,18 @@ abstract class AbstractVhostsConsumer extends Consumer
             $this->currentQueueName,
         );
 
-        $this->updateLastProcessedAt();
+        $duration = microtime(true) - $timeStarted;
+        $this->recordProcessing($duration);
 
         if ($this->supportsAsyncSignals()) {
             $this->resetTimeoutHandler();
         }
 
         $this->logInfo('processSingleJob.finish', [
-            'executive_job_time_seconds' => microtime(true) - $timeStarted,
+            'executive_job_time_seconds' => $duration,
         ]);
+
+        return $duration;
     }
 
     /**
@@ -538,9 +552,8 @@ abstract class AbstractVhostsConsumer extends Consumer
         $this->logInfo('loadVhosts.start');
 
         $group = $this->filtersDto->getGroup();
-        $lastProcessedAtKey = $this->internalStorageManager->getLastProcessedAtKeyName($group);
 
-        $vhosts = $this->internalStorageManager->getVhosts($lastProcessedAtKey, false);
+        $vhosts = $this->scheduler->getOrderedVhosts($group);
 
         // filter vhosts
         $filterVhosts = $this->filtersDto->getVhosts();
@@ -616,10 +629,9 @@ abstract class AbstractVhostsConsumer extends Consumer
         $this->logInfo('loadVhostQueues.start');
 
         $group = $this->filtersDto->getGroup();
-        $lastProcessedAtKey = $this->internalStorageManager->getLastProcessedAtKeyName($group);
 
         $vhostQueues = (null !== $this->currentVhostName)
-            ? $this->internalStorageManager->getVhostQueues($this->currentVhostName, $lastProcessedAtKey, false)
+            ? $this->scheduler->getOrderedQueues($group, $this->currentVhostName)
             : [];
 
         // filter queues
@@ -742,35 +754,54 @@ abstract class AbstractVhostsConsumer extends Consumer
     }
 
     /**
+     * Mark the current vhost/queue as taken so it is deprioritized against other
+     * workers before any processing time has been recorded for it.
+     *
      * @return void
      */
-    protected function updateLastProcessedAt(): void
+    protected function reserveCurrentSelection(): void
     {
         if ((null === $this->currentVhostName) || (null === $this->currentQueueName)) {
             return;
         }
 
-        $this->logInfo('updateLastProcessedAt.start');
+        $this->logInfo('reserveCurrentSelection.start');
 
-        $group = $this->filtersDto->getGroup();
-        $timestamp = time();
+        $this->scheduler->reserve(
+            $this->filtersDto->getGroup(),
+            $this->currentVhostName,
+            $this->currentQueueName
+        );
+    }
 
-        $queueDto = new QueueApiDto([
-            'name' => $this->currentQueueName,
-            'vhost' => $this->currentVhostName,
+    /**
+     * Record how much time was spent processing the current vhost/queue.
+     * Wall-clock seconds are converted to integer milliseconds once here;
+     * the scheduler accounts in integer milliseconds.
+     *
+     * @param float $seconds
+     * @return void
+     */
+    protected function recordProcessing(float $seconds): void
+    {
+        if ((null === $this->currentVhostName) || (null === $this->currentQueueName)) {
+            return;
+        }
+
+        // every processed unit costs at least 1ms so ultra-fast jobs still
+        // accumulate cost instead of keeping the vhost at a permanent zero
+        $milliseconds = max(1, (int) round($seconds * 1000));
+
+        $this->logInfo('recordProcessing.start', [
+            'milliseconds' => $milliseconds,
         ]);
-        $queueDto
-            ->setGroupName($group)
-            ->setLastProcessedAt($timestamp);
-        $this->internalStorageManager->updateQueueLastProcessedAt($queueDto);
 
-        $vhostDto = new VhostApiDto([
-            'name' => $queueDto->getVhostName(),
-        ]);
-        $vhostDto
-            ->setGroupName($group)
-            ->setLastProcessedAt($timestamp);
-        $this->internalStorageManager->updateVhostLastProcessedAt($vhostDto);
+        $this->scheduler->record(
+            $this->filtersDto->getGroup(),
+            $this->currentVhostName,
+            $this->currentQueueName,
+            $milliseconds
+        );
     }
 
     protected function initConnection(int $attempts = 0): ?RabbitMQQueue
