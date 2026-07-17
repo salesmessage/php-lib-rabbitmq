@@ -681,13 +681,16 @@ abstract class AbstractVhostsConsumer extends Consumer
     protected function goAheadOrWait(int $waitSeconds = 1): bool
     {
         while (true) {
-            $this->stopStatusCode = $this->stopIfNecessary(
+            $stopResult = $this->stopIfNecessary(
                 $this->workerOptions,
                 $this->lastRestart,
                 $this->startTime,
                 $this->totalJobsProcessed,
                 true
             );
+            $this->stopStatusCode = is_array($stopResult)
+                ? ($stopResult[0] ?? null)
+                : $stopResult;
             if (! is_null($this->stopStatusCode)) {
                 $this->logWarning('daemon.consuming_stop.from_goAheadOrWait', [
                     'status_code' => $this->stopStatusCode,
