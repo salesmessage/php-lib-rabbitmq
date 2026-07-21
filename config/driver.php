@@ -4,15 +4,14 @@ return [
     'consumer_type' => env('RABBITMQ_VHOSTS_CONSUMER_TYPE', 'direct'),
 
     /**
-     * Vhost round-robin scheduler.
+     * Vhost round-robin scheduler options.
      *
-     * type:
-     *   last_processing_based - next vhost is the one processed longest ago (recency)
-     *   time_spent_based      - next vhost is the one that consumed the least
-     *                           processing time within a sliding window (fair by time)
+     * The scheduler TYPE is chosen per command via the --scheduler-type option
+     * (last_processing_based | time_spent_based) of lib-rabbitmq:consume-vhosts
+     * and lib-rabbitmq:scan-vhosts - not here. These are only the tuning options
+     * for the time_spent_based scheduler.
      */
     'scheduler' => [
-        'type' => env('RABBITMQ_VHOSTS_SCHEDULER', 'last_processing_based'),
         'options' => [
             'time_spent_based' => [
                 'window' => env('RABBITMQ_VHOSTS_SCHEDULER_WINDOW', 600), // seconds

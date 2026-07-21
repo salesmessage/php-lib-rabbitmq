@@ -352,15 +352,15 @@ Add connection to `config/queue.php`:
    'rabbitmq_vhosts' => [
         'consumer_type' => env('RABBITMQ_VHOSTS_CONSUMER_TYPE', 'direct'),
         /**
-         * Vhost round-robin scheduler. See "Vhost Scheduler" section below.
+         * Vhost scheduler tuning options. The scheduler TYPE is chosen per command
+         * via --scheduler-type, not here. See "Vhost Scheduler" section below.
          */
         'scheduler' => [
-            'type' => env('RABBITMQ_VHOSTS_SCHEDULER', 'last_processing_based'),
             'options' => [
                 'time_spent_based' => [
                     'window' => env('RABBITMQ_VHOSTS_SCHEDULER_WINDOW', 600), // seconds
                     'bucket' => env('RABBITMQ_VHOSTS_SCHEDULER_BUCKET', 60),  // seconds
-                    'reservation_estimate' => env('RABBITMQ_VHOSTS_SCHEDULER_RESERVATION_ESTIMATE', 5),
+                    'reservation_estimate' => env('RABBITMQ_VHOSTS_SCHEDULER_RESERVATION_ESTIMATE', 5), // seconds
                 ],
             ],
         ],
@@ -400,9 +400,18 @@ Add connection to `config/queue.php`:
 ### Vhost Scheduler
 
 When a group is consumed across many vhosts, the scheduler decides which vhost a
-worker picks next. Two modes are available via `scheduler.type`, and everything is
-tracked per `(group, vhost)` so a vhost shared by several groups is scheduled
-independently in each.
+worker picks next. The mode is chosen on the consumer via the `--scheduler-type`
+option (so different groups/workers can run different modes), while the tuning
+options live in config. Everything is tracked per `(group, vhost)` so a vhost
+shared by several groups is scheduled independently in each.
+
+```bash
+# recency mode (default) - nothing extra needed
+php artisan lib-rabbitmq:consume-vhosts my-group
+
+# time-based fair mode
+php artisan lib-rabbitmq:consume-vhosts my-group --scheduler-type=time_spent_based
+```
 
 - `last_processing_based` (default) - recency-based round-robin. The next vhost is
   the one whose last processing happened longest ago. Distributes worker turns by
@@ -414,7 +423,11 @@ independently in each.
   distributes worker capacity by time rather than by message count, preventing one
   large workload from monopolizing the workers.
 
-`time_spent_based` options:
+> `lib-rabbitmq:scan-vhosts` needs no scheduler flag: it maintains the sliding-window
+> decay for any vhost that has recorded processing time, and is a cheap no-op for the
+> rest. So the scanner can never fall out of sync with the consumers' `--scheduler-type`.
+
+`time_spent_based` tuning options (config `queue.drivers.rabbitmq_vhosts.scheduler.options.time_spent_based`):
 
 | Option | Env | Default | Meaning |
 |--------|-----|---------|---------|
@@ -428,8 +441,9 @@ Notes for `time_spent_based`:
   in Redis and summed over the window; the resulting cost is used as the ordering
   key. Integer math keeps provisional reconciliation exact. Idle vhosts decay
   towards zero as their buckets fall out of the window.
-- The `lib-rabbitmq:scan-vhosts` command refreshes this decay for indexed vhosts, so
-  it should be running for idle vhosts to become eligible again promptly.
+- The `lib-rabbitmq:scan-vhosts` command refreshes this decay for indexed vhosts
+  (unconditionally, no flag needed), so it should be running for idle vhosts to
+  become eligible again promptly.
 - Fairness is applied at the vhost level; queue ordering within a vhost stays
   recency-based.
 - Anti-stampede (when many workers start at once): vhosts with equal cost are
@@ -441,9 +455,49 @@ Notes for `time_spent_based`:
   than the estimate and workers still pile onto its vhost, raise
   `reservation_estimate`.
 
-Switching modes only requires changing the config/env and restarting the workers.
-Switching back is safe - the extra Redis keys created by `time_spent_based` are
-TTL-bounded and expire on their own.
+#### How processing time is tracked
+
+Time is accumulated into fixed **time buckets** (integer milliseconds). A vhost's
+cost is the sum of the buckets still inside the window; as `now` advances the oldest
+buckets fall out - that is the "slide". Everything is keyed by `(group, vhost)`.
+
+```
+group=billing  vhost=organization_5   bucket=60s   window=600s (10 buckets)
+
+Redis hash  rabbitmq_proc_buckets|billing|organization_5
+  bucketId :  B-10   B-9   B-8   B-7   B-6   B-5   B-4   B-3   B-2   B-1    B
+  ms       : [ 900 ][  0 ][ 300][2000][  0 ][ 120][ 800][  0 ][ 450][1500][ 200]
+              └──┬─┘ └───────────────────────────┬───────────────────────────┘
+           dropped next slide          window = last 10 buckets           ▲
+           (bucketId < now-window                                    current bucket
+            → HDEL, not counted)                                   (writes land here)
+
+  window_cost:billing  =  0+300+2000+0+120+800+0+450+1500+200  =  5370 ms
+                          └── materialized onto rabbitmq_vhost|organization_5,
+                              the field that SORT ... BY *->window_cost:billing reads ──┘
+```
+
+Write path - `record(X ms)` after a job/batch:
+
+```
+bucketId = floor(now / bucket)
+HINCRBY rabbitmq_proc_buckets|billing|organization_5  <bucketId>  X   # add to current bucket
+EXPIRE  rabbitmq_proc_buckets|billing|organization_5  window+bucket   # self-expire when idle
+# recompute window_cost = sum(buckets with bucketId >= floor((now-window)/bucket)),
+# HDEL the older ones, clamp at 0, HSET onto the vhost hash
+```
+
+Reserve / record with the provisional estimate (spreads simultaneous workers):
+
+```
+pick organization_5   → reserve(): HINCRBY current bucket  +5000   (estimate; vhost now looks busy)
+job took 1200 ms      → record():  HINCRBY current bucket  (1200 - 5000)
+                                   net left in the bucket = exactly 1200 ms
+```
+
+Switching modes only requires changing the consumer's `--scheduler-type` option and
+restarting the workers; the scanner needs no change. Switching back is safe - the
+extra Redis keys created by `time_spent_based` are TTL-bounded and expire on their own.
 
 ### Optional Queue Config
 

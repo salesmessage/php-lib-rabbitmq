@@ -42,13 +42,14 @@ class InternalStorageManagerWindowTest extends RedisBackedTestCase
         $this->assertSame(0, (int) $this->redis->hexists($bucketsKey, (string) $expiredBucket));
     }
 
-    public function testNegativeSumIsClampedToZero(): void
+    public function testNegativeSumClearsCostInsteadOfGoingNegative(): void
     {
         $this->indexVhost('v1', ['g']);
 
         $this->storage->recordProcessingTime('g', 'v1', -700, 600, 60);
 
-        $this->assertSame('0', $this->windowCost('v1', 'g'));
+        // no live cost -> field is dropped; SORT treats a missing field as 0
+        $this->assertNull($this->windowCost('v1', 'g'));
     }
 
     public function testProvisionalReconciliationSumsToExactRealTime(): void

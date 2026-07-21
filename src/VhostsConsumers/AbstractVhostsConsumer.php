@@ -29,6 +29,7 @@ use Salesmessage\LibRabbitMQ\Services\Deduplication\AppDeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationService as TransportDeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Salesmessage\LibRabbitMQ\Services\DeliveryLimitService;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\LastProcessingBasedScheduler;
 use Salesmessage\LibRabbitMQ\Services\Scheduler\VhostSchedulerInterface;
 
 abstract class AbstractVhostsConsumer extends Consumer
@@ -82,6 +83,8 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     protected ?Mutex $connectionMutex = null;
 
+    protected VhostSchedulerInterface $scheduler;
+
     /**
      * @param InternalStorageManager $internalStorageManager
      * @param LoggerInterface $logger
@@ -91,7 +94,6 @@ abstract class AbstractVhostsConsumer extends Consumer
      * @param callable $isDownForMaintenance
      * @param TransportDeduplicationService $transportDeduplicationService
      * @param DeliveryLimitService $deliveryLimitService
-     * @param VhostSchedulerInterface $scheduler
      * @param callable|null $resetScope
      */
     public function __construct(
@@ -103,10 +105,22 @@ abstract class AbstractVhostsConsumer extends Consumer
         callable $isDownForMaintenance,
         protected TransportDeduplicationService $transportDeduplicationService,
         protected DeliveryLimitService $deliveryLimitService,
-        protected VhostSchedulerInterface $scheduler,
         callable $resetScope = null,
     ) {
         parent::__construct($manager, $events, $exceptions, $isDownForMaintenance, $logger, $resetScope);
+
+        // default to recency-based; the consume command overrides it from CLI options
+        $this->scheduler = new LastProcessingBasedScheduler($this->internalStorageManager);
+    }
+
+    /**
+     * @param VhostSchedulerInterface $scheduler
+     * @return $this
+     */
+    public function setScheduler(VhostSchedulerInterface $scheduler): self
+    {
+        $this->scheduler = $scheduler;
+        return $this;
     }
 
     /**

@@ -64,7 +64,7 @@ class TimeSpentBasedSchedulerFlowTest extends RedisBackedTestCase
         // v3 is picked but its queue is empty; picking v1 refunds v3 in full
         $this->scheduler->reserve('g', 'v3', 'q1');
         $this->scheduler->reserve('g', 'v1', 'q1');
-        $this->assertSame('0', $this->windowCost('v3', 'g'));
+        $this->assertNull($this->windowCost('v3', 'g')); // refunded to 0 -> field cleared
         $this->assertSame('8000', $this->windowCost('v1', 'g')); // 3000 + 5000 provisional
 
         // v1's second job took 2 seconds: total is exactly 3000 + 2000

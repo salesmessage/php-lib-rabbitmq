@@ -9,6 +9,8 @@ use Illuminate\Support\Str;
 use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
 use Salesmessage\LibRabbitMQ\Exceptions\RabbitVhostsGroupsException;
 use Salesmessage\LibRabbitMQ\Services\GroupsService;
+use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\VhostSchedulerFactory;
 use Salesmessage\LibRabbitMQ\VhostsConsumers\AbstractVhostsConsumer;
 use Symfony\Component\Console\Terminal;
 use Throwable;
@@ -33,6 +35,8 @@ class ConsumeVhostsCommand extends WorkCommand
                             {--tries=1 : Number of times to attempt a job before logging it failed}
                             {--rest=0 : Number of seconds to rest between jobs}
                             {--async-mode=0 : Async processing for some functionality (now only "heartbeat" is supported)}
+
+                            {--scheduler-type=last_processing_based : Vhost scheduler: last_processing_based | time_spent_based (tuning options in config)}
 
                             {--max-priority=}
                             {--consumer-tag}
@@ -99,6 +103,12 @@ class ConsumeVhostsCommand extends WorkCommand
         $consumer->setPrefetchCount((int) ($groupConfigData['prefetch_count'] ?? 1000));
         $consumer->setBatchSize((int) ($groupConfigData['batch_size'] ?? 1000));
         $consumer->setAsyncMode((bool) $this->option('async-mode'));
+
+        $consumer->setScheduler(VhostSchedulerFactory::make(
+            $this->laravel[InternalStorageManager::class],
+            (string) $this->option('scheduler-type'),
+            (array) config('queue.drivers.rabbitmq_vhosts.scheduler.options.time_spent_based', [])
+        ));
 
         if ($this->downForMaintenance() && $this->option('once')) {
             $consumer->sleep($this->option('sleep'));

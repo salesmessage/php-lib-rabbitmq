@@ -552,8 +552,16 @@ class InternalStorageManager
         $cost = max(0, $cost);
 
         $storageKey = $this->getVhostStorageKeyPrefix() . $vhost;
-        if ($this->redis->exists($storageKey)) {
-            $this->redis->hset($storageKey, $this->getWindowCostKeyName($group), $cost);
+        $windowCostField = $this->getWindowCostKeyName($group);
+
+        if ($cost > 0) {
+            if ($this->redis->exists($storageKey)) {
+                $this->redis->hset($storageKey, $windowCostField, $cost);
+            }
+        } else {
+            // no live cost (idle, fully decayed, or the scheduler is not in use):
+            // drop the field so SORT treats it as 0 and nothing lingers stale
+            $this->redis->hdel($storageKey, $windowCostField);
         }
 
         return $cost;

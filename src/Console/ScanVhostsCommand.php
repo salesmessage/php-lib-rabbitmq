@@ -30,7 +30,6 @@ class ScanVhostsCommand extends Command
 
     private array $groups;
     private bool $silent = false;
-    private bool $timeSpentScheduler = false;
     private int $schedulerWindow = 600;
     private int $schedulerBucket = 60;
 
@@ -64,9 +63,7 @@ class ScanVhostsCommand extends Command
 
         $this->groups = $groups;
 
-        $schedulerConfig = (array) config('queue.drivers.rabbitmq_vhosts.scheduler', []);
-        $this->timeSpentScheduler = 'time_spent_based' === ($schedulerConfig['type'] ?? 'last_processing_based');
-        $schedulerOptions = (array) ($schedulerConfig['options']['time_spent_based'] ?? []);
+        $schedulerOptions = (array) config('queue.drivers.rabbitmq_vhosts.scheduler.options.time_spent_based', []);
         $this->schedulerWindow = max(1, (int) ($schedulerOptions['window'] ?? 600));
         $this->schedulerBucket = max(1, (int) ($schedulerOptions['bucket'] ?? 60));
 
@@ -204,7 +201,7 @@ class ScanVhostsCommand extends Command
             $vhostDto->getMessagesUnacknowledged()
         ));
 
-        if ($isAddedToIndex && $this->timeSpentScheduler) {
+        if ($isAddedToIndex) {
             $this->refreshWindowCosts($vhostDto->getName());
         }
 
@@ -239,6 +236,11 @@ class ScanVhostsCommand extends Command
     /**
      * Recompute the sliding-window processing cost for a vhost across all groups
      * so idle vhosts decay towards zero even while no worker is recording time.
+     *
+     * Runs unconditionally: it is a cheap no-op for vhosts that have no recorded
+     * processing time (i.e. when the time_spent_based scheduler is not in use), so
+     * the scanner needs no scheduler flag and can never fall out of sync with the
+     * consumers' --scheduler-type.
      *
      * @param string $vhostName
      * @return void
