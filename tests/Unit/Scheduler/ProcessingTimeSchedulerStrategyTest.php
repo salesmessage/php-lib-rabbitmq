@@ -6,9 +6,9 @@ use Mockery;
 use Mockery\Adapter\Phpunit\MockeryPHPUnitIntegration;
 use PHPUnit\Framework\TestCase;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
-use Salesmessage\LibRabbitMQ\Services\Scheduler\TimeSpentBasedScheduler;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\ProcessingTimeSchedulerStrategy;
 
-class TimeSpentBasedSchedulerTest extends TestCase
+class ProcessingTimeSchedulerStrategyTest extends TestCase
 {
     use MockeryPHPUnitIntegration;
 
@@ -22,7 +22,7 @@ class TimeSpentBasedSchedulerTest extends TestCase
             ['name' => 'busy_vhost', 'weight' => 300.0],
         ]);
 
-        $scheduler = new TimeSpentBasedScheduler($storage);
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage);
 
         $this->assertSame(['idle_vhost', 'medium_vhost', 'busy_vhost'], $scheduler->getOrderedVhosts('billing'));
     }
@@ -36,7 +36,7 @@ class TimeSpentBasedSchedulerTest extends TestCase
             array_map(fn ($n) => ['name' => $n, 'weight' => 0.0], $names)
         );
 
-        $scheduler = new TimeSpentBasedScheduler($storage);
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage);
 
         $ordered = $scheduler->getOrderedVhosts('billing');
 
@@ -54,7 +54,7 @@ class TimeSpentBasedSchedulerTest extends TestCase
             ['name' => 'heavy', 'weight' => 99.0],
         ]);
 
-        $scheduler = new TimeSpentBasedScheduler($storage);
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage);
 
         $ordered = $scheduler->getOrderedVhosts('billing');
 
@@ -68,7 +68,7 @@ class TimeSpentBasedSchedulerTest extends TestCase
         $storage->shouldReceive('getLastProcessedAtKeyName')->with('billing')->andReturn('last_processed_at:billing');
         $storage->shouldReceive('getVhostQueues')->once()->with('vhost_a', 'last_processed_at:billing', false)->andReturn(['q1', 'q2']);
 
-        $scheduler = new TimeSpentBasedScheduler($storage);
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage);
 
         $this->assertSame(['q1', 'q2'], $scheduler->getOrderedQueues('billing', 'vhost_a'));
     }
@@ -79,7 +79,7 @@ class TimeSpentBasedSchedulerTest extends TestCase
         $storage->shouldReceive('touchLastProcessedAt')->once()->with('billing', 'vhost_a', 'q1');
         $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 5000, 300, 30);
 
-        $scheduler = new TimeSpentBasedScheduler($storage, ['window' => 300, 'bucket' => 30]);
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage, ['window' => 300, 'bucket' => 30]);
         $scheduler->reserve('billing', 'vhost_a', 'q1');
     }
 
@@ -87,10 +87,10 @@ class TimeSpentBasedSchedulerTest extends TestCase
     {
         $storage = Mockery::mock(InternalStorageManager::class);
         $storage->shouldReceive('touchLastProcessedAt');
-        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 5000, 600, 60); // reserve
-        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', -800, 600, 60); // record reconciles 4200 - 5000
+        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 5000, 300, 30); // reserve
+        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', -800, 300, 30); // record reconciles 4200 - 5000
 
-        $scheduler = new TimeSpentBasedScheduler($storage);
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage);
         $scheduler->reserve('billing', 'vhost_a', 'q1');
         $scheduler->record('billing', 'vhost_a', 'q1', 4200);
     }
@@ -99,11 +99,11 @@ class TimeSpentBasedSchedulerTest extends TestCase
     {
         $storage = Mockery::mock(InternalStorageManager::class);
         $storage->shouldReceive('touchLastProcessedAt');
-        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 5000, 600, 60); // reserve
-        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', -3000, 600, 60); // first record: 2000 - 5000
-        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 2000, 600, 60); // second record: provisional consumed
+        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 5000, 300, 30); // reserve
+        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', -3000, 300, 30); // first record: 2000 - 5000
+        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 2000, 300, 30); // second record: provisional consumed
 
-        $scheduler = new TimeSpentBasedScheduler($storage);
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage);
         $scheduler->reserve('billing', 'vhost_a', 'q1');
         $scheduler->record('billing', 'vhost_a', 'q1', 2000);
         $scheduler->record('billing', 'vhost_a', 'q1', 2000);
@@ -113,11 +113,11 @@ class TimeSpentBasedSchedulerTest extends TestCase
     {
         $storage = Mockery::mock(InternalStorageManager::class);
         $storage->shouldReceive('touchLastProcessedAt');
-        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 5000, 600, 60); // reserve A
-        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', -5000, 600, 60); // refund A
-        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_b', 5000, 600, 60); // reserve B
+        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 5000, 300, 30); // reserve A
+        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', -5000, 300, 30); // refund A
+        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_b', 5000, 300, 30); // reserve B
 
-        $scheduler = new TimeSpentBasedScheduler($storage);
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage);
         $scheduler->reserve('billing', 'vhost_a', 'q1'); // queue turned out empty, no record
         $scheduler->reserve('billing', 'vhost_b', 'q1');
     }
@@ -126,34 +126,36 @@ class TimeSpentBasedSchedulerTest extends TestCase
     {
         $storage = Mockery::mock(InternalStorageManager::class);
         $storage->shouldReceive('touchLastProcessedAt');
-        $storage->shouldReceive('recordProcessingTime')->twice()->with('billing', 'vhost_a', 5000, 600, 60);
-        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', -5000, 600, 60);
-        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', -3000, 600, 60); // record 2000 - 5000
+        $storage->shouldReceive('recordProcessingTime')->twice()->with('billing', 'vhost_a', 5000, 300, 30);
+        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', -5000, 300, 30);
+        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', -3000, 300, 30); // record 2000 - 5000
 
-        $scheduler = new TimeSpentBasedScheduler($storage);
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage);
         $scheduler->reserve('billing', 'vhost_a', 'q1');
         $scheduler->reserve('billing', 'vhost_a', 'q1'); // retry: refund then re-charge, net one provisional
         $scheduler->record('billing', 'vhost_a', 'q1', 2000);
     }
 
-    public function testProvisionalCanBeDisabled(): void
+    public function testProvisionalIsFlooredToOneSecond(): void
     {
         $storage = Mockery::mock(InternalStorageManager::class);
         $storage->shouldReceive('touchLastProcessedAt');
-        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 4200, 600, 60);
+        // reservation_estimate=0 is floored to the 1000ms minimum
+        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 1000, 300, 30); // reserve
+        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 3200, 300, 30); // record 4200 - 1000
 
-        $scheduler = new TimeSpentBasedScheduler($storage, ['reservation_estimate' => 0]);
-        $scheduler->reserve('billing', 'vhost_a', 'q1'); // no provisional charge
-        $scheduler->record('billing', 'vhost_a', 'q1', 4200); // full duration, nothing to reconcile
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage, ['reservation_estimate' => 0]);
+        $scheduler->reserve('billing', 'vhost_a', 'q1');
+        $scheduler->record('billing', 'vhost_a', 'q1', 4200);
     }
 
     public function testFractionalReservationEstimateConvertsToMilliseconds(): void
     {
         $storage = Mockery::mock(InternalStorageManager::class);
         $storage->shouldReceive('touchLastProcessedAt');
-        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 2500, 600, 60);
+        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 2500, 300, 30);
 
-        $scheduler = new TimeSpentBasedScheduler($storage, ['reservation_estimate' => 2.5]);
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage, ['reservation_estimate' => 2.5]);
         $scheduler->reserve('billing', 'vhost_a', 'q1');
     }
 }

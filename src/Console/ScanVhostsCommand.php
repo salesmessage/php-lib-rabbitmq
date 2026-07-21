@@ -30,8 +30,8 @@ class ScanVhostsCommand extends Command
 
     private array $groups;
     private bool $silent = false;
-    private int $schedulerWindow = 600;
-    private int $schedulerBucket = 60;
+    private int $schedulerWindow = 300;
+    private int $schedulerBucket = 30;
 
     /**
      * @param GroupsService $groupsService
@@ -63,9 +63,9 @@ class ScanVhostsCommand extends Command
 
         $this->groups = $groups;
 
-        $schedulerOptions = (array) config('queue.drivers.rabbitmq_vhosts.scheduler.options.time_spent_based', []);
-        $this->schedulerWindow = max(1, (int) ($schedulerOptions['window'] ?? 600));
-        $this->schedulerBucket = max(1, (int) ($schedulerOptions['bucket'] ?? 60));
+        $schedulerOptions = (array) config('queue.drivers.rabbitmq_vhosts.scheduler.strategies.processing_time', []);
+        $this->schedulerWindow = max(1, (int) ($schedulerOptions['window'] ?? 300));
+        $this->schedulerBucket = max(1, (int) ($schedulerOptions['bucket'] ?? 30));
 
         $this->vhostsService->setConnection($connectionName);
         $this->queueService->setConnection($connectionName);
@@ -238,9 +238,9 @@ class ScanVhostsCommand extends Command
      * so idle vhosts decay towards zero even while no worker is recording time.
      *
      * Runs unconditionally: it is a cheap no-op for vhosts that have no recorded
-     * processing time (i.e. when the time_spent_based scheduler is not in use), so
-     * the scanner needs no scheduler flag and can never fall out of sync with the
-     * consumers' --scheduler-type.
+     * processing time (i.e. when the processing_time scheduler is not in use), so
+     * the scanner needs no scheduler setting and can never fall out of sync with a
+     * group's scheduler_strategy.
      *
      * @param string $vhostName
      * @return void

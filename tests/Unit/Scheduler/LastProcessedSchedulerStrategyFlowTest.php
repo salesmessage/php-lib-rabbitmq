@@ -3,18 +3,18 @@
 namespace Salesmessage\LibRabbitMQ\Tests\Unit\Scheduler;
 
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
-use Salesmessage\LibRabbitMQ\Services\Scheduler\LastProcessingBasedScheduler;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\LastProcessedSchedulerStrategy;
 use Salesmessage\LibRabbitMQ\Tests\Support\RedisBackedTestCase;
 
-class LastProcessingBasedSchedulerFlowTest extends RedisBackedTestCase
+class LastProcessedSchedulerStrategyFlowTest extends RedisBackedTestCase
 {
-    private LastProcessingBasedScheduler $scheduler;
+    private LastProcessedSchedulerStrategy $scheduler;
 
     protected function setUp(): void
     {
         parent::setUp();
 
-        $this->scheduler = new LastProcessingBasedScheduler($this->storage);
+        $this->scheduler = new LastProcessedSchedulerStrategy($this->storage);
 
         $this->indexVhost('v1', ['g']);
         $this->indexVhost('v2', ['g']);

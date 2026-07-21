@@ -6,9 +6,9 @@ use Mockery;
 use Mockery\Adapter\Phpunit\MockeryPHPUnitIntegration;
 use PHPUnit\Framework\TestCase;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
-use Salesmessage\LibRabbitMQ\Services\Scheduler\LastProcessingBasedScheduler;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\LastProcessedSchedulerStrategy;
 
-class LastProcessingBasedSchedulerTest extends TestCase
+class LastProcessedSchedulerStrategyTest extends TestCase
 {
     use MockeryPHPUnitIntegration;
 
@@ -18,7 +18,7 @@ class LastProcessingBasedSchedulerTest extends TestCase
         $storage->shouldReceive('getLastProcessedAtKeyName')->with('billing')->andReturn('last_processed_at:billing');
         $storage->shouldReceive('getVhosts')->once()->with('last_processed_at:billing', false)->andReturn(['vhost_a', 'vhost_b']);
 
-        $scheduler = new LastProcessingBasedScheduler($storage);
+        $scheduler = new LastProcessedSchedulerStrategy($storage);
 
         $this->assertSame(['vhost_a', 'vhost_b'], $scheduler->getOrderedVhosts('billing'));
     }
@@ -29,7 +29,7 @@ class LastProcessingBasedSchedulerTest extends TestCase
         $storage->shouldReceive('getLastProcessedAtKeyName')->with('billing')->andReturn('last_processed_at:billing');
         $storage->shouldReceive('getVhostQueues')->once()->with('vhost_a', 'last_processed_at:billing', false)->andReturn(['q1', 'q2']);
 
-        $scheduler = new LastProcessingBasedScheduler($storage);
+        $scheduler = new LastProcessedSchedulerStrategy($storage);
 
         $this->assertSame(['q1', 'q2'], $scheduler->getOrderedQueues('billing', 'vhost_a'));
     }
@@ -40,7 +40,7 @@ class LastProcessingBasedSchedulerTest extends TestCase
         $storage->shouldReceive('touchLastProcessedAt')->once()->with('billing', 'vhost_a', 'q1');
         $storage->shouldNotReceive('recordProcessingTime');
 
-        (new LastProcessingBasedScheduler($storage))->reserve('billing', 'vhost_a', 'q1');
+        (new LastProcessedSchedulerStrategy($storage))->reserve('billing', 'vhost_a', 'q1');
     }
 
     public function testRecordTouchesLastProcessedAtAndIgnoresDuration(): void
@@ -49,6 +49,6 @@ class LastProcessingBasedSchedulerTest extends TestCase
         $storage->shouldReceive('touchLastProcessedAt')->once()->with('billing', 'vhost_a', 'q1');
         $storage->shouldNotReceive('recordProcessingTime');
 
-        (new LastProcessingBasedScheduler($storage))->record('billing', 'vhost_a', 'q1', 12500);
+        (new LastProcessedSchedulerStrategy($storage))->record('billing', 'vhost_a', 'q1', 12500);
     }
 }

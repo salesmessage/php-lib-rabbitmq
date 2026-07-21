@@ -6,16 +6,15 @@ return [
     /**
      * Vhost round-robin scheduler options.
      *
-     * The scheduler TYPE is chosen per command via the --scheduler-type option
-     * (last_processing_based | time_spent_based) of lib-rabbitmq:consume-vhosts
-     * and lib-rabbitmq:scan-vhosts - not here. These are only the tuning options
-     * for the time_spent_based scheduler.
+     * The scheduler strategy (last_processed | processing_time) is set per group
+     * in rabbit-groups.yml via `scheduler_strategy`, not here. These are only the tuning
+     * options for the processing_time scheduler.
      */
     'scheduler' => [
-        'options' => [
-            'time_spent_based' => [
-                'window' => env('RABBITMQ_VHOSTS_SCHEDULER_WINDOW', 600), // seconds
-                'bucket' => env('RABBITMQ_VHOSTS_SCHEDULER_BUCKET', 60),  // seconds
+        'strategies' => [
+            'processing_time' => [
+                'window' => env('RABBITMQ_VHOSTS_SCHEDULER_WINDOW', 300), // seconds
+                'bucket' => env('RABBITMQ_VHOSTS_SCHEDULER_BUCKET', 30),  // seconds
                 /**
                  * Provisional cost (seconds) charged to a vhost the moment a worker
                  * picks it, reconciled exactly once real processing time is recorded

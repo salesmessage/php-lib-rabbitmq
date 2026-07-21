@@ -3,7 +3,7 @@
 namespace Salesmessage\LibRabbitMQ\Tests\Unit\Scheduler;
 
 use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
-use Salesmessage\LibRabbitMQ\Services\Scheduler\TimeSpentBasedScheduler;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\ProcessingTimeSchedulerStrategy;
 use Salesmessage\LibRabbitMQ\Tests\Support\RedisBackedTestCase;
 
 /**
@@ -11,15 +11,15 @@ use Salesmessage\LibRabbitMQ\Tests\Support\RedisBackedTestCase;
  * math, real SORT-based ordering. Runs on FakeRedisConnection by default and
  * on a live Redis with USE_REAL_REDIS=1 (see RedisBackedTestCase).
  */
-class TimeSpentBasedSchedulerFlowTest extends RedisBackedTestCase
+class ProcessingTimeSchedulerStrategyFlowTest extends RedisBackedTestCase
 {
-    private TimeSpentBasedScheduler $scheduler;
+    private ProcessingTimeSchedulerStrategy $scheduler;
 
     protected function setUp(): void
     {
         parent::setUp();
 
-        $this->scheduler = new TimeSpentBasedScheduler($this->storage, [
+        $this->scheduler = new ProcessingTimeSchedulerStrategy($this->storage, [
             'window' => 600,
             'bucket' => 60,
             'reservation_estimate' => 5,

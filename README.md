@@ -45,6 +45,8 @@ groups:
     queues_mask: test
     batch_size: 100
     prefetch_count: 100
+    # vhost scheduler for this group: last_processed (default) | processing_time
+    scheduler_strategy: last_processed
   test-group-2:
     vhosts:
       - organization_20
@@ -352,14 +354,14 @@ Add connection to `config/queue.php`:
    'rabbitmq_vhosts' => [
         'consumer_type' => env('RABBITMQ_VHOSTS_CONSUMER_TYPE', 'direct'),
         /**
-         * Vhost scheduler tuning options. The scheduler TYPE is chosen per command
-         * via --scheduler-type, not here. See "Vhost Scheduler" section below.
+         * Vhost scheduler tuning options. The scheduler TYPE is set per group in
+         * rabbit-groups.yml via scheduler_strategy, not here. See "Vhost Scheduler" below.
          */
         'scheduler' => [
-            'options' => [
-                'time_spent_based' => [
-                    'window' => env('RABBITMQ_VHOSTS_SCHEDULER_WINDOW', 600), // seconds
-                    'bucket' => env('RABBITMQ_VHOSTS_SCHEDULER_BUCKET', 60),  // seconds
+            'strategies' => [
+                'processing_time' => [
+                    'window' => env('RABBITMQ_VHOSTS_SCHEDULER_WINDOW', 300), // seconds
+                    'bucket' => env('RABBITMQ_VHOSTS_SCHEDULER_BUCKET', 30),  // seconds
                     'reservation_estimate' => env('RABBITMQ_VHOSTS_SCHEDULER_RESERVATION_ESTIMATE', 5), // seconds
                 ],
             ],
@@ -400,42 +402,44 @@ Add connection to `config/queue.php`:
 ### Vhost Scheduler
 
 When a group is consumed across many vhosts, the scheduler decides which vhost a
-worker picks next. The mode is chosen on the consumer via the `--scheduler-type`
-option (so different groups/workers can run different modes), while the tuning
-options live in config. Everything is tracked per `(group, vhost)` so a vhost
-shared by several groups is scheduled independently in each.
+worker picks next. The mode is set **per group** in `rabbit-groups.yml` via
+`scheduler_strategy` (so different groups can run different modes), while the tuning
+options live in the driver config. Everything is tracked per `(group, vhost)` so a
+vhost shared by several groups is scheduled independently in each.
 
-```bash
-# recency mode (default) - nothing extra needed
-php artisan lib-rabbitmq:consume-vhosts my-group
-
-# time-based fair mode
-php artisan lib-rabbitmq:consume-vhosts my-group --scheduler-type=time_spent_based
+```yaml
+# rabbit-groups.yml
+groups:
+  my-group:
+    vhosts_mask: organization
+    queues:
+      - my-queue
+    scheduler_strategy: processing_time   # omit for the default (last_processed)
 ```
 
-- `last_processing_based` (default) - recency-based round-robin. The next vhost is
+- `last_processed` (default) - recency-based round-robin. The next vhost is
   the one whose last processing happened longest ago. Distributes worker turns by
   count, so a vhost with a huge workload is only pushed back one slot per turn and
   can dominate the workers.
 
-- `time_spent_based` - time-based fair round-robin. The next vhost is the one that
+- `processing_time` - time-based fair round-robin. The next vhost is the one that
   consumed the least *processing time* for the group within a sliding window. This
   distributes worker capacity by time rather than by message count, preventing one
   large workload from monopolizing the workers.
 
-> `lib-rabbitmq:scan-vhosts` needs no scheduler flag: it maintains the sliding-window
+> `lib-rabbitmq:scan-vhosts` needs no scheduler setting: it maintains the sliding-window
 > decay for any vhost that has recorded processing time, and is a cheap no-op for the
-> rest. So the scanner can never fall out of sync with the consumers' `--scheduler-type`.
+> rest. So the scanner can never fall out of sync with a group's `scheduler_strategy`.
 
-`time_spent_based` tuning options (config `queue.drivers.rabbitmq_vhosts.scheduler.options.time_spent_based`):
+`processing_time` tuning options (config `queue.drivers.rabbitmq_vhosts.scheduler.strategies.processing_time`):
 
 | Option | Env | Default | Meaning |
 |--------|-----|---------|---------|
-| `window` | `RABBITMQ_VHOSTS_SCHEDULER_WINDOW` | `600` | How far back (seconds) fairness looks. |
-| `bucket` | `RABBITMQ_VHOSTS_SCHEDULER_BUCKET` | `60` | Resolution (seconds) of the window; keep `bucket <= window / 5`. |
+| `window` | `RABBITMQ_VHOSTS_SCHEDULER_WINDOW` | `300` | How far back (seconds) fairness looks. |
+| `bucket` | `RABBITMQ_VHOSTS_SCHEDULER_BUCKET` | `30` | Resolution (seconds) of the window; keep `bucket <= window / 5`. |
 | `reservation_estimate` | `RABBITMQ_VHOSTS_SCHEDULER_RESERVATION_ESTIMATE` | `5` | Provisional cost (seconds) charged on pick to spread simultaneous workers; `0` disables. |
 
-Notes for `time_spent_based`:
+Notes for `processing_time`:
 
 - Processing time is accumulated as integer milliseconds into per-bucket counters
   in Redis and summed over the window; the resulting cost is used as the ordering
@@ -462,7 +466,7 @@ cost is the sum of the buckets still inside the window; as `now` advances the ol
 buckets fall out - that is the "slide". Everything is keyed by `(group, vhost)`.
 
 ```
-group=billing  vhost=organization_5   bucket=60s   window=600s (10 buckets)
+group=billing  vhost=organization_5   bucket=30s   window=300s (10 buckets)
 
 Redis hash  rabbitmq_proc_buckets|billing|organization_5
   bucketId :  B-10   B-9   B-8   B-7   B-6   B-5   B-4   B-3   B-2   B-1    B
@@ -495,9 +499,10 @@ job took 1200 ms      → record():  HINCRBY current bucket  (1200 - 5000)
                                    net left in the bucket = exactly 1200 ms
 ```
 
-Switching modes only requires changing the consumer's `--scheduler-type` option and
-restarting the workers; the scanner needs no change. Switching back is safe - the
-extra Redis keys created by `time_spent_based` are TTL-bounded and expire on their own.
+Switching modes only requires changing a group's `scheduler_strategy` in
+`rabbit-groups.yml` and restarting that group's workers; the scanner needs no change.
+Switching back is safe - the extra Redis keys created by `processing_time` are
+TTL-bounded and expire on their own.
 
 ### Optional Queue Config
 

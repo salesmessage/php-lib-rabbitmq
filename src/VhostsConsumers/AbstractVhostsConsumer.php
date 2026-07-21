@@ -29,7 +29,7 @@ use Salesmessage\LibRabbitMQ\Services\Deduplication\AppDeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationService as TransportDeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Salesmessage\LibRabbitMQ\Services\DeliveryLimitService;
-use Salesmessage\LibRabbitMQ\Services\Scheduler\LastProcessingBasedScheduler;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\LastProcessedSchedulerStrategy;
 use Salesmessage\LibRabbitMQ\Services\Scheduler\VhostSchedulerInterface;
 
 abstract class AbstractVhostsConsumer extends Consumer
@@ -110,7 +110,7 @@ abstract class AbstractVhostsConsumer extends Consumer
         parent::__construct($manager, $events, $exceptions, $isDownForMaintenance, $logger, $resetScope);
 
         // default to recency-based; the consume command overrides it from CLI options
-        $this->scheduler = new LastProcessingBasedScheduler($this->internalStorageManager);
+        $this->scheduler = new LastProcessedSchedulerStrategy($this->internalStorageManager);
     }
 
     /**

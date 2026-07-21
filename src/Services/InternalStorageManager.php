@@ -472,7 +472,7 @@ class InternalStorageManager
     /**
      * Hash field on a vhost holding its processing time (integer milliseconds)
      * within the sliding window for a group. Used as the sort key in
-     * time_spent_based mode.
+     * processing_time mode.
      *
      * @param string $groupName
      * @return string

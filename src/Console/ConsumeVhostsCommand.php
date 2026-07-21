@@ -36,8 +36,6 @@ class ConsumeVhostsCommand extends WorkCommand
                             {--rest=0 : Number of seconds to rest between jobs}
                             {--async-mode=0 : Async processing for some functionality (now only "heartbeat" is supported)}
 
-                            {--scheduler-type=last_processing_based : Vhost scheduler: last_processing_based | time_spent_based (tuning options in config)}
-
                             {--max-priority=}
                             {--consumer-tag}
                             {--prefetch-size=0}
@@ -106,8 +104,8 @@ class ConsumeVhostsCommand extends WorkCommand
 
         $consumer->setScheduler(VhostSchedulerFactory::make(
             $this->laravel[InternalStorageManager::class],
-            (string) $this->option('scheduler-type'),
-            (array) config('queue.drivers.rabbitmq_vhosts.scheduler.options.time_spent_based', [])
+            (string) ($groupConfigData['scheduler_strategy'] ?? VhostSchedulerFactory::STRATEGY_LAST_PROCESSED),
+            (array) config('queue.drivers.rabbitmq_vhosts.scheduler.strategies.processing_time', [])
         ));
 
         if ($this->downForMaintenance() && $this->option('once')) {

@@ -18,7 +18,7 @@ use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
  * Queue ordering within a vhost stays recency-based (last_processed_at) - fairness
  * is applied at the vhost level only.
  */
-class TimeSpentBasedScheduler implements VhostSchedulerInterface
+class ProcessingTimeSchedulerStrategy implements VhostSchedulerInterface
 {
     private int $window;
 
@@ -45,11 +45,9 @@ class TimeSpentBasedScheduler implements VhostSchedulerInterface
      */
     public function __construct(private InternalStorageManager $storage, array $options = [])
     {
-        $this->window = max(1, (int) ($options['window'] ?? 600));
-        $this->bucket = max(1, (int) ($options['bucket'] ?? 60));
-        $this->reservationEstimateMs = max(0, (int) round(
-            (float) ($options['reservation_estimate'] ?? 5.0) * 1000
-        ));
+        $this->window = max(60, (int) ($options['window'] ?? 300));
+        $this->bucket = max(1, (int) ($options['bucket'] ?? 30));
+        $this->reservationEstimateMs = max(1000, (int) round(($options['reservation_estimate'] ?? 5) * 1000));
     }
 
     /**

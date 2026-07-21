@@ -8,7 +8,7 @@ use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
  * Recency-based round-robin: the next vhost/queue is the one whose last
  * processing happened longest ago (ordered by the last_processed_at timestamp).
  */
-class LastProcessingBasedScheduler implements VhostSchedulerInterface
+class LastProcessedSchedulerStrategy implements VhostSchedulerInterface
 {
     /**
      * @param InternalStorageManager $storage
