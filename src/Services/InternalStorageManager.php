@@ -42,6 +42,23 @@ class InternalStorageManager
     }
 
     /**
+     * Swap the storage connection for a dedicated, pool-guarded one so it can be
+     * shared safely across the consumer's Swoole coroutines (main loop + accrual)
+     * without multiplexing a single socket. Redis::resolve() yields a fresh socket
+     * on the same config, isolated from the application's cached connection, which
+     * jobs may use. Intended for the async consumer only.
+     *
+     * @return void
+     */
+    public function usePooledConnection(): void
+    {
+        /** @var PredisConnection $connection */
+        $connection = Redis::resolve('persistent');
+
+        $this->redis = new RedisConnectionPool($connection);
+    }
+
+    /**
      * @return array
      */
     public function getInterimVhosts(): array
@@ -155,6 +172,37 @@ class InternalStorageManager
             '',
             $value
         ), $queues);
+    }
+
+    /**
+     * Ordered queues of a vhost together with the numeric weight they were sorted
+     * by. Returns a list of ['name' => string, 'weight' => float] ascending by
+     * weight. A missing weight field is treated as 0. Mirrors getVhostsWithWeights.
+     *
+     * @param string $vhostName
+     * @param string $by
+     * @return array
+     */
+    public function getVhostQueuesWithWeights(string $vhostName, string $by): array
+    {
+        $rows = $this->redis->sort($this->getQueueIndexKey($vhostName), [
+            'by' => '*->' . $by,
+            'get' => ['#', '*->' . $by],
+            'alpha' => false,
+            'sort' => 'asc',
+        ]);
+
+        $prefix = $this->getQueueStorageKeyPrefix($vhostName);
+
+        $result = [];
+        for ($i = 0, $len = count($rows); $i < $len; $i += 2) {
+            $result[] = [
+                'name' => Str::replaceFirst($prefix, '', (string) $rows[$i]),
+                'weight' => (float) ($rows[$i + 1] ?? 0),
+            ];
+        }
+
+        return $result;
     }
 
     /**
@@ -539,21 +587,44 @@ LUA;
         int $window,
         int $bucket
     ): void {
-        $now = time();
+        $this->evalRecordProcessing(
+            $this->getProcessingBucketsKey($group, $vhost),
+            $this->getVhostStorageKeyPrefix() . $vhost,
+            $this->getWindowCostKeyName($group),
+            $milliseconds,
+            $window,
+            $bucket
+        );
+    }
 
-        $this->evalLua(
-            $this->recordProcessingScript(),
-            [
-                $this->getProcessingBucketsKey($group, $vhost),
-                $this->getVhostStorageKeyPrefix() . $vhost,
-            ],
-            [
-                intdiv($now - $window, $bucket),
-                $this->getWindowCostKeyName($group),
-                intdiv($now, $bucket),
-                $milliseconds,
-                $window + $bucket,
-            ]
+    /**
+     * Queue-level counterpart of recordProcessingTime(): account the same
+     * processing time against a single queue so queues within a vhost can be
+     * ordered fairly by their own window cost.
+     *
+     * @param string $group
+     * @param string $vhost
+     * @param string $queue
+     * @param int $milliseconds
+     * @param int $window
+     * @param int $bucket
+     * @return void
+     */
+    public function recordQueueProcessingTime(
+        string $group,
+        string $vhost,
+        string $queue,
+        int $milliseconds,
+        int $window,
+        int $bucket
+    ): void {
+        $this->evalRecordProcessing(
+            $this->getQueueProcessingBucketsKey($group, $vhost, $queue),
+            $this->getQueueStorageKeyPrefix($vhost) . $queue,
+            $this->getWindowCostKeyName($group),
+            $milliseconds,
+            $window,
+            $bucket
         );
     }
 
@@ -574,15 +645,91 @@ LUA;
         int $window,
         int $bucket
     ): int {
+        return $this->evalRefreshWindowCost(
+            $this->getProcessingBucketsKey($group, $vhost),
+            $this->getVhostStorageKeyPrefix() . $vhost,
+            $this->getWindowCostKeyName($group),
+            $window,
+            $bucket
+        );
+    }
+
+    /**
+     * Queue-level counterpart of refreshWindowCost(): decays an indexed queue's
+     * window cost toward zero while no worker is recording time for it.
+     *
+     * @param string $group
+     * @param string $vhost
+     * @param string $queue
+     * @param int $window
+     * @param int $bucket
+     * @return int
+     */
+    public function refreshQueueWindowCost(
+        string $group,
+        string $vhost,
+        string $queue,
+        int $window,
+        int $bucket
+    ): int {
+        return $this->evalRefreshWindowCost(
+            $this->getQueueProcessingBucketsKey($group, $vhost, $queue),
+            $this->getQueueStorageKeyPrefix($vhost) . $queue,
+            $this->getWindowCostKeyName($group),
+            $window,
+            $bucket
+        );
+    }
+
+    /**
+     * Add processing time to a buckets hash and refresh the materialized window
+     * cost on its owner hash atomically. Shared by the vhost- and queue-level
+     * recorders; the amount may be negative to reconcile a provisional charge.
+     *
+     * @return void
+     */
+    private function evalRecordProcessing(
+        string $bucketsKey,
+        string $storageKey,
+        string $windowCostField,
+        int $milliseconds,
+        int $window,
+        int $bucket
+    ): void {
+        $now = time();
+
+        $this->evalLua(
+            $this->recordProcessingScript(),
+            [$bucketsKey, $storageKey],
+            [
+                intdiv($now - $window, $bucket),
+                $windowCostField,
+                intdiv($now, $bucket),
+                $milliseconds,
+                $window + $bucket,
+            ]
+        );
+    }
+
+    /**
+     * Recompute a buckets hash's live window cost (trimming expired buckets),
+     * clamp to >= 0 and materialize it on its owner hash atomically.
+     *
+     * @return int
+     */
+    private function evalRefreshWindowCost(
+        string $bucketsKey,
+        string $storageKey,
+        string $windowCostField,
+        int $window,
+        int $bucket
+    ): int {
         return (int) $this->evalLua(
             self::LUA_REFRESH_WINDOW_COST,
-            [
-                $this->getProcessingBucketsKey($group, $vhost),
-                $this->getVhostStorageKeyPrefix() . $vhost,
-            ],
+            [$bucketsKey, $storageKey],
             [
                 intdiv(time() - $window, $bucket),
-                $this->getWindowCostKeyName($group),
+                $windowCostField,
             ]
         );
     }
@@ -639,6 +786,19 @@ LUA;
         $prefix = $this->isVhostsConnection() ? 'rabbitmq' : $this->connectionName;
 
         return sprintf('%s_proc_buckets|%s|%s', $prefix, $group, $vhost);
+    }
+
+    /**
+     * @param string $group
+     * @param string $vhost
+     * @param string $queue
+     * @return string
+     */
+    private function getQueueProcessingBucketsKey(string $group, string $vhost, string $queue): string
+    {
+        $prefix = $this->isVhostsConnection() ? 'rabbitmq' : $this->connectionName;
+
+        return sprintf('%s_proc_buckets|%s|%s|%s', $prefix, $group, $vhost, $queue);
     }
 
     /**

@@ -230,6 +230,10 @@ class ScanVhostsCommand extends Command
 
         $this->removeOldVhostQueues($vhostDto, $oldVhostQueues);
 
+        if ($isAddedToIndex) {
+            $this->refreshQueueWindowCosts($vhostDto->getName());
+        }
+
         return true;
     }
 
@@ -254,6 +258,35 @@ class ScanVhostsCommand extends Command
                 $this->schedulerOptions->getWindow(),
                 $this->schedulerOptions->getBucket()
             );
+        }
+    }
+
+    /**
+     * Queue-level counterpart of refreshWindowCosts(): decay each indexed queue's
+     * window cost across all groups so queues that are not being processed slide
+     * back toward zero, keeping queue ordering fair. Cheap no-op when the
+     * processing_time scheduler is not in use.
+     *
+     * @param string $vhostName
+     * @return void
+     */
+    private function refreshQueueWindowCosts(string $vhostName): void
+    {
+        $queues = $this->internalStorageManager->getVhostQueues($vhostName);
+        if (empty($queues)) {
+            return;
+        }
+
+        foreach ($this->groups as $groupName) {
+            foreach ($queues as $queueName) {
+                $this->internalStorageManager->refreshQueueWindowCost(
+                    $groupName,
+                    $vhostName,
+                    $queueName,
+                    $this->schedulerOptions->getWindow(),
+                    $this->schedulerOptions->getBucket()
+                );
+            }
         }
     }
 

@@ -48,4 +48,12 @@ class LastProcessedSchedulerStrategy implements VhostSchedulerInterface
     {
         $this->storage->touchLastProcessedAt($group, $vhost, $queue);
     }
+
+    /**
+     * @inheritDoc
+     */
+    public function accrue(string $group, string $vhost, int $elapsedMs): void
+    {
+        // recency-based ordering does not account processing time
+    }
 }

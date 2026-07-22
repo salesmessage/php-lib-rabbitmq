@@ -2,7 +2,6 @@
 
 namespace Salesmessage\LibRabbitMQ\Tests\Unit\Scheduler;
 
-use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Services\Scheduler\ProcessingTimeSchedulerStrategy;
 use Salesmessage\LibRabbitMQ\Tests\Support\RedisBackedTestCase;
 
@@ -73,6 +72,49 @@ class ProcessingTimeSchedulerStrategyFlowTest extends RedisBackedTestCase
         $this->assertSame(['v3', 'v2', 'v1'], $this->scheduler->getOrderedVhosts('g'));
     }
 
+    public function testAccrualReflectsLongJobBeforeRecordAndReconcilesExactly(): void
+    {
+        // a worker picks v1: provisional 5000 applies immediately
+        $this->scheduler->reserve('g', 'v1', 'q1');
+        $this->assertSame('5000', $this->windowCost('v1', 'g'));
+
+        // the job is long-running: accrual raises the cost above the provisional
+        // while it is still executing, so other workers see v1 as busy
+        $this->scheduler->accrue('g', 'v1', 30000);
+        $this->assertSame('30000', $this->windowCost('v1', 'g'));
+
+        $this->scheduler->accrue('g', 'v1', 90000);
+        $this->assertSame('90000', $this->windowCost('v1', 'g'));
+
+        // the job finishes at 92s: record reconciles to the exact real time
+        $this->scheduler->record('g', 'v1', 'q1', 92000);
+        $this->assertSame('92000', $this->windowCost('v1', 'g'));
+    }
+
+    public function testAccrualNeverDecreasesTheChargeAndRecordCanCorrectDownward(): void
+    {
+        $this->scheduler->reserve('g', 'v1', 'q1');
+
+        $this->scheduler->accrue('g', 'v1', 40000);
+        $this->assertSame('40000', $this->windowCost('v1', 'g'));
+
+        // a smaller elapsed never reduces the in-flight charge
+        $this->scheduler->accrue('g', 'v1', 20000);
+        $this->assertSame('40000', $this->windowCost('v1', 'g'));
+
+        // the measured duration came in under the last accrual: record still
+        // reconciles the total to the exact real time (a downward correction)
+        $this->scheduler->record('g', 'v1', 'q1', 39000);
+        $this->assertSame('39000', $this->windowCost('v1', 'g'));
+    }
+
+    public function testAccrualWithoutAnActiveReservationIsANoop(): void
+    {
+        $this->scheduler->accrue('g', 'v1', 30000);
+
+        $this->assertNull($this->windowCost('v1', 'g'));
+    }
+
     public function testEqualCostVhostsAreAllPresentAndPrecedeCostlierOnes(): void
     {
         $this->scheduler->record('g', 'v2', 'q1', 9000);
@@ -83,16 +125,42 @@ class ProcessingTimeSchedulerStrategyFlowTest extends RedisBackedTestCase
         $this->assertEqualsCanonicalizing(['v1', 'v3'], array_slice($ordered, 0, 2));
     }
 
-    public function testQueueOrderingWithinVhostStaysRecencyBased(): void
+    public function testQueueOrderingWithinVhostIsByProcessingTime(): void
+    {
+        $this->indexQueue('v1', 'q1', ['g']);
+        $this->indexQueue('v1', 'q2', ['g']);
+        $this->indexQueue('v1', 'q3', ['g']);
+
+        // q1 did the most work, q2 some, q3 none: least-busy queue is ordered first
+        $this->scheduler->record('g', 'v1', 'q1', 5000);
+        $this->scheduler->record('g', 'v1', 'q2', 2000);
+
+        $ordered = $this->scheduler->getOrderedQueues('g', 'v1');
+
+        $this->assertSame('q3', $ordered[0]);
+        $this->assertSame('q1', end($ordered));
+        $this->assertSame(['q3', 'q2', 'q1'], $ordered);
+    }
+
+    public function testQueueLevelReserveAccrueRecordIsFairAndExact(): void
     {
         $this->indexQueue('v1', 'q1', ['g']);
         $this->indexQueue('v1', 'q2', ['g']);
 
-        $queueDto = new QueueApiDto(['name' => 'q1', 'vhost' => 'v1']);
-        $queueDto->setGroupName('g')->setLastProcessedAt(time());
-        $this->storage->updateQueueLastProcessedAt($queueDto);
+        // a worker picks q1 for a long job: the provisional applies to the queue too
+        $this->scheduler->reserve('g', 'v1', 'q1');
+        $this->assertSame('5000', $this->queueWindowCost('v1', 'q1', 'g'));
 
-        $this->assertSame(['q2', 'q1'], $this->scheduler->getOrderedQueues('g', 'v1'));
+        // while it runs, accrual raises q1's cost so q2 becomes preferred
+        $this->scheduler->accrue('g', 'v1', 60000);
+        $this->assertSame('60000', $this->queueWindowCost('v1', 'q1', 'g'));
+        $this->assertSame('q2', $this->scheduler->getOrderedQueues('g', 'v1')[0]);
+
+        // the job finishes: the queue cost reconciles to the exact real time,
+        // and the vhost carries the same total aggregated across its queues
+        $this->scheduler->record('g', 'v1', 'q1', 61000);
+        $this->assertSame('61000', $this->queueWindowCost('v1', 'q1', 'g'));
+        $this->assertSame('61000', $this->windowCost('v1', 'g'));
     }
 
     public function testGroupsAreIsolated(): void

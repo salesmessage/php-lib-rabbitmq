@@ -121,6 +121,11 @@ abstract class RedisBackedTestCase extends TestCase
         return $this->redis->hget('rabbitmq_vhost|' . $vhost, 'window_cost:' . $group);
     }
 
+    protected function queueWindowCost(string $vhost, string $queue, string $group): ?string
+    {
+        return $this->redis->hget('rabbitmq_queue|' . $vhost . '|' . $queue, 'window_cost:' . $group);
+    }
+
     protected function bucketsKey(string $group, string $vhost): string
     {
         return sprintf('rabbitmq_proc_buckets|%s|%s', $group, $vhost);

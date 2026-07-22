@@ -15,18 +15,21 @@ use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
  *  - reserve() adds a provisional cost so a vhost being processed is deprioritized
  *    before any real time is recorded; record() reconciles it exactly.
  *
- * Queue ordering within a vhost stays recency-based (last_processed_at) - fairness
- * is applied at the vhost level only.
+ * The same time-based fairness is applied at the queue level: every job's
+ * processing time is accounted against both its vhost and its queue, and queues
+ * within a vhost are ordered by their own window cost - so a long-running job on
+ * one queue does not starve the other queues in the same vhost.
  */
 class ProcessingTimeSchedulerStrategy implements VhostSchedulerInterface
 {
     private ProcessingTimeSchedulerOptions $options;
 
     /**
-     * Provisional costs added by reserve() and not yet reconciled by a record(),
-     * as [group => [vhost => milliseconds]]. A worker holds one selection at a
-     * time, so any provisional for another vhost belongs to an abandoned
-     * selection (empty queue, retry) and is refunded on the next reserve().
+     * Provisional charges added by reserve() and not yet reconciled by a record(),
+     * as [group => [vhost => ['queue' => string, 'ms' => int]]]. A worker holds
+     * one selection at a time, so any entry for another vhost belongs to an
+     * abandoned selection (empty queue, retry) and is refunded on the next
+     * reserve(). The queue is stored so both levels can be reconciled/refunded.
      */
     private array $pendingProvisional = [];
 
@@ -54,7 +57,9 @@ class ProcessingTimeSchedulerStrategy implements VhostSchedulerInterface
      */
     public function getOrderedQueues(string $group, string $vhost): array
     {
-        return $this->storage->getVhostQueues($vhost, $this->storage->getLastProcessedAtKeyName($group), false);
+        $rows = $this->storage->getVhostQueuesWithWeights($vhost, $this->storage->getWindowCostKeyName($group));
+
+        return $this->shuffleEqualWeights($rows);
     }
 
     /**
@@ -71,14 +76,8 @@ class ProcessingTimeSchedulerStrategy implements VhostSchedulerInterface
 
         $this->refundPendingProvisionals();
 
-        $this->storage->recordProcessingTime(
-            $group,
-            $vhost,
-            $reservationEstimateMs,
-            $this->options->getWindow(),
-            $this->options->getBucket()
-        );
-        $this->pendingProvisional[$group][$vhost] = $reservationEstimateMs;
+        $this->chargeProcessingTime($group, $vhost, $queue, $reservationEstimateMs);
+        $this->pendingProvisional[$group][$vhost] = ['queue' => $queue, 'ms' => $reservationEstimateMs];
     }
 
     /**
@@ -88,16 +87,38 @@ class ProcessingTimeSchedulerStrategy implements VhostSchedulerInterface
     {
         $this->storage->touchLastProcessedAt($group, $vhost, $queue);
 
-        $pending = (int) ($this->pendingProvisional[$group][$vhost] ?? 0);
+        $pending = (int) ($this->pendingProvisional[$group][$vhost]['ms'] ?? 0);
         unset($this->pendingProvisional[$group][$vhost]);
 
-        $this->storage->recordProcessingTime(
-            $group,
-            $vhost,
-            $milliseconds - $pending,
-            $this->options->getWindow(),
-            $this->options->getBucket()
-        );
+        $this->chargeProcessingTime($group, $vhost, $queue, $milliseconds - $pending);
+    }
+
+    /**
+     * @inheritDoc
+     *
+     * Grow the in-flight selection's charge toward the processing time elapsed
+     * so far, so a long-running job is reflected in the ordering before it
+     * finishes. Only grows upward - record() reconciles the total to the exact
+     * real time at the end (which may be a downward correction).
+     */
+    public function accrue(string $group, string $vhost, int $elapsedMs): void
+    {
+        if (!isset($this->pendingProvisional[$group][$vhost])) {
+            return;
+        }
+
+        $charged = (int) $this->pendingProvisional[$group][$vhost]['ms'];
+        if ($elapsedMs <= $charged) {
+            return;
+        }
+
+        $queue = (string) $this->pendingProvisional[$group][$vhost]['queue'];
+
+        // update the tracked amount before the (yielding) Redis writes so a
+        // record() interleaving in another coroutine reconciles against it
+        $this->pendingProvisional[$group][$vhost]['ms'] = $elapsedMs;
+
+        $this->chargeProcessingTime($group, $vhost, $queue, $elapsedMs - $charged);
     }
 
     /**
@@ -110,18 +131,37 @@ class ProcessingTimeSchedulerStrategy implements VhostSchedulerInterface
     private function refundPendingProvisionals(): void
     {
         foreach ($this->pendingProvisional as $group => $vhosts) {
-            foreach ($vhosts as $vhost => $milliseconds) {
-                $this->storage->recordProcessingTime(
+            foreach ($vhosts as $vhost => $pending) {
+                $this->chargeProcessingTime(
                     $group,
                     (string) $vhost,
-                    -$milliseconds,
-                    $this->options->getWindow(),
-                    $this->options->getBucket()
+                    (string) $pending['queue'],
+                    -(int) $pending['ms']
                 );
             }
         }
 
         $this->pendingProvisional = [];
+    }
+
+    /**
+     * Account processing time against both the vhost and its specific queue so
+     * ordering is fair at both levels. The amount may be negative (a reconcile
+     * or a refund).
+     *
+     * @param string $group
+     * @param string $vhost
+     * @param string $queue
+     * @param int $milliseconds
+     * @return void
+     */
+    private function chargeProcessingTime(string $group, string $vhost, string $queue, int $milliseconds): void
+    {
+        $window = $this->options->getWindow();
+        $bucket = $this->options->getBucket();
+
+        $this->storage->recordProcessingTime($group, $vhost, $milliseconds, $window, $bucket);
+        $this->storage->recordQueueProcessingTime($group, $vhost, $queue, $milliseconds, $window, $bucket);
     }
 
     /**

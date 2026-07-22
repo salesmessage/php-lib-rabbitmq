@@ -43,4 +43,16 @@ interface VhostSchedulerInterface
      * @return void
      */
     public function record(string $group, string $vhost, string $queue, int $milliseconds): void;
+
+    /**
+     * Flush the processing time accrued so far by an in-flight job, so a long
+     * running job is reflected in the fairness ordering before it completes
+     * instead of only at record() time. Called periodically while a job runs.
+     *
+     * @param string $group
+     * @param string $vhost
+     * @param int $elapsedMs processing time elapsed so far for the current job
+     * @return void
+     */
+    public function accrue(string $group, string $vhost, int $elapsedMs): void;
 }

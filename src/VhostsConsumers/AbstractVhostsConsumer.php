@@ -81,6 +81,10 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     protected bool $asyncMode = false;
 
+    protected bool $accrualInFlight = false;
+
+    protected float $accrualStartedAt = 0.0;
+
     protected ?Mutex $connectionMutex = null;
 
     protected VhostSchedulerInterface $scheduler;
@@ -202,7 +206,14 @@ abstract class AbstractVhostsConsumer extends Consumer
 
                 // we can't move it outside since Mutex should be created within coroutine context
                 $this->connectionMutex = new Mutex(true);
+
+                // dedicated, pool-guarded storage connection so the accrual coroutine
+                // can share it with the main loop without multiplexing the socket, and
+                // isolated from the application's own Redis connection
+                $this->internalStorageManager->usePooledConnection();
+
                 $this->startHeartbeatCheck();
+                $this->startProcessingTimeAccrual();
                 \go(function () use ($connectionName, $options) {
                     $this->vhostDaemon($connectionName, $options);
                 });
@@ -328,6 +339,7 @@ abstract class AbstractVhostsConsumer extends Consumer
         }
 
         $processingStartedAt = microtime(true);
+        $this->beginAccrual($processingStartedAt);
         $singleJobsSeconds = 0.0;
 
         foreach ($this->batchMessages as $batchJobClass => $batchJobMessages) {
@@ -472,6 +484,7 @@ abstract class AbstractVhostsConsumer extends Consumer
     protected function processSingleJob(RabbitMQJob $job, AMQPMessage $message): float
     {
         $timeStarted = microtime(true);
+        $this->beginAccrual($timeStarted);
         $this->logInfo('processSingleJob.start');
 
         if ($this->supportsAsyncSignals()) {
@@ -800,6 +813,10 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function recordProcessing(float $seconds): void
     {
+        // stop accrual before the final reconciliation so a concurrent accrual
+        // tick cannot add to a job that has just finished
+        $this->accrualInFlight = false;
+
         if ((null === $this->currentVhostName) || (null === $this->currentQueueName)) {
             return;
         }
@@ -818,6 +835,79 @@ abstract class AbstractVhostsConsumer extends Consumer
             $this->currentQueueName,
             $milliseconds
         );
+    }
+
+    /**
+     * Mark the start of a job's execution so the accrual coroutine can charge its
+     * elapsed processing time while it runs. Paired with recordProcessing(), which
+     * stops accrual and reconciles the exact total.
+     *
+     * @param float $startedAt microtime(true) when the job began
+     * @return void
+     */
+    protected function beginAccrual(float $startedAt): void
+    {
+        $this->accrualStartedAt = $startedAt;
+        $this->accrualInFlight = true;
+    }
+
+    /**
+     * Async-only coroutine that periodically flushes the processing time accrued
+     * by an in-flight job, so a long-running job is reflected in the fairness
+     * ordering before it finishes instead of only at record() time.
+     *
+     * @return void
+     */
+    protected function startProcessingTimeAccrual(): void
+    {
+        if (false === $this->asyncMode) {
+            return;
+        }
+
+        $interval = $this->accrualIntervalSeconds();
+
+        $this->logInfo('startProcessingTimeAccrual.start', [
+            'interval' => $interval,
+        ]);
+
+        \go(function () use ($interval) {
+            while (true) {
+                sleep($interval);
+
+                if ($this->shouldQuit || (null !== $this->stopStatusCode)) {
+                    return;
+                }
+
+                if ((false === $this->accrualInFlight) || (null === $this->currentVhostName)) {
+                    continue;
+                }
+
+                $elapsedMs = (int) round((microtime(true) - $this->accrualStartedAt) * 1000);
+
+                try {
+                    $this->scheduler->accrue(
+                        $this->filtersDto->getGroup(),
+                        $this->currentVhostName,
+                        $elapsedMs
+                    );
+                } catch (\Throwable $exception) {
+                    $this->logError('startProcessingTimeAccrual.exception', [
+                        'error' => $exception->getMessage(),
+                    ]);
+                }
+            }
+        });
+    }
+
+    /**
+     * @return int accrual flush interval in seconds (defaults to reservation_estimate)
+     */
+    protected function accrualIntervalSeconds(): int
+    {
+        $options = (array) config('queue.drivers.rabbitmq_vhosts.scheduler.strategies.processing_time', []);
+        $interval = (int) ($options['accrual_interval'] ?? $options['reservation_estimate'] ?? 5);
+
+        return max(1, $interval);
     }
 
     protected function initConnection(int $attempts = 0): ?RabbitMQQueue
