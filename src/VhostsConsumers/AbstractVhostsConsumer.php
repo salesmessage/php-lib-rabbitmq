@@ -581,7 +581,8 @@ abstract class AbstractVhostsConsumer extends Consumer
             $vhosts = array_filter($vhosts, fn($value) => str_contains($value, $filterVhostsMask));
         }
 
-        $this->vhosts = $vhosts;
+        // reindex: getNextVhost() walks sequential indexes, filter gaps would truncate the pass
+        $this->vhosts = array_values($vhosts);
         $this->vhostQueues = [];
 
         $this->currentVhostName = null;
@@ -660,7 +661,8 @@ abstract class AbstractVhostsConsumer extends Consumer
             $vhostQueues = array_filter($vhostQueues, fn($value) => str_contains($value, $filterQueuesMask));
         }
 
-        $this->vhostQueues = $vhostQueues;
+        // reindex: getNextQueue() walks sequential indexes, filter gaps would truncate the pass
+        $this->vhostQueues = array_values($vhostQueues);
 
         $this->currentQueueName = null;
     }

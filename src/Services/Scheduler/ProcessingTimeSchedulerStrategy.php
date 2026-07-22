@@ -20,16 +20,7 @@ use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
  */
 class ProcessingTimeSchedulerStrategy implements VhostSchedulerInterface
 {
-    private int $window;
-
-    private int $bucket;
-
-    /**
-     * Reservation estimate converted from config seconds to integer milliseconds.
-     * All time accounting is done in integer milliseconds so provisional charges
-     * reconcile to exact zero (no float residue) and Redis can use HINCRBY.
-     */
-    private int $reservationEstimateMs;
+    private ProcessingTimeSchedulerOptions $options;
 
     /**
      * Provisional costs added by reserve() and not yet reconciled by a record(),
@@ -45,9 +36,7 @@ class ProcessingTimeSchedulerStrategy implements VhostSchedulerInterface
      */
     public function __construct(private InternalStorageManager $storage, array $options = [])
     {
-        $this->window = max(60, (int) ($options['window'] ?? 300));
-        $this->bucket = max(1, (int) ($options['bucket'] ?? 30));
-        $this->reservationEstimateMs = max(1000, (int) round(($options['reservation_estimate'] ?? 5) * 1000));
+        $this->options = ProcessingTimeSchedulerOptions::fromConfig($options);
     }
 
     /**
@@ -75,7 +64,8 @@ class ProcessingTimeSchedulerStrategy implements VhostSchedulerInterface
     {
         $this->storage->touchLastProcessedAt($group, $vhost, $queue);
 
-        if ($this->reservationEstimateMs <= 0) {
+        $reservationEstimateMs = $this->options->getReservationEstimateMs();
+        if ($reservationEstimateMs <= 0) {
             return;
         }
 
@@ -84,11 +74,11 @@ class ProcessingTimeSchedulerStrategy implements VhostSchedulerInterface
         $this->storage->recordProcessingTime(
             $group,
             $vhost,
-            $this->reservationEstimateMs,
-            $this->window,
-            $this->bucket
+            $reservationEstimateMs,
+            $this->options->getWindow(),
+            $this->options->getBucket()
         );
-        $this->pendingProvisional[$group][$vhost] = $this->reservationEstimateMs;
+        $this->pendingProvisional[$group][$vhost] = $reservationEstimateMs;
     }
 
     /**
@@ -105,8 +95,8 @@ class ProcessingTimeSchedulerStrategy implements VhostSchedulerInterface
             $group,
             $vhost,
             $milliseconds - $pending,
-            $this->window,
-            $this->bucket
+            $this->options->getWindow(),
+            $this->options->getBucket()
         );
     }
 
@@ -125,8 +115,8 @@ class ProcessingTimeSchedulerStrategy implements VhostSchedulerInterface
                     $group,
                     (string) $vhost,
                     -$milliseconds,
-                    $this->window,
-                    $this->bucket
+                    $this->options->getWindow(),
+                    $this->options->getBucket()
                 );
             }
         }

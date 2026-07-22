@@ -10,6 +10,7 @@ use Salesmessage\LibRabbitMQ\Services\GroupsService;
 use Salesmessage\LibRabbitMQ\Services\QueueService;
 use Salesmessage\LibRabbitMQ\Services\VhostsService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\ProcessingTimeSchedulerOptions;
 use Generator;
 
 class ScanVhostsCommand extends Command
@@ -30,8 +31,7 @@ class ScanVhostsCommand extends Command
 
     private array $groups;
     private bool $silent = false;
-    private int $schedulerWindow = 300;
-    private int $schedulerBucket = 30;
+    private ?ProcessingTimeSchedulerOptions $schedulerOptions = null;
 
     /**
      * @param GroupsService $groupsService
@@ -63,9 +63,9 @@ class ScanVhostsCommand extends Command
 
         $this->groups = $groups;
 
-        $schedulerOptions = (array) config('queue.drivers.rabbitmq_vhosts.scheduler.strategies.processing_time', []);
-        $this->schedulerWindow = max(1, (int) ($schedulerOptions['window'] ?? 300));
-        $this->schedulerBucket = max(1, (int) ($schedulerOptions['bucket'] ?? 30));
+        $this->schedulerOptions = ProcessingTimeSchedulerOptions::fromConfig(
+            (array) config('queue.drivers.rabbitmq_vhosts.scheduler.strategies.processing_time', [])
+        );
 
         $this->vhostsService->setConnection($connectionName);
         $this->queueService->setConnection($connectionName);
@@ -251,8 +251,8 @@ class ScanVhostsCommand extends Command
             $this->internalStorageManager->refreshWindowCost(
                 $groupName,
                 $vhostName,
-                $this->schedulerWindow,
-                $this->schedulerBucket
+                $this->schedulerOptions->getWindow(),
+                $this->schedulerOptions->getBucket()
             );
         }
     }

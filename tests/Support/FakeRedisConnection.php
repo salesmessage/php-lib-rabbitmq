@@ -154,6 +154,66 @@ class FakeRedisConnection extends PredisConnection
     }
 
     /**
+     * Force the caller (InternalStorageManager::evalLua) down its EVAL fallback:
+     * this fake caches no scripts, so EVALSHA is always a miss.
+     */
+    public function evalsha($sha, $numKeys, ...$arguments)
+    {
+        throw new \RuntimeException('NOSCRIPT No matching script (fake).');
+    }
+
+    /**
+     * Emulate InternalStorageManager's window-cost scripts (the only Lua the
+     * storage runs): optionally charge the current bucket, then trim expired
+     * buckets, sum the live ones, clamp to >= 0 and materialize the cost.
+     *
+     * KEYS[1] buckets hash, KEYS[2] vhost storage hash.
+     * ARGV[1] oldest valid bucket id, ARGV[2] window cost field; the record
+     * variant also passes ARGV[3] bucket id, ARGV[4] milliseconds, ARGV[5] ttl.
+     */
+    public function eval($script, $numKeys, ...$arguments): int
+    {
+        $keys = array_slice($arguments, 0, (int) $numKeys);
+        $argv = array_slice($arguments, (int) $numKeys);
+
+        $bucketsKey = (string) ($keys[0] ?? '');
+        $storageKey = (string) ($keys[1] ?? '');
+        $oldest = (int) ($argv[0] ?? 0);
+        $windowCostField = (string) ($argv[1] ?? '');
+
+        if (str_contains($script, 'HINCRBY')) {
+            $this->hincrby($bucketsKey, (string) $argv[2], (int) $argv[3]);
+            $this->expire($bucketsKey, (int) $argv[4]);
+        }
+
+        $cost = 0;
+        $expired = [];
+        foreach ($this->hgetall($bucketsKey) as $bucketId => $value) {
+            if ((int) $bucketId < $oldest) {
+                $expired[] = $bucketId;
+                continue;
+            }
+            $cost += (int) $value;
+        }
+
+        if (!empty($expired)) {
+            $this->hdel($bucketsKey, $expired);
+        }
+
+        $cost = max(0, $cost);
+
+        if ($cost > 0) {
+            if ($this->exists($storageKey)) {
+                $this->hset($storageKey, $windowCostField, $cost);
+            }
+        } else {
+            $this->hdel($storageKey, $windowCostField);
+        }
+
+        return $cost;
+    }
+
+    /**
      * SORT with the subset of options the storage uses:
      * by ('*->field'), alpha, sort (asc/desc), get (['#', '*->field']).
      */

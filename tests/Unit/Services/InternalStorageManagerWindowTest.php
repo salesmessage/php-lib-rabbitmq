@@ -62,6 +62,41 @@ class InternalStorageManagerWindowTest extends RedisBackedTestCase
         $this->assertSame('1200', $this->windowCost('v1', 'g'));
     }
 
+    public function testNegativeBucketDoesNotDriveCostBelowZeroWhenSumIsPositive(): void
+    {
+        $this->indexVhost('v1', ['g']);
+
+        $currentBucket = intdiv(time(), 60);
+        $bucketsKey = $this->bucketsKey('g', 'v1');
+
+        // a positive charge in one bucket and a negative reconciliation in the
+        // next: the individual bucket may be negative, the materialized cost is
+        // the (positive) sum across live buckets
+        $this->redis->hincrby($bucketsKey, (string) ($currentBucket - 1), 5000);
+        $this->redis->hincrby($bucketsKey, (string) $currentBucket, -1800);
+
+        $cost = $this->storage->refreshWindowCost('g', 'v1', 600, 60);
+
+        $this->assertSame(3200, $cost);
+        $this->assertSame('3200', $this->windowCost('v1', 'g'));
+    }
+
+    public function testDoesNotResurrectMissingVhostKeyWhenMaterializingCost(): void
+    {
+        // vhost is deliberately NOT indexed, so its storage hash does not exist
+        $storageKey = 'rabbitmq_vhost|ghost';
+
+        $this->storage->recordProcessingTime('g', 'ghost', 1500, 600, 60);
+
+        // a positive cost must not conjure the vhost key into existence
+        $this->assertSame(0, (int) $this->redis->exists($storageKey));
+        $this->assertNull($this->windowCost('ghost', 'g'));
+
+        // the buckets themselves are independent and still recorded
+        $buckets = $this->redis->hgetall($this->bucketsKey('g', 'ghost'));
+        $this->assertSame('1500', reset($buckets));
+    }
+
     public function testGetVhostsWithWeightsReturnsAscendingCostOrder(): void
     {
         $this->indexVhost('v1', ['g']);

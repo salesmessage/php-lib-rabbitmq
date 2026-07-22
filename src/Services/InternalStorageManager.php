@@ -483,10 +483,47 @@ class InternalStorageManager
     }
 
     /**
+     * Lua body shared by recordProcessingTime() and refreshWindowCost(): trim
+     * expired buckets, sum the live ones, clamp to >= 0 and materialize the cost
+     * on the vhost hash - all in one atomic script, so concurrent workers and
+     * scanners cannot clobber each other with a stale sum, nor resurrect a
+     * just-deleted vhost key between the existence check and the write.
+     *
+     * KEYS[1] buckets hash, KEYS[2] vhost storage hash.
+     * ARGV[1] oldest valid bucket id, ARGV[2] window cost field.
+     */
+    private const LUA_REFRESH_WINDOW_COST = <<<'LUA'
+local buckets = redis.call('HGETALL', KEYS[1])
+local oldest = tonumber(ARGV[1])
+local cost = 0
+for i = 1, #buckets, 2 do
+    if (tonumber(buckets[i]) or 0) < oldest then
+        redis.call('HDEL', KEYS[1], buckets[i])
+    else
+        cost = cost + (tonumber(buckets[i + 1]) or 0)
+    end
+end
+-- buckets may sum below zero when a provisional charge expired before its
+-- refund/reconciliation; a vhost cannot cost less than zero
+if cost < 0 then
+    cost = 0
+end
+if cost > 0 then
+    if redis.call('EXISTS', KEYS[2]) == 1 then
+        redis.call('HSET', KEYS[2], ARGV[2], cost)
+    end
+else
+    redis.call('HDEL', KEYS[2], ARGV[2])
+end
+return cost
+LUA;
+
+    /**
      * Add processing time (integer milliseconds) to the current sliding-window
-     * bucket of a vhost and refresh the materialized window cost. The amount may
-     * be negative to reconcile a previously added provisional (reservation)
-     * estimate. Integer math keeps reconciliation exact and allows HINCRBY.
+     * bucket of a vhost and refresh the materialized window cost atomically. The
+     * amount may be negative to reconcile a previously added provisional
+     * (reservation) estimate. Integer math keeps reconciliation exact and allows
+     * HINCRBY.
      *
      * @param string $group
      * @param string $vhost
@@ -502,19 +539,28 @@ class InternalStorageManager
         int $window,
         int $bucket
     ): void {
-        $bucketsKey = $this->getProcessingBucketsKey($group, $vhost);
-        $bucketId = intdiv(time(), $bucket);
+        $now = time();
 
-        $this->redis->hincrby($bucketsKey, (string) $bucketId, $milliseconds);
-        $this->redis->expire($bucketsKey, $window + $bucket);
-
-        $this->refreshWindowCost($group, $vhost, $window, $bucket);
+        $this->evalLua(
+            $this->recordProcessingScript(),
+            [
+                $this->getProcessingBucketsKey($group, $vhost),
+                $this->getVhostStorageKeyPrefix() . $vhost,
+            ],
+            [
+                intdiv($now - $window, $bucket),
+                $this->getWindowCostKeyName($group),
+                intdiv($now, $bucket),
+                $milliseconds,
+                $window + $bucket,
+            ]
+        );
     }
 
     /**
      * Recompute a vhost's window cost (integer milliseconds) from its live
-     * buckets (trimming expired ones) and store it on the vhost hash. Returns
-     * the recomputed cost.
+     * buckets (trimming expired ones) and store it on the vhost hash atomically.
+     * Returns the recomputed cost.
      *
      * @param string $group
      * @param string $vhost
@@ -528,43 +574,59 @@ class InternalStorageManager
         int $window,
         int $bucket
     ): int {
-        $bucketsKey = $this->getProcessingBucketsKey($group, $vhost);
-        $buckets = $this->redis->hgetall($bucketsKey);
+        return (int) $this->evalLua(
+            self::LUA_REFRESH_WINDOW_COST,
+            [
+                $this->getProcessingBucketsKey($group, $vhost),
+                $this->getVhostStorageKeyPrefix() . $vhost,
+            ],
+            [
+                intdiv(time() - $window, $bucket),
+                $this->getWindowCostKeyName($group),
+            ]
+        );
+    }
 
-        $oldestValidBucket = intdiv(time() - $window, $bucket);
+    /**
+     * recordProcessingTime()'s Lua: charge the current bucket and refresh its
+     * TTL, then run the shared refresh body.
+     *
+     * KEYS[1] buckets hash, KEYS[2] vhost storage hash.
+     * ARGV[1] oldest valid bucket id, ARGV[2] window cost field,
+     * ARGV[3] current bucket id, ARGV[4] milliseconds, ARGV[5] buckets ttl.
+     *
+     * @return string
+     */
+    private function recordProcessingScript(): string
+    {
+        return "redis.call('HINCRBY', KEYS[1], ARGV[3], ARGV[4])\n"
+            . "redis.call('EXPIRE', KEYS[1], ARGV[5])\n"
+            . self::LUA_REFRESH_WINDOW_COST;
+    }
 
-        $cost = 0;
-        $expired = [];
-        foreach ($buckets as $bucketId => $value) {
-            if ((int) $bucketId < $oldestValidBucket) {
-                $expired[] = $bucketId;
-                continue;
+    /**
+     * Run a Lua script atomically, preferring EVALSHA and falling back to EVAL
+     * the first time a script is not yet cached on the server.
+     *
+     * @param string $script
+     * @param array $keys
+     * @param array $arguments
+     * @return mixed
+     */
+    private function evalLua(string $script, array $keys, array $arguments): mixed
+    {
+        $parameters = array_merge($keys, $arguments);
+        $numKeys = count($keys);
+
+        try {
+            return $this->redis->evalsha(sha1($script), $numKeys, ...$parameters);
+        } catch (\Throwable $exception) {
+            if (!str_contains(strtoupper($exception->getMessage()), 'NOSCRIPT')) {
+                throw $exception;
             }
-            $cost += (int) $value;
+
+            return $this->redis->eval($script, $numKeys, ...$parameters);
         }
-
-        if (!empty($expired)) {
-            $this->redis->hdel($bucketsKey, $expired);
-        }
-
-        // buckets may sum to a negative value when a provisional charge expired
-        // before its refund/reconciliation; a vhost cannot cost less than zero
-        $cost = max(0, $cost);
-
-        $storageKey = $this->getVhostStorageKeyPrefix() . $vhost;
-        $windowCostField = $this->getWindowCostKeyName($group);
-
-        if ($cost > 0) {
-            if ($this->redis->exists($storageKey)) {
-                $this->redis->hset($storageKey, $windowCostField, $cost);
-            }
-        } else {
-            // no live cost (idle, fully decayed, or the scheduler is not in use):
-            // drop the field so SORT treats it as 0 and nothing lingers stale
-            $this->redis->hdel($storageKey, $windowCostField);
-        }
-
-        return $cost;
     }
 
     /**

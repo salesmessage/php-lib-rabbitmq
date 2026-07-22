@@ -140,9 +140,21 @@ class ProcessingTimeSchedulerStrategyTest extends TestCase
     {
         $storage = Mockery::mock(InternalStorageManager::class);
         $storage->shouldReceive('touchLastProcessedAt');
-        // reservation_estimate=0 is floored to the 1000ms minimum
+        // reservation_estimate=0.4 is floored to the 1000ms minimum
         $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 1000, 300, 30); // reserve
         $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 3200, 300, 30); // record 4200 - 1000
+
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage, ['reservation_estimate' => 0.4]);
+        $scheduler->reserve('billing', 'vhost_a', 'q1');
+        $scheduler->record('billing', 'vhost_a', 'q1', 4200);
+    }
+
+    public function testZeroReservationEstimateDisablesProvisional(): void
+    {
+        $storage = Mockery::mock(InternalStorageManager::class);
+        $storage->shouldReceive('touchLastProcessedAt')->twice()->with('billing', 'vhost_a', 'q1');
+        // no provisional on reserve; record charges the full duration
+        $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 4200, 300, 30);
 
         $scheduler = new ProcessingTimeSchedulerStrategy($storage, ['reservation_estimate' => 0]);
         $scheduler->reserve('billing', 'vhost_a', 'q1');
