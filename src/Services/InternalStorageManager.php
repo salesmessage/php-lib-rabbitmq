@@ -24,10 +24,16 @@ class InternalStorageManager
      */
     private PredisConnection $redis;
 
+    /**
+     * @var ProcessingTimeStore
+     */
+    private ProcessingTimeStore $processingTimeStore;
+
     public function __construct() {
         /** @var PredisConnection $redis */
         $redis = Redis::connection('persistent');
         $this->redis = $redis;
+        $this->processingTimeStore = new ProcessingTimeStore($this->redis);
     }
 
     /**
@@ -56,6 +62,7 @@ class InternalStorageManager
         $connection = Redis::resolve('persistent');
 
         $this->redis = new RedisConnectionPool($connection);
+        $this->processingTimeStore->setConnection($this->redis);
     }
 
     /**
@@ -131,24 +138,11 @@ class InternalStorageManager
      */
     public function getVhostsWithWeights(string $by): array
     {
-        $rows = $this->redis->sort($this->getIndexKeyVhosts(), [
-            'by' => '*->' . $by,
-            'get' => ['#', '*->' . $by],
-            'alpha' => false,
-            'sort' => 'asc',
-        ]);
-
-        $prefix = $this->getVhostStorageKeyPrefix();
-
-        $result = [];
-        for ($i = 0, $len = count($rows); $i < $len; $i += 2) {
-            $result[] = [
-                'name' => Str::replaceFirst($prefix, '', (string) $rows[$i]),
-                'weight' => (float) ($rows[$i + 1] ?? 0),
-            ];
-        }
-
-        return $result;
+        return $this->processingTimeStore->orderedByWeight(
+            $this->getIndexKeyVhosts(),
+            $this->getVhostStorageKeyPrefix(),
+            $by
+        );
     }
 
     /**
@@ -185,24 +179,11 @@ class InternalStorageManager
      */
     public function getVhostQueuesWithWeights(string $vhostName, string $by): array
     {
-        $rows = $this->redis->sort($this->getQueueIndexKey($vhostName), [
-            'by' => '*->' . $by,
-            'get' => ['#', '*->' . $by],
-            'alpha' => false,
-            'sort' => 'asc',
-        ]);
-
-        $prefix = $this->getQueueStorageKeyPrefix($vhostName);
-
-        $result = [];
-        for ($i = 0, $len = count($rows); $i < $len; $i += 2) {
-            $result[] = [
-                'name' => Str::replaceFirst($prefix, '', (string) $rows[$i]),
-                'weight' => (float) ($rows[$i + 1] ?? 0),
-            ];
-        }
-
-        return $result;
+        return $this->processingTimeStore->orderedByWeight(
+            $this->getQueueIndexKey($vhostName),
+            $this->getQueueStorageKeyPrefix($vhostName),
+            $by
+        );
     }
 
     /**
@@ -531,47 +512,9 @@ class InternalStorageManager
     }
 
     /**
-     * Lua body shared by recordProcessingTime() and refreshWindowCost(): trim
-     * expired buckets, sum the live ones, clamp to >= 0 and materialize the cost
-     * on the vhost hash - all in one atomic script, so concurrent workers and
-     * scanners cannot clobber each other with a stale sum, nor resurrect a
-     * just-deleted vhost key between the existence check and the write.
-     *
-     * KEYS[1] buckets hash, KEYS[2] vhost storage hash.
-     * ARGV[1] oldest valid bucket id, ARGV[2] window cost field.
-     */
-    private const LUA_REFRESH_WINDOW_COST = <<<'LUA'
-local buckets = redis.call('HGETALL', KEYS[1])
-local oldest = tonumber(ARGV[1])
-local cost = 0
-for i = 1, #buckets, 2 do
-    if (tonumber(buckets[i]) or 0) < oldest then
-        redis.call('HDEL', KEYS[1], buckets[i])
-    else
-        cost = cost + (tonumber(buckets[i + 1]) or 0)
-    end
-end
--- buckets may sum below zero when a provisional charge expired before its
--- refund/reconciliation; a vhost cannot cost less than zero
-if cost < 0 then
-    cost = 0
-end
-if cost > 0 then
-    if redis.call('EXISTS', KEYS[2]) == 1 then
-        redis.call('HSET', KEYS[2], ARGV[2], cost)
-    end
-else
-    redis.call('HDEL', KEYS[2], ARGV[2])
-end
-return cost
-LUA;
-
-    /**
-     * Add processing time (integer milliseconds) to the current sliding-window
-     * bucket of a vhost and refresh the materialized window cost atomically. The
-     * amount may be negative to reconcile a previously added provisional
-     * (reservation) estimate. Integer math keeps reconciliation exact and allows
-     * HINCRBY.
+     * Add processing time (integer milliseconds, may be negative to reconcile a
+     * provisional reservation) to a vhost's sliding-window buckets and refresh
+     * its materialized window cost atomically.
      *
      * @param string $group
      * @param string $vhost
@@ -587,7 +530,7 @@ LUA;
         int $window,
         int $bucket
     ): void {
-        $this->evalRecordProcessing(
+        $this->processingTimeStore->record(
             $this->getProcessingBucketsKey($group, $vhost),
             $this->getVhostStorageKeyPrefix() . $vhost,
             $this->getWindowCostKeyName($group),
@@ -618,7 +561,7 @@ LUA;
         int $window,
         int $bucket
     ): void {
-        $this->evalRecordProcessing(
+        $this->processingTimeStore->record(
             $this->getQueueProcessingBucketsKey($group, $vhost, $queue),
             $this->getQueueStorageKeyPrefix($vhost) . $queue,
             $this->getWindowCostKeyName($group),
@@ -629,9 +572,8 @@ LUA;
     }
 
     /**
-     * Recompute a vhost's window cost (integer milliseconds) from its live
-     * buckets (trimming expired ones) and store it on the vhost hash atomically.
-     * Returns the recomputed cost.
+     * Recompute a vhost's window cost from its live buckets (trimming expired
+     * ones) and store it on the vhost hash atomically. Returns the cost.
      *
      * @param string $group
      * @param string $vhost
@@ -645,7 +587,7 @@ LUA;
         int $window,
         int $bucket
     ): int {
-        return $this->evalRefreshWindowCost(
+        return $this->processingTimeStore->refresh(
             $this->getProcessingBucketsKey($group, $vhost),
             $this->getVhostStorageKeyPrefix() . $vhost,
             $this->getWindowCostKeyName($group),
@@ -672,108 +614,13 @@ LUA;
         int $window,
         int $bucket
     ): int {
-        return $this->evalRefreshWindowCost(
+        return $this->processingTimeStore->refresh(
             $this->getQueueProcessingBucketsKey($group, $vhost, $queue),
             $this->getQueueStorageKeyPrefix($vhost) . $queue,
             $this->getWindowCostKeyName($group),
             $window,
             $bucket
         );
-    }
-
-    /**
-     * Add processing time to a buckets hash and refresh the materialized window
-     * cost on its owner hash atomically. Shared by the vhost- and queue-level
-     * recorders; the amount may be negative to reconcile a provisional charge.
-     *
-     * @return void
-     */
-    private function evalRecordProcessing(
-        string $bucketsKey,
-        string $storageKey,
-        string $windowCostField,
-        int $milliseconds,
-        int $window,
-        int $bucket
-    ): void {
-        $now = time();
-
-        $this->evalLua(
-            $this->recordProcessingScript(),
-            [$bucketsKey, $storageKey],
-            [
-                intdiv($now - $window, $bucket),
-                $windowCostField,
-                intdiv($now, $bucket),
-                $milliseconds,
-                $window + $bucket,
-            ]
-        );
-    }
-
-    /**
-     * Recompute a buckets hash's live window cost (trimming expired buckets),
-     * clamp to >= 0 and materialize it on its owner hash atomically.
-     *
-     * @return int
-     */
-    private function evalRefreshWindowCost(
-        string $bucketsKey,
-        string $storageKey,
-        string $windowCostField,
-        int $window,
-        int $bucket
-    ): int {
-        return (int) $this->evalLua(
-            self::LUA_REFRESH_WINDOW_COST,
-            [$bucketsKey, $storageKey],
-            [
-                intdiv(time() - $window, $bucket),
-                $windowCostField,
-            ]
-        );
-    }
-
-    /**
-     * recordProcessingTime()'s Lua: charge the current bucket and refresh its
-     * TTL, then run the shared refresh body.
-     *
-     * KEYS[1] buckets hash, KEYS[2] vhost storage hash.
-     * ARGV[1] oldest valid bucket id, ARGV[2] window cost field,
-     * ARGV[3] current bucket id, ARGV[4] milliseconds, ARGV[5] buckets ttl.
-     *
-     * @return string
-     */
-    private function recordProcessingScript(): string
-    {
-        return "redis.call('HINCRBY', KEYS[1], ARGV[3], ARGV[4])\n"
-            . "redis.call('EXPIRE', KEYS[1], ARGV[5])\n"
-            . self::LUA_REFRESH_WINDOW_COST;
-    }
-
-    /**
-     * Run a Lua script atomically, preferring EVALSHA and falling back to EVAL
-     * the first time a script is not yet cached on the server.
-     *
-     * @param string $script
-     * @param array $keys
-     * @param array $arguments
-     * @return mixed
-     */
-    private function evalLua(string $script, array $keys, array $arguments): mixed
-    {
-        $parameters = array_merge($keys, $arguments);
-        $numKeys = count($keys);
-
-        try {
-            return $this->redis->evalsha(sha1($script), $numKeys, ...$parameters);
-        } catch (\Throwable $exception) {
-            if (!str_contains(strtoupper($exception->getMessage()), 'NOSCRIPT')) {
-                throw $exception;
-            }
-
-            return $this->redis->eval($script, $numKeys, ...$parameters);
-        }
     }
 
     /**
