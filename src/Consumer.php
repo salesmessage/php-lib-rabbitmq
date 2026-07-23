@@ -192,14 +192,16 @@ class Consumer extends Worker
             // Finally, we will check to see if we have exceeded our memory limits or if
             // the queue should restart based on other indications. If so, we'll stop
             // this worker and let whatever is "monitoring" it restart the process.
-            $status = $this->stopIfNecessary(
+            $stopResult = $this->stopIfNecessary(
                 $options,
                 $lastRestart,
                 $startTime,
                 $jobsProcessed,
                 $this->currentJob
             );
-
+            $status = is_array($stopResult)
+                ? ($stopResult[0] ?? null)
+                : $stopResult;
             if (! is_null($status)) {
                 return $this->stop($status, $options);
             }
