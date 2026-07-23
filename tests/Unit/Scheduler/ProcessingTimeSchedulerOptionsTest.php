@@ -13,7 +13,25 @@ class ProcessingTimeSchedulerOptionsTest extends TestCase
 
         $this->assertSame(300, $options->getWindow());
         $this->assertSame(30, $options->getBucket());
-        $this->assertSame(5000, $options->getReservationEstimateMs());
+        $this->assertSame(3000, $options->getReservationEstimateMs());
+        $this->assertSame(7, $options->getAccrualInterval());
+    }
+
+    public function testAccrualIntervalDefaultsIndependentlyOfReservationEstimate(): void
+    {
+        // a null accrual_interval (config default) falls back to 7, not to reservation_estimate
+        $options = ProcessingTimeSchedulerOptions::fromConfig([
+            'reservation_estimate' => 10,
+            'accrual_interval' => null,
+        ]);
+
+        $this->assertSame(7, $options->getAccrualInterval());
+    }
+
+    public function testAccrualIntervalIsFlooredToOneSecond(): void
+    {
+        $this->assertSame(1, ProcessingTimeSchedulerOptions::fromConfig(['accrual_interval' => 0])->getAccrualInterval());
+        $this->assertSame(8, ProcessingTimeSchedulerOptions::fromConfig(['accrual_interval' => 8])->getAccrualInterval());
     }
 
     public function testWindowIsFlooredToSixtySeconds(): void

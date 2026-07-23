@@ -22,14 +22,14 @@ return [
                  * Stops many simultaneous workers from piling onto the same vhost.
                  * Set to 0 to disable.
                  */
-                'reservation_estimate' => env('RABBITMQ_VHOSTS_SCHEDULER_RESERVATION_ESTIMATE', 5),
+                'reservation_estimate' => env('RABBITMQ_VHOSTS_SCHEDULER_RESERVATION_ESTIMATE', 3),
                 /**
                  * How often (seconds) an async consumer flushes the processing time
                  * accrued by an in-flight job, so a long-running job is reflected in
                  * the fairness ordering before it finishes instead of only at the end.
-                 * Defaults to reservation_estimate. Async (Swoole) mode only.
+                 * Async (Swoole) mode only.
                  */
-                'accrual_interval' => env('RABBITMQ_VHOSTS_SCHEDULER_ACCRUAL_INTERVAL', null),
+                'accrual_interval' => env('RABBITMQ_VHOSTS_SCHEDULER_ACCRUAL_INTERVAL', 7),
             ],
         ],
     ],

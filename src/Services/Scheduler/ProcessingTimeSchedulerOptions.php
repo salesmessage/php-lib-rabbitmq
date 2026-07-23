@@ -8,11 +8,15 @@ final class ProcessingTimeSchedulerOptions
 
     private const DEFAULT_BUCKET = 30;
 
-    private const DEFAULT_RESERVATION_ESTIMATE = 5;
+    private const DEFAULT_RESERVATION_ESTIMATE = 3;
+
+    private const DEFAULT_ACCRUAL_INTERVAL = 7;
 
     private const MIN_WINDOW = 60;
 
     private const MIN_RESERVATION_MS = 1000;
+
+    private const MIN_ACCRUAL_INTERVAL = 1;
 
     /**
      * @param int $window
@@ -22,12 +26,13 @@ final class ProcessingTimeSchedulerOptions
     private function __construct(
         private int $window,
         private int $bucket,
-        private int $reservationEstimateMs
+        private int $reservationEstimateMs,
+        private int $accrualInterval
     ) {
     }
 
     /**
-     * @param array $options raw config: window (s), bucket (s), reservation_estimate (s)
+     * @param array $options raw config: window (s), bucket (s), reservation_estimate (s), accrual_interval (s)
      * @return self
      */
     public static function fromConfig(array $options): self
@@ -44,7 +49,12 @@ final class ProcessingTimeSchedulerOptions
             ? max(self::MIN_RESERVATION_MS, (int) round($reservationSeconds * 1000))
             : 0;
 
-        return new self($window, $bucket, $reservationEstimateMs);
+        $accrualInterval = max(
+            self::MIN_ACCRUAL_INTERVAL,
+            (int) ($options['accrual_interval'] ?? self::DEFAULT_ACCRUAL_INTERVAL)
+        );
+
+        return new self($window, $bucket, $reservationEstimateMs, $accrualInterval);
     }
 
     /**
@@ -69,5 +79,13 @@ final class ProcessingTimeSchedulerOptions
     public function getReservationEstimateMs(): int
     {
         return $this->reservationEstimateMs;
+    }
+
+    /**
+     * @return int accrual flush interval in seconds
+     */
+    public function getAccrualInterval(): int
+    {
+        return $this->accrualInterval;
     }
 }

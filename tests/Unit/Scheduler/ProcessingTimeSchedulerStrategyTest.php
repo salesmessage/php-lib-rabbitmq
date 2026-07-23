@@ -83,7 +83,7 @@ class ProcessingTimeSchedulerStrategyTest extends TestCase
         $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 5000, 300, 30);
         $storage->shouldReceive('recordQueueProcessingTime')->once()->with('billing', 'vhost_a', 'q1', 5000, 300, 30);
 
-        $scheduler = new ProcessingTimeSchedulerStrategy($storage, ['window' => 300, 'bucket' => 30]);
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage, ['window' => 300, 'bucket' => 30, 'reservation_estimate' => 5]);
         $scheduler->reserve('billing', 'vhost_a', 'q1');
     }
 
@@ -98,7 +98,7 @@ class ProcessingTimeSchedulerStrategyTest extends TestCase
         $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', -800, 300, 30);
         $storage->shouldReceive('recordQueueProcessingTime')->once()->with('billing', 'vhost_a', 'q1', -800, 300, 30);
 
-        $scheduler = new ProcessingTimeSchedulerStrategy($storage);
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage, ['reservation_estimate' => 5]);
         $scheduler->reserve('billing', 'vhost_a', 'q1');
         $scheduler->record('billing', 'vhost_a', 'q1', 4200);
     }
@@ -117,7 +117,7 @@ class ProcessingTimeSchedulerStrategyTest extends TestCase
         $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 1000, 300, 30);
         $storage->shouldReceive('recordQueueProcessingTime')->once()->with('billing', 'vhost_a', 'q1', 1000, 300, 30);
 
-        $scheduler = new ProcessingTimeSchedulerStrategy($storage);
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage, ['reservation_estimate' => 5]);
         $scheduler->reserve('billing', 'vhost_a', 'q1');
         $scheduler->accrue('billing', 'vhost_a', 60000);
         $scheduler->record('billing', 'vhost_a', 'q1', 61000);
@@ -130,7 +130,7 @@ class ProcessingTimeSchedulerStrategyTest extends TestCase
         $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 5000, 300, 30);
         $storage->shouldReceive('recordQueueProcessingTime')->once()->with('billing', 'vhost_a', 'q1', 5000, 300, 30);
 
-        $scheduler = new ProcessingTimeSchedulerStrategy($storage);
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage, ['reservation_estimate' => 5]);
         $scheduler->reserve('billing', 'vhost_a', 'q1');
         // elapsed below the current charge is ignored - no further writes
         $scheduler->accrue('billing', 'vhost_a', 3000);
@@ -150,7 +150,7 @@ class ProcessingTimeSchedulerStrategyTest extends TestCase
         $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', 2000, 300, 30);
         $storage->shouldReceive('recordQueueProcessingTime')->once()->with('billing', 'vhost_a', 'q1', 2000, 300, 30);
 
-        $scheduler = new ProcessingTimeSchedulerStrategy($storage);
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage, ['reservation_estimate' => 5]);
         $scheduler->reserve('billing', 'vhost_a', 'q1');
         $scheduler->record('billing', 'vhost_a', 'q1', 2000);
         $scheduler->record('billing', 'vhost_a', 'q1', 2000);
@@ -170,7 +170,7 @@ class ProcessingTimeSchedulerStrategyTest extends TestCase
         $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_b', 5000, 300, 30);
         $storage->shouldReceive('recordQueueProcessingTime')->once()->with('billing', 'vhost_b', 'q1', 5000, 300, 30);
 
-        $scheduler = new ProcessingTimeSchedulerStrategy($storage);
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage, ['reservation_estimate' => 5]);
         $scheduler->reserve('billing', 'vhost_a', 'q1'); // queue turned out empty, no record
         $scheduler->reserve('billing', 'vhost_b', 'q1');
     }
@@ -187,7 +187,7 @@ class ProcessingTimeSchedulerStrategyTest extends TestCase
         $storage->shouldReceive('recordProcessingTime')->once()->with('billing', 'vhost_a', -3000, 300, 30);
         $storage->shouldReceive('recordQueueProcessingTime')->once()->with('billing', 'vhost_a', 'q1', -3000, 300, 30);
 
-        $scheduler = new ProcessingTimeSchedulerStrategy($storage);
+        $scheduler = new ProcessingTimeSchedulerStrategy($storage, ['reservation_estimate' => 5]);
         $scheduler->reserve('billing', 'vhost_a', 'q1');
         $scheduler->reserve('billing', 'vhost_a', 'q1'); // retry: refund then re-charge, net one provisional
         $scheduler->record('billing', 'vhost_a', 'q1', 2000);

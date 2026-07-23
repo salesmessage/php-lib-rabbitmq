@@ -362,7 +362,8 @@ Add connection to `config/queue.php`:
                 'processing_time' => [
                     'window' => env('RABBITMQ_VHOSTS_SCHEDULER_WINDOW', 300), // seconds
                     'bucket' => env('RABBITMQ_VHOSTS_SCHEDULER_BUCKET', 30),  // seconds
-                    'reservation_estimate' => env('RABBITMQ_VHOSTS_SCHEDULER_RESERVATION_ESTIMATE', 5), // seconds
+                    'reservation_estimate' => env('RABBITMQ_VHOSTS_SCHEDULER_RESERVATION_ESTIMATE', 3), // seconds
+                    'accrual_interval' => env('RABBITMQ_VHOSTS_SCHEDULER_ACCRUAL_INTERVAL', 7), // seconds
                 ],
             ],
         ],
@@ -437,7 +438,8 @@ groups:
 |--------|-----|---------|---------|
 | `window` | `RABBITMQ_VHOSTS_SCHEDULER_WINDOW` | `300` | How far back (seconds) fairness looks. |
 | `bucket` | `RABBITMQ_VHOSTS_SCHEDULER_BUCKET` | `30` | Resolution (seconds) of the window; keep `bucket <= window / 5`. |
-| `reservation_estimate` | `RABBITMQ_VHOSTS_SCHEDULER_RESERVATION_ESTIMATE` | `5` | Provisional cost (seconds) charged on pick to spread simultaneous workers; `0` disables. |
+| `reservation_estimate` | `RABBITMQ_VHOSTS_SCHEDULER_RESERVATION_ESTIMATE` | `3` | Provisional cost (seconds) charged on pick to spread simultaneous workers; `0` disables. |
+| `accrual_interval` | `RABBITMQ_VHOSTS_SCHEDULER_ACCRUAL_INTERVAL` | `7` | How often (seconds) an async worker flushes an in-flight job's elapsed time into the ordering. Async (Swoole) mode only. |
 
 Notes for `processing_time`:
 

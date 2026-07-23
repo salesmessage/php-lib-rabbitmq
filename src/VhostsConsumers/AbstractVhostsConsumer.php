@@ -30,6 +30,7 @@ use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\Deduplication
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Salesmessage\LibRabbitMQ\Services\DeliveryLimitService;
 use Salesmessage\LibRabbitMQ\Services\Scheduler\LastProcessedSchedulerStrategy;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\ProcessingTimeSchedulerOptions;
 use Salesmessage\LibRabbitMQ\Services\Scheduler\VhostSchedulerInterface;
 
 abstract class AbstractVhostsConsumer extends Consumer
@@ -900,14 +901,13 @@ abstract class AbstractVhostsConsumer extends Consumer
     }
 
     /**
-     * @return int accrual flush interval in seconds (defaults to reservation_estimate)
+     * @return int accrual flush interval in seconds
      */
     protected function accrualIntervalSeconds(): int
     {
         $options = (array) config('queue.drivers.rabbitmq_vhosts.scheduler.strategies.processing_time', []);
-        $interval = (int) ($options['accrual_interval'] ?? $options['reservation_estimate'] ?? 5);
 
-        return max(1, $interval);
+        return ProcessingTimeSchedulerOptions::fromConfig($options)->getAccrualInterval();
     }
 
     protected function initConnection(int $attempts = 0): ?RabbitMQQueue
