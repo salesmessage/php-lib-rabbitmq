@@ -194,7 +194,7 @@ class QueueConsumer extends AbstractVhostsConsumer
             $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
         }
 
-        $this->updateLastProcessedAt();
+        $this->reserveCurrentSelection();
 
         if ($stopConsuming) {
             return null;

@@ -1,0 +1,316 @@
+<?php
+
+namespace Salesmessage\LibRabbitMQ\Tests\Support;
+
+use Illuminate\Redis\Connections\PredisConnection;
+
+/**
+ * In-memory stand-in for the Predis connection used by InternalStorageManager.
+ * Implements real semantics for the commands the storage relies on, including
+ * SORT with BY hash patterns and GET, so storage + scheduler behavior can be
+ * tested end-to-end without a Redis server.
+ */
+class FakeRedisConnection extends PredisConnection
+{
+    /** @var array<string, array<string, string>> */
+    public array $hashes = [];
+
+    /** @var array<string, array<int|string, string>> */
+    public array $sets = [];
+
+    /** @var array<string, int> */
+    public array $ttls = [];
+
+    /** @var array<string, string> sha1 => script, mirrors the server script cache */
+    public array $scripts = [];
+
+    public function __construct()
+    {
+    }
+
+    public function hset($key, $field, $value): int
+    {
+        $isNew = !isset($this->hashes[$key][$field]);
+        $this->hashes[$key][$field] = (string) $value;
+
+        return $isNew ? 1 : 0;
+    }
+
+    public function hget($key, $field): ?string
+    {
+        return $this->hashes[$key][$field] ?? null;
+    }
+
+    public function hmset($key, array $dictionary): bool
+    {
+        foreach ($dictionary as $field => $value) {
+            $this->hashes[$key][$field] = (string) $value;
+        }
+
+        return true;
+    }
+
+    public function hgetall($key): array
+    {
+        return $this->hashes[$key] ?? [];
+    }
+
+    public function hlen($key): int
+    {
+        return count($this->hashes[$key] ?? []);
+    }
+
+    public function hexists($key, $field): int
+    {
+        return isset($this->hashes[$key][$field]) ? 1 : 0;
+    }
+
+    public function hdel($key, $fields): int
+    {
+        $removed = 0;
+        foreach ((array) $fields as $field) {
+            if (isset($this->hashes[$key][$field])) {
+                unset($this->hashes[$key][$field]);
+                $removed++;
+            }
+        }
+
+        return $removed;
+    }
+
+    public function hincrby($key, $field, $increment): int
+    {
+        $value = (int) ($this->hashes[$key][$field] ?? 0) + (int) $increment;
+        $this->hashes[$key][$field] = (string) $value;
+
+        return $value;
+    }
+
+    public function sadd($key, $members): int
+    {
+        $added = 0;
+        foreach ((array) $members as $member) {
+            if (!in_array((string) $member, $this->sets[$key] ?? [], true)) {
+                $this->sets[$key][] = (string) $member;
+                $added++;
+            }
+        }
+
+        return $added;
+    }
+
+    public function srem($key, $members): int
+    {
+        $removed = 0;
+        foreach ((array) $members as $member) {
+            $index = array_search((string) $member, $this->sets[$key] ?? [], true);
+            if (false !== $index) {
+                unset($this->sets[$key][$index]);
+                $removed++;
+            }
+        }
+
+        return $removed;
+    }
+
+    public function sismember($key, $member): int
+    {
+        return in_array((string) $member, $this->sets[$key] ?? [], true) ? 1 : 0;
+    }
+
+    public function exists($key): int
+    {
+        return (isset($this->hashes[$key]) || isset($this->sets[$key])) ? 1 : 0;
+    }
+
+    public function del($keys): int
+    {
+        $removed = 0;
+        foreach ((array) $keys as $key) {
+            if (isset($this->hashes[$key]) || isset($this->sets[$key])) {
+                unset($this->hashes[$key], $this->sets[$key], $this->ttls[$key]);
+                $removed++;
+            }
+        }
+
+        return $removed;
+    }
+
+    public function expire($key, $seconds): int
+    {
+        if (!$this->exists($key)) {
+            return 0;
+        }
+
+        $this->ttls[$key] = (int) $seconds;
+
+        return 1;
+    }
+
+    public function ttl($key): int
+    {
+        if (!$this->exists($key)) {
+            return -2;
+        }
+
+        return $this->ttls[$key] ?? -1;
+    }
+
+    /**
+     * SCRIPT LOAD caches the script by sha1, like the real server; other
+     * subcommands are not emulated.
+     */
+    public function script($subcommand, ...$arguments)
+    {
+        if ('load' !== strtolower((string) $subcommand)) {
+            throw new \RuntimeException(sprintf('SCRIPT %s is not emulated (fake).', $subcommand));
+        }
+
+        $script = (string) ($arguments[0] ?? '');
+        $sha = sha1($script);
+        $this->scripts[$sha] = $script;
+
+        return $sha;
+    }
+
+    /**
+     * Runs a script previously cached via SCRIPT LOAD; unknown hashes raise
+     * NOSCRIPT, which sends ProcessingTimeStore::evalLua down its EVAL fallback.
+     */
+    public function evalsha($sha, $numKeys, ...$arguments)
+    {
+        if (isset($this->scripts[$sha])) {
+            return $this->eval($this->scripts[$sha], $numKeys, ...$arguments);
+        }
+
+        throw new \RuntimeException('NOSCRIPT No matching script (fake).');
+    }
+
+    /**
+     * Executes the queued commands immediately against this fake and returns
+     * their responses, mirroring what a real pipeline resolves to.
+     */
+    public function pipeline(callable $callback = null): array
+    {
+        $pipe = new class($this) {
+            /** @var array<int, mixed> */
+            public array $results = [];
+
+            public function __construct(private FakeRedisConnection $connection)
+            {
+            }
+
+            public function __call($method, $arguments)
+            {
+                $this->results[] = $this->connection->{$method}(...$arguments);
+
+                return $this;
+            }
+        };
+
+        $callback($pipe);
+
+        return $pipe->results;
+    }
+
+    /**
+     * Emulate InternalStorageManager's window-cost scripts (the only Lua the
+     * storage runs): optionally charge the current bucket, then trim expired
+     * buckets, sum the live ones, clamp to >= 0 and materialize the cost.
+     *
+     * KEYS[1] buckets hash, KEYS[2] vhost storage hash.
+     * ARGV[1] oldest valid bucket id, ARGV[2] window cost field; the record
+     * variant also passes ARGV[3] bucket id, ARGV[4] milliseconds, ARGV[5] ttl.
+     */
+    public function eval($script, $numKeys, ...$arguments): int
+    {
+        $keys = array_slice($arguments, 0, (int) $numKeys);
+        $argv = array_slice($arguments, (int) $numKeys);
+
+        $bucketsKey = (string) ($keys[0] ?? '');
+        $storageKey = (string) ($keys[1] ?? '');
+        $oldest = (int) ($argv[0] ?? 0);
+        $windowCostField = (string) ($argv[1] ?? '');
+
+        if (str_contains($script, 'HINCRBY')) {
+            $this->hincrby($bucketsKey, (string) $argv[2], (int) $argv[3]);
+            $this->expire($bucketsKey, (int) $argv[4]);
+        }
+
+        $cost = 0;
+        $expired = [];
+        foreach ($this->hgetall($bucketsKey) as $bucketId => $value) {
+            if ((int) $bucketId < $oldest) {
+                $expired[] = $bucketId;
+                continue;
+            }
+            $cost += (int) $value;
+        }
+
+        if (!empty($expired)) {
+            $this->hdel($bucketsKey, $expired);
+        }
+
+        $cost = max(0, $cost);
+
+        if ($cost > 0) {
+            if ($this->exists($storageKey)) {
+                $this->hset($storageKey, $windowCostField, $cost);
+            }
+        } else {
+            $this->hdel($storageKey, $windowCostField);
+        }
+
+        return $cost;
+    }
+
+    /**
+     * SORT with the subset of options the storage uses:
+     * by ('*->field'), alpha, sort (asc/desc), get (['#', '*->field']).
+     */
+    public function sort($key, array $options = []): array
+    {
+        $members = array_values($this->sets[$key] ?? []);
+
+        $by = (string) ($options['by'] ?? '');
+        $alpha = (bool) ($options['alpha'] ?? false);
+
+        $weightOf = function (string $member) use ($by): ?string {
+            if ('' === $by || !str_starts_with($by, '*->')) {
+                return $member;
+            }
+
+            return $this->hashes[$member][substr($by, 3)] ?? null;
+        };
+
+        usort($members, function (string $a, string $b) use ($weightOf, $alpha): int {
+            if ($alpha) {
+                return strcmp((string) $weightOf($a), (string) $weightOf($b));
+            }
+
+            return ((float) $weightOf($a)) <=> ((float) $weightOf($b));
+        });
+
+        if ('desc' === strtolower((string) ($options['sort'] ?? 'asc'))) {
+            $members = array_reverse($members);
+        }
+
+        $getPatterns = (array) ($options['get'] ?? []);
+        if (empty($getPatterns)) {
+            return $members;
+        }
+
+        $result = [];
+        foreach ($members as $member) {
+            foreach ($getPatterns as $pattern) {
+                if ('#' === $pattern) {
+                    $result[] = $member;
+                } elseif (str_starts_with((string) $pattern, '*->')) {
+                    $result[] = $this->hashes[$member][substr((string) $pattern, 3)] ?? null;
+                }
+            }
+        }
+
+        return $result;
+    }
+}

@@ -24,10 +24,16 @@ class InternalStorageManager
      */
     private PredisConnection $redis;
 
+    /**
+     * @var ProcessingTimeStore
+     */
+    private ProcessingTimeStore $processingTimeStore;
+
     public function __construct() {
         /** @var PredisConnection $redis */
         $redis = Redis::connection('persistent');
         $this->redis = $redis;
+        $this->processingTimeStore = new ProcessingTimeStore($this->redis);
     }
 
     /**
@@ -39,6 +45,24 @@ class InternalStorageManager
         $this->connectionName = $connectionName;
 
         return $this;
+    }
+
+    /**
+     * Swap the storage connection for a dedicated, pool-guarded one so it can be
+     * shared safely across the consumer's Swoole coroutines (main loop + accrual)
+     * without multiplexing a single socket. Redis::resolve() yields a fresh socket
+     * on the same config, isolated from the application's cached connection, which
+     * jobs may use. Intended for the async consumer only.
+     *
+     * @return void
+     */
+    public function usePooledConnection(): void
+    {
+        /** @var PredisConnection $connection */
+        $connection = Redis::resolve('persistent');
+
+        $this->redis = new RedisConnectionPool($connection);
+        $this->processingTimeStore->setConnection($this->redis);
     }
 
     /**
@@ -105,6 +129,23 @@ class InternalStorageManager
     }
 
     /**
+     * Ordered vhosts together with the numeric weight they were sorted by.
+     * Returns a list of ['name' => string, 'weight' => float] ascending by weight.
+     * A missing weight field is treated as 0.
+     *
+     * @param string $by
+     * @return array
+     */
+    public function getVhostsWithWeights(string $by): array
+    {
+        return $this->processingTimeStore->orderedByWeight(
+            $this->getIndexKeyVhosts(),
+            $this->getVhostStorageKeyPrefix(),
+            $by
+        );
+    }
+
+    /**
      * @param string $vhostName
      * @param string $by
      * @param bool $alpha
@@ -125,6 +166,24 @@ class InternalStorageManager
             '',
             $value
         ), $queues);
+    }
+
+    /**
+     * Ordered queues of a vhost together with the numeric weight they were sorted
+     * by. Returns a list of ['name' => string, 'weight' => float] ascending by
+     * weight. A missing weight field is treated as 0. Mirrors getVhostsWithWeights.
+     *
+     * @param string $vhostName
+     * @param string $by
+     * @return array
+     */
+    public function getVhostQueuesWithWeights(string $vhostName, string $by): array
+    {
+        return $this->processingTimeStore->orderedByWeight(
+            $this->getQueueIndexKey($vhostName),
+            $this->getQueueStorageKeyPrefix($vhostName),
+            $by
+        );
     }
 
     /**
@@ -406,6 +465,248 @@ class InternalStorageManager
     public function getLastProcessedAtKeyName(string $groupName): string
     {
         return sprintf('last_processed_at:%s', $groupName);
+    }
+
+    /**
+     * Update the last_processed_at timestamp for a vhost and one of its queues
+     * within a group.
+     *
+     * @param string $group
+     * @param string $vhost
+     * @param string $queue
+     * @return void
+     */
+    public function touchLastProcessedAt(string $group, string $vhost, string $queue): void
+    {
+        $timestamp = time();
+
+        $queueDto = new QueueApiDto([
+            'name' => $queue,
+            'vhost' => $vhost,
+        ]);
+        $queueDto
+            ->setGroupName($group)
+            ->setLastProcessedAt($timestamp);
+        $this->updateQueueLastProcessedAt($queueDto);
+
+        $vhostDto = new VhostApiDto([
+            'name' => $vhost,
+        ]);
+        $vhostDto
+            ->setGroupName($group)
+            ->setLastProcessedAt($timestamp);
+        $this->updateVhostLastProcessedAt($vhostDto);
+    }
+
+    /**
+     * Hash field on a vhost holding its processing time (integer milliseconds)
+     * within the sliding window for a group. Used as the sort key in
+     * processing_time mode.
+     *
+     * @param string $groupName
+     * @return string
+     */
+    public function getWindowCostKeyName(string $groupName): string
+    {
+        return sprintf('window_cost:%s', $groupName);
+    }
+
+    /**
+     * Add processing time (integer milliseconds, may be negative to reconcile a
+     * provisional reservation) to a vhost's sliding-window buckets and refresh
+     * its materialized window cost atomically.
+     *
+     * @param string $group
+     * @param string $vhost
+     * @param int $milliseconds
+     * @param int $window
+     * @param int $bucket
+     * @return void
+     */
+    public function recordProcessingTime(
+        string $group,
+        string $vhost,
+        int $milliseconds,
+        int $window,
+        int $bucket
+    ): void {
+        $this->processingTimeStore->record(
+            $this->getProcessingBucketsKey($group, $vhost),
+            $this->getVhostStorageKeyPrefix() . $vhost,
+            $this->getWindowCostKeyName($group),
+            $milliseconds,
+            $window,
+            $bucket
+        );
+    }
+
+    /**
+     * Queue-level counterpart of recordProcessingTime(): account the same
+     * processing time against a single queue so queues within a vhost can be
+     * ordered fairly by their own window cost.
+     *
+     * @param string $group
+     * @param string $vhost
+     * @param string $queue
+     * @param int $milliseconds
+     * @param int $window
+     * @param int $bucket
+     * @return void
+     */
+    public function recordQueueProcessingTime(
+        string $group,
+        string $vhost,
+        string $queue,
+        int $milliseconds,
+        int $window,
+        int $bucket
+    ): void {
+        $this->processingTimeStore->record(
+            $this->getQueueProcessingBucketsKey($group, $vhost, $queue),
+            $this->getQueueStorageKeyPrefix($vhost) . $queue,
+            $this->getWindowCostKeyName($group),
+            $milliseconds,
+            $window,
+            $bucket
+        );
+    }
+
+    /**
+     * Recompute a vhost's window cost from its live buckets (trimming expired
+     * ones) and store it on the vhost hash atomically. Returns the cost.
+     *
+     * @param string $group
+     * @param string $vhost
+     * @param int $window
+     * @param int $bucket
+     * @return int
+     */
+    public function refreshWindowCost(
+        string $group,
+        string $vhost,
+        int $window,
+        int $bucket
+    ): int {
+        return $this->processingTimeStore->refresh(
+            $this->getProcessingBucketsKey($group, $vhost),
+            $this->getVhostStorageKeyPrefix() . $vhost,
+            $this->getWindowCostKeyName($group),
+            $window,
+            $bucket
+        );
+    }
+
+    /**
+     * Batched counterpart of refreshWindowCost(): recompute a vhost's window
+     * cost for every group in a single pipelined round trip.
+     *
+     * @param array $groups
+     * @param string $vhost
+     * @param int $window
+     * @param int $bucket
+     * @return void
+     */
+    public function refreshWindowCosts(
+        array $groups,
+        string $vhost,
+        int $window,
+        int $bucket
+    ): void {
+        $entries = [];
+        foreach ($groups as $group) {
+            $entries[] = [
+                $this->getProcessingBucketsKey((string) $group, $vhost),
+                $this->getVhostStorageKeyPrefix() . $vhost,
+                $this->getWindowCostKeyName((string) $group),
+            ];
+        }
+
+        $this->processingTimeStore->refreshMany($entries, $window, $bucket);
+    }
+
+    /**
+     * Queue-level counterpart of refreshWindowCost(): decays an indexed queue's
+     * window cost toward zero while no worker is recording time for it.
+     *
+     * @param string $group
+     * @param string $vhost
+     * @param string $queue
+     * @param int $window
+     * @param int $bucket
+     * @return int
+     */
+    public function refreshQueueWindowCost(
+        string $group,
+        string $vhost,
+        string $queue,
+        int $window,
+        int $bucket
+    ): int {
+        return $this->processingTimeStore->refresh(
+            $this->getQueueProcessingBucketsKey($group, $vhost, $queue),
+            $this->getQueueStorageKeyPrefix($vhost) . $queue,
+            $this->getWindowCostKeyName($group),
+            $window,
+            $bucket
+        );
+    }
+
+    /**
+     * Batched counterpart of refreshQueueWindowCost(): recompute the window
+     * costs of many queues of a vhost for every group in a single pipelined
+     * round trip.
+     *
+     * @param array $groups
+     * @param string $vhost
+     * @param array $queues
+     * @param int $window
+     * @param int $bucket
+     * @return void
+     */
+    public function refreshQueueWindowCosts(
+        array $groups,
+        string $vhost,
+        array $queues,
+        int $window,
+        int $bucket
+    ): void {
+        $entries = [];
+        foreach ($groups as $group) {
+            foreach ($queues as $queue) {
+                $entries[] = [
+                    $this->getQueueProcessingBucketsKey((string) $group, $vhost, (string) $queue),
+                    $this->getQueueStorageKeyPrefix($vhost) . $queue,
+                    $this->getWindowCostKeyName((string) $group),
+                ];
+            }
+        }
+
+        $this->processingTimeStore->refreshMany($entries, $window, $bucket);
+    }
+
+    /**
+     * @param string $group
+     * @param string $vhost
+     * @return string
+     */
+    private function getProcessingBucketsKey(string $group, string $vhost): string
+    {
+        $prefix = $this->isVhostsConnection() ? 'rabbitmq' : $this->connectionName;
+
+        return sprintf('%s_proc_buckets|%s|%s', $prefix, $group, $vhost);
+    }
+
+    /**
+     * @param string $group
+     * @param string $vhost
+     * @param string $queue
+     * @return string
+     */
+    private function getQueueProcessingBucketsKey(string $group, string $vhost, string $queue): string
+    {
+        $prefix = $this->isVhostsConnection() ? 'rabbitmq' : $this->connectionName;
+
+        return sprintf('%s_proc_buckets|%s|%s|%s', $prefix, $group, $vhost, $queue);
     }
 
     /**

@@ -9,6 +9,8 @@ use Illuminate\Support\Str;
 use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
 use Salesmessage\LibRabbitMQ\Exceptions\RabbitVhostsGroupsException;
 use Salesmessage\LibRabbitMQ\Services\GroupsService;
+use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\VhostSchedulerFactory;
 use Salesmessage\LibRabbitMQ\VhostsConsumers\AbstractVhostsConsumer;
 use Symfony\Component\Console\Terminal;
 use Throwable;
@@ -99,6 +101,12 @@ class ConsumeVhostsCommand extends WorkCommand
         $consumer->setPrefetchCount((int) ($groupConfigData['prefetch_count'] ?? 1000));
         $consumer->setBatchSize((int) ($groupConfigData['batch_size'] ?? 1000));
         $consumer->setAsyncMode((bool) $this->option('async-mode'));
+
+        $consumer->setScheduler(VhostSchedulerFactory::make(
+            $this->laravel[InternalStorageManager::class],
+            (string) ($groupConfigData['scheduler_strategy'] ?? VhostSchedulerFactory::STRATEGY_LAST_PROCESSED),
+            (array) config('queue.drivers.rabbitmq_vhosts.scheduler.strategies.processing_time', [])
+        ));
 
         if ($this->downForMaintenance() && $this->option('once')) {
             $consumer->sleep($this->option('sleep'));

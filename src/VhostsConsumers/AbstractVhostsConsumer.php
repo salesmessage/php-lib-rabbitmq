@@ -19,7 +19,6 @@ use Salesmessage\LibRabbitMQ\Consumer;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
 use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
-use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Exceptions\MutexTimeout;
 use Salesmessage\LibRabbitMQ\Interfaces\RabbitMQBatchable;
@@ -30,6 +29,9 @@ use Salesmessage\LibRabbitMQ\Services\Deduplication\AppDeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationService as TransportDeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Salesmessage\LibRabbitMQ\Services\DeliveryLimitService;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\LastProcessedSchedulerStrategy;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\ProcessingTimeSchedulerOptions;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\VhostSchedulerInterface;
 
 abstract class AbstractVhostsConsumer extends Consumer
 {
@@ -80,7 +82,13 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     protected bool $asyncMode = false;
 
+    protected bool $accrualInFlight = false;
+
+    protected float $accrualStartedAt = 0.0;
+
     protected ?Mutex $connectionMutex = null;
+
+    protected VhostSchedulerInterface $scheduler;
 
     /**
      * @param InternalStorageManager $internalStorageManager
@@ -90,6 +98,7 @@ abstract class AbstractVhostsConsumer extends Consumer
      * @param ExceptionHandler $exceptions
      * @param callable $isDownForMaintenance
      * @param TransportDeduplicationService $transportDeduplicationService
+     * @param DeliveryLimitService $deliveryLimitService
      * @param callable|null $resetScope
      */
     public function __construct(
@@ -104,6 +113,19 @@ abstract class AbstractVhostsConsumer extends Consumer
         callable $resetScope = null,
     ) {
         parent::__construct($manager, $events, $exceptions, $isDownForMaintenance, $logger, $resetScope);
+
+        // default to recency-based; the consume command overrides it from CLI options
+        $this->scheduler = new LastProcessedSchedulerStrategy($this->internalStorageManager);
+    }
+
+    /**
+     * @param VhostSchedulerInterface $scheduler
+     * @return $this
+     */
+    public function setScheduler(VhostSchedulerInterface $scheduler): self
+    {
+        $this->scheduler = $scheduler;
+        return $this;
     }
 
     /**
@@ -185,7 +207,14 @@ abstract class AbstractVhostsConsumer extends Consumer
 
                 // we can't move it outside since Mutex should be created within coroutine context
                 $this->connectionMutex = new Mutex(true);
+
+                // dedicated, pool-guarded storage connection so the accrual coroutine
+                // can share it with the main loop without multiplexing the socket, and
+                // isolated from the application's own Redis connection
+                $this->internalStorageManager->usePooledConnection();
+
                 $this->startHeartbeatCheck();
+                $this->startProcessingTimeAccrual();
                 \go(function () use ($connectionName, $options) {
                     $this->vhostDaemon($connectionName, $options);
                 });
@@ -310,6 +339,10 @@ abstract class AbstractVhostsConsumer extends Consumer
             return;
         }
 
+        $processingStartedAt = microtime(true);
+        $this->beginAccrual($processingStartedAt);
+        $singleJobsSeconds = 0.0;
+
         foreach ($this->batchMessages as $batchJobClass => $batchJobMessages) {
             $isBatchSuccess = false;
             $batchSize = count($batchJobMessages);
@@ -398,14 +431,16 @@ abstract class AbstractVhostsConsumer extends Consumer
                 } else {
                     foreach ($uniqueMessagesForProcessing as $batchMessage) {
                         $job = $this->getJobByMessage($batchMessage, $connection);
-                        $this->processSingleJob($job, $batchMessage);
+                        // processSingleJob records its own duration, so it is
+                        // excluded from this method's total to avoid double counting
+                        $singleJobsSeconds += $this->processSingleJob($job, $batchMessage);
                     }
                 }
             } finally {
                 $this->connectionMutex->unlock(static::MAIN_HANDLER_LOCK);
             }
         }
-        $this->updateLastProcessedAt();
+        $this->recordProcessing(microtime(true) - $processingStartedAt - $singleJobsSeconds);
 
         $this->batchMessages = [];
 
@@ -444,9 +479,13 @@ abstract class AbstractVhostsConsumer extends Consumer
         return $job;
     }
 
-    protected function processSingleJob(RabbitMQJob $job, AMQPMessage $message): void
+    /**
+     * @return float Seconds spent on the job (already recorded to the scheduler).
+     */
+    protected function processSingleJob(RabbitMQJob $job, AMQPMessage $message): float
     {
         $timeStarted = microtime(true);
+        $this->beginAccrual($timeStarted);
         $this->logInfo('processSingleJob.start');
 
         if ($this->supportsAsyncSignals()) {
@@ -472,15 +511,18 @@ abstract class AbstractVhostsConsumer extends Consumer
             $this->currentQueueName,
         );
 
-        $this->updateLastProcessedAt();
+        $duration = microtime(true) - $timeStarted;
+        $this->recordProcessing($duration);
 
         if ($this->supportsAsyncSignals()) {
             $this->resetTimeoutHandler();
         }
 
         $this->logInfo('processSingleJob.finish', [
-            'executive_job_time_seconds' => microtime(true) - $timeStarted,
+            'executive_job_time_seconds' => $duration,
         ]);
+
+        return $duration;
     }
 
     /**
@@ -538,9 +580,8 @@ abstract class AbstractVhostsConsumer extends Consumer
         $this->logInfo('loadVhosts.start');
 
         $group = $this->filtersDto->getGroup();
-        $lastProcessedAtKey = $this->internalStorageManager->getLastProcessedAtKeyName($group);
 
-        $vhosts = $this->internalStorageManager->getVhosts($lastProcessedAtKey, false);
+        $vhosts = $this->scheduler->getOrderedVhosts($group);
 
         // filter vhosts
         $filterVhosts = $this->filtersDto->getVhosts();
@@ -554,7 +595,8 @@ abstract class AbstractVhostsConsumer extends Consumer
             $vhosts = array_filter($vhosts, fn($value) => str_contains($value, $filterVhostsMask));
         }
 
-        $this->vhosts = $vhosts;
+        // reindex: getNextVhost() walks sequential indexes, filter gaps would truncate the pass
+        $this->vhosts = array_values($vhosts);
         $this->vhostQueues = [];
 
         $this->currentVhostName = null;
@@ -616,10 +658,9 @@ abstract class AbstractVhostsConsumer extends Consumer
         $this->logInfo('loadVhostQueues.start');
 
         $group = $this->filtersDto->getGroup();
-        $lastProcessedAtKey = $this->internalStorageManager->getLastProcessedAtKeyName($group);
 
         $vhostQueues = (null !== $this->currentVhostName)
-            ? $this->internalStorageManager->getVhostQueues($this->currentVhostName, $lastProcessedAtKey, false)
+            ? $this->scheduler->getOrderedQueues($group, $this->currentVhostName)
             : [];
 
         // filter queues
@@ -634,7 +675,8 @@ abstract class AbstractVhostsConsumer extends Consumer
             $vhostQueues = array_filter($vhostQueues, fn($value) => str_contains($value, $filterQueuesMask));
         }
 
-        $this->vhostQueues = $vhostQueues;
+        // reindex: getNextQueue() walks sequential indexes, filter gaps would truncate the pass
+        $this->vhostQueues = array_values($vhostQueues);
 
         $this->currentQueueName = null;
     }
@@ -745,35 +787,130 @@ abstract class AbstractVhostsConsumer extends Consumer
     }
 
     /**
+     * Mark the current vhost/queue as taken so it is deprioritized against other
+     * workers before any processing time has been recorded for it.
+     *
      * @return void
      */
-    protected function updateLastProcessedAt(): void
+    protected function reserveCurrentSelection(): void
     {
         if ((null === $this->currentVhostName) || (null === $this->currentQueueName)) {
             return;
         }
 
-        $this->logInfo('updateLastProcessedAt.start');
+        $this->logInfo('reserveCurrentSelection.start');
 
-        $group = $this->filtersDto->getGroup();
-        $timestamp = time();
+        $this->scheduler->reserve(
+            $this->filtersDto->getGroup(),
+            $this->currentVhostName,
+            $this->currentQueueName
+        );
+    }
 
-        $queueDto = new QueueApiDto([
-            'name' => $this->currentQueueName,
-            'vhost' => $this->currentVhostName,
+    /**
+     * Record how much time was spent processing the current vhost/queue.
+     * Wall-clock seconds are converted to integer milliseconds once here;
+     * the scheduler accounts in integer milliseconds.
+     *
+     * @param float $seconds
+     * @return void
+     */
+    protected function recordProcessing(float $seconds): void
+    {
+        // stop accrual before the final reconciliation so a concurrent accrual
+        // tick cannot add to a job that has just finished
+        $this->accrualInFlight = false;
+
+        if ((null === $this->currentVhostName) || (null === $this->currentQueueName)) {
+            return;
+        }
+
+        // every processed unit costs at least 1ms so ultra-fast jobs still
+        // accumulate cost instead of keeping the vhost at a permanent zero
+        $milliseconds = max(1, (int) round($seconds * 1000));
+
+        $this->logInfo('recordProcessing.start', [
+            'milliseconds' => $milliseconds,
         ]);
-        $queueDto
-            ->setGroupName($group)
-            ->setLastProcessedAt($timestamp);
-        $this->internalStorageManager->updateQueueLastProcessedAt($queueDto);
 
-        $vhostDto = new VhostApiDto([
-            'name' => $queueDto->getVhostName(),
+        $this->scheduler->record(
+            $this->filtersDto->getGroup(),
+            $this->currentVhostName,
+            $this->currentQueueName,
+            $milliseconds
+        );
+    }
+
+    /**
+     * Mark the start of a job's execution so the accrual coroutine can charge its
+     * elapsed processing time while it runs. Paired with recordProcessing(), which
+     * stops accrual and reconciles the exact total.
+     *
+     * @param float $startedAt microtime(true) when the job began
+     * @return void
+     */
+    protected function beginAccrual(float $startedAt): void
+    {
+        $this->accrualStartedAt = $startedAt;
+        $this->accrualInFlight = true;
+    }
+
+    /**
+     * Async-only coroutine that periodically flushes the processing time accrued
+     * by an in-flight job, so a long-running job is reflected in the fairness
+     * ordering before it finishes instead of only at record() time.
+     *
+     * @return void
+     */
+    protected function startProcessingTimeAccrual(): void
+    {
+        if (false === $this->asyncMode) {
+            return;
+        }
+
+        $interval = $this->accrualIntervalSeconds();
+
+        $this->logInfo('startProcessingTimeAccrual.start', [
+            'interval' => $interval,
         ]);
-        $vhostDto
-            ->setGroupName($group)
-            ->setLastProcessedAt($timestamp);
-        $this->internalStorageManager->updateVhostLastProcessedAt($vhostDto);
+
+        \go(function () use ($interval) {
+            while (true) {
+                sleep($interval);
+
+                if ($this->shouldQuit || (null !== $this->stopStatusCode)) {
+                    return;
+                }
+
+                if ((false === $this->accrualInFlight) || (null === $this->currentVhostName)) {
+                    continue;
+                }
+
+                $elapsedMs = (int) round((microtime(true) - $this->accrualStartedAt) * 1000);
+
+                try {
+                    $this->scheduler->accrue(
+                        $this->filtersDto->getGroup(),
+                        $this->currentVhostName,
+                        $elapsedMs
+                    );
+                } catch (\Throwable $exception) {
+                    $this->logError('startProcessingTimeAccrual.exception', [
+                        'error' => $exception->getMessage(),
+                    ]);
+                }
+            }
+        });
+    }
+
+    /**
+     * @return int accrual flush interval in seconds
+     */
+    protected function accrualIntervalSeconds(): int
+    {
+        $options = (array) config('queue.drivers.rabbitmq_vhosts.scheduler.strategies.processing_time', []);
+
+        return ProcessingTimeSchedulerOptions::fromConfig($options)->getAccrualInterval();
     }
 
     protected function initConnection(int $attempts = 0): ?RabbitMQQueue

@@ -2,6 +2,37 @@
 
 return [
     'consumer_type' => env('RABBITMQ_VHOSTS_CONSUMER_TYPE', 'direct'),
+
+    /**
+     * Vhost round-robin scheduler options.
+     *
+     * The scheduler strategy (last_processed | processing_time) is set per group
+     * in rabbit-groups.yml via `scheduler_strategy`, not here. These are only the tuning
+     * options for the processing_time scheduler.
+     */
+    'scheduler' => [
+        'strategies' => [
+            'processing_time' => [
+                'window' => env('RABBITMQ_VHOSTS_SCHEDULER_WINDOW', 300), // seconds
+                'bucket' => env('RABBITMQ_VHOSTS_SCHEDULER_BUCKET', 30),  // seconds
+                /**
+                 * Provisional cost (seconds) charged to a vhost the moment a worker
+                 * picks it, reconciled exactly once real processing time is recorded
+                 * and refunded when the worker moves on without doing any work.
+                 * Stops many simultaneous workers from piling onto the same vhost.
+                 * Set to 0 to disable.
+                 */
+                'reservation_estimate' => env('RABBITMQ_VHOSTS_SCHEDULER_RESERVATION_ESTIMATE', 3),
+                /**
+                 * How often (seconds) an async consumer flushes the processing time
+                 * accrued by an in-flight job, so a long-running job is reflected in
+                 * the fairness ordering before it finishes instead of only at the end.
+                 * Async (Swoole) mode only.
+                 */
+                'accrual_interval' => env('RABBITMQ_VHOSTS_SCHEDULER_ACCRUAL_INTERVAL', 7),
+            ],
+        ],
+    ],
     /**
      * Provided on 2 levels: transport and application.
      */
