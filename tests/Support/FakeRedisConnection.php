@@ -21,6 +21,9 @@ class FakeRedisConnection extends PredisConnection
     /** @var array<string, int> */
     public array $ttls = [];
 
+    /** @var array<string, string> sha1 => script, mirrors the server script cache */
+    public array $scripts = [];
+
     public function __construct()
     {
     }
@@ -154,12 +157,60 @@ class FakeRedisConnection extends PredisConnection
     }
 
     /**
-     * Force the caller (InternalStorageManager::evalLua) down its EVAL fallback:
-     * this fake caches no scripts, so EVALSHA is always a miss.
+     * SCRIPT LOAD caches the script by sha1, like the real server; other
+     * subcommands are not emulated.
+     */
+    public function script($subcommand, ...$arguments)
+    {
+        if ('load' !== strtolower((string) $subcommand)) {
+            throw new \RuntimeException(sprintf('SCRIPT %s is not emulated (fake).', $subcommand));
+        }
+
+        $script = (string) ($arguments[0] ?? '');
+        $sha = sha1($script);
+        $this->scripts[$sha] = $script;
+
+        return $sha;
+    }
+
+    /**
+     * Runs a script previously cached via SCRIPT LOAD; unknown hashes raise
+     * NOSCRIPT, which sends ProcessingTimeStore::evalLua down its EVAL fallback.
      */
     public function evalsha($sha, $numKeys, ...$arguments)
     {
+        if (isset($this->scripts[$sha])) {
+            return $this->eval($this->scripts[$sha], $numKeys, ...$arguments);
+        }
+
         throw new \RuntimeException('NOSCRIPT No matching script (fake).');
+    }
+
+    /**
+     * Executes the queued commands immediately against this fake and returns
+     * their responses, mirroring what a real pipeline resolves to.
+     */
+    public function pipeline(callable $callback = null): array
+    {
+        $pipe = new class($this) {
+            /** @var array<int, mixed> */
+            public array $results = [];
+
+            public function __construct(private FakeRedisConnection $connection)
+            {
+            }
+
+            public function __call($method, $arguments)
+            {
+                $this->results[] = $this->connection->{$method}(...$arguments);
+
+                return $this;
+            }
+        };
+
+        $callback($pipe);
+
+        return $pipe->results;
     }
 
     /**

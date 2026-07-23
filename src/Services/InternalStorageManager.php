@@ -597,6 +597,34 @@ class InternalStorageManager
     }
 
     /**
+     * Batched counterpart of refreshWindowCost(): recompute a vhost's window
+     * cost for every group in a single pipelined round trip.
+     *
+     * @param array $groups
+     * @param string $vhost
+     * @param int $window
+     * @param int $bucket
+     * @return void
+     */
+    public function refreshWindowCosts(
+        array $groups,
+        string $vhost,
+        int $window,
+        int $bucket
+    ): void {
+        $entries = [];
+        foreach ($groups as $group) {
+            $entries[] = [
+                $this->getProcessingBucketsKey((string) $group, $vhost),
+                $this->getVhostStorageKeyPrefix() . $vhost,
+                $this->getWindowCostKeyName((string) $group),
+            ];
+        }
+
+        $this->processingTimeStore->refreshMany($entries, $window, $bucket);
+    }
+
+    /**
      * Queue-level counterpart of refreshWindowCost(): decays an indexed queue's
      * window cost toward zero while no worker is recording time for it.
      *
@@ -621,6 +649,39 @@ class InternalStorageManager
             $window,
             $bucket
         );
+    }
+
+    /**
+     * Batched counterpart of refreshQueueWindowCost(): recompute the window
+     * costs of many queues of a vhost for every group in a single pipelined
+     * round trip.
+     *
+     * @param array $groups
+     * @param string $vhost
+     * @param array $queues
+     * @param int $window
+     * @param int $bucket
+     * @return void
+     */
+    public function refreshQueueWindowCosts(
+        array $groups,
+        string $vhost,
+        array $queues,
+        int $window,
+        int $bucket
+    ): void {
+        $entries = [];
+        foreach ($groups as $group) {
+            foreach ($queues as $queue) {
+                $entries[] = [
+                    $this->getQueueProcessingBucketsKey((string) $group, $vhost, (string) $queue),
+                    $this->getQueueStorageKeyPrefix($vhost) . $queue,
+                    $this->getWindowCostKeyName((string) $group),
+                ];
+            }
+        }
+
+        $this->processingTimeStore->refreshMany($entries, $window, $bucket);
     }
 
     /**

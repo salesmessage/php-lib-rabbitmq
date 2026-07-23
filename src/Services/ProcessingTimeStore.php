@@ -130,6 +130,53 @@ LUA;
     }
 
     /**
+     * Batched refresh(): recompute many entities' window costs in a single
+     * pipelined round trip instead of one EVAL round trip per entity. The
+     * script is loaded once via SCRIPT LOAD so the pipeline can use EVALSHA.
+     *
+     * @param array $entries list of [bucketsKey, ownerKey, windowCostField]
+     * @param int $window
+     * @param int $bucket
+     * @return void
+     */
+    public function refreshMany(array $entries, int $window, int $bucket): void
+    {
+        if (empty($entries)) {
+            return;
+        }
+
+        $script = self::LUA_REFRESH_WINDOW_COST;
+        $sha = sha1($script);
+        $oldestBucket = intdiv(time() - $window, $bucket);
+
+        $this->redis->script('load', $script);
+
+        try {
+            // the closure must only queue commands on $pipe: through the
+            // coroutine connection pool the whole pipeline() call runs within a
+            // single borrow of the connection, and any nested pool call from
+            // inside the closure would self-deadlock on the capacity-1 channel
+            $this->redis->pipeline(function ($pipe) use ($entries, $sha, $oldestBucket) {
+                foreach ($entries as [$bucketsKey, $ownerKey, $windowCostField]) {
+                    $pipe->evalsha($sha, 2, $bucketsKey, $ownerKey, $oldestBucket, $windowCostField);
+                }
+            });
+        } catch (\Throwable $exception) {
+            if (!str_contains(strtoupper($exception->getMessage()), 'NOSCRIPT')) {
+                throw $exception;
+            }
+
+            // the script cache was flushed between the load and the pipeline
+            // (e.g. server restart): refresh() re-runs each entry with its own
+            // EVAL fallback; refreshes are idempotent recomputations, so
+            // repeating entries that already ran in the pipeline is harmless
+            foreach ($entries as [$bucketsKey, $ownerKey, $windowCostField]) {
+                $this->refresh($bucketsKey, $ownerKey, $windowCostField, $window, $bucket);
+            }
+        }
+    }
+
+    /**
      * SORT an index by an owner-hash field and return a list of
      * ['name' => string, 'weight' => float] ascending by weight, stripping
      * $prefix from each member. A missing field is treated as 0.

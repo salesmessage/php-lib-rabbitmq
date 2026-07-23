@@ -428,9 +428,10 @@ groups:
   distributes worker capacity by time rather than by message count, preventing one
   large workload from monopolizing the workers.
 
-> `lib-rabbitmq:scan-vhosts` needs no scheduler setting: it maintains the sliding-window
-> decay for any vhost that has recorded processing time, and is a cheap no-op for the
-> rest. So the scanner can never fall out of sync with a group's `scheduler_strategy`.
+> `lib-rabbitmq:scan-vhosts` needs no scheduler flag: it reads each group's
+> `scheduler_strategy` from the groups file it already loads and maintains the
+> sliding-window decay for the `processing_time` groups only. Like any other groups
+> change, flipping a group's `scheduler_strategy` requires a scanner restart.
 
 `processing_time` tuning options (config `queue.drivers.rabbitmq_vhosts.scheduler.strategies.processing_time`):
 
@@ -448,10 +449,11 @@ Notes for `processing_time`:
   key. Integer math keeps provisional reconciliation exact. Idle vhosts decay
   towards zero as their buckets fall out of the window.
 - The `lib-rabbitmq:scan-vhosts` command refreshes this decay for indexed vhosts
-  (unconditionally, no flag needed), so it should be running for idle vhosts to
-  become eligible again promptly.
-- Fairness is applied at the vhost level; queue ordering within a vhost stays
-  recency-based.
+  of the `processing_time` groups (no flag needed), so it should be running for
+  idle vhosts to become eligible again promptly.
+- Fairness is applied at both levels: every job's processing time is accounted
+  against its vhost and its queue, and queues within a vhost are ordered by their
+  own window cost - so one busy queue does not starve the rest of its vhost.
 - Anti-stampede (when many workers start at once): vhosts with equal cost are
   shuffled so workers do not all begin on the same vhost, and picking a vhost
   charges it a provisional `reservation_estimate` cost immediately. The
@@ -502,9 +504,10 @@ job took 1200 ms      → record():  HINCRBY current bucket  (1200 - 5000)
 ```
 
 Switching modes only requires changing a group's `scheduler_strategy` in
-`rabbit-groups.yml` and restarting that group's workers; the scanner needs no change.
-Switching back is safe - the extra Redis keys created by `processing_time` are
-TTL-bounded and expire on their own.
+`rabbit-groups.yml` and restarting that group's workers and the scanner (which
+picks the strategy up from the same file at startup). Switching back is safe -
+the extra Redis keys created by `processing_time` are TTL-bounded and expire on
+their own.
 
 ### Optional Queue Config
 

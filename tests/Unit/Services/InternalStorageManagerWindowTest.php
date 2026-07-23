@@ -97,6 +97,47 @@ class InternalStorageManagerWindowTest extends RedisBackedTestCase
         $this->assertSame('1500', reset($buckets));
     }
 
+    public function testBatchedRefreshWindowCostsCoversEveryGroup(): void
+    {
+        $this->indexVhost('v1', ['g1', 'g2']);
+
+        $currentBucket = intdiv(time(), 60);
+        $expiredBucket = $currentBucket - 100;
+
+        $this->redis->hincrby($this->bucketsKey('g1', 'v1'), (string) $currentBucket, 2000);
+        $this->redis->hincrby($this->bucketsKey('g1', 'v1'), (string) $expiredBucket, 5000);
+        $this->redis->hincrby($this->bucketsKey('g2', 'v1'), (string) $expiredBucket, 7000);
+
+        $this->storage->refreshWindowCosts(['g1', 'g2'], 'v1', 600, 60);
+
+        $this->assertSame('2000', $this->windowCost('v1', 'g1'));
+        $this->assertNull($this->windowCost('v1', 'g2'));
+    }
+
+    public function testBatchedRefreshQueueWindowCostsCoversEveryGroupAndQueue(): void
+    {
+        $this->indexVhost('v1', ['g1', 'g2']);
+        $this->indexQueue('v1', 'q1', ['g1', 'g2']);
+        $this->indexQueue('v1', 'q2', ['g1', 'g2']);
+
+        $this->storage->recordQueueProcessingTime('g1', 'v1', 'q1', 3000, 600, 60);
+        $this->storage->recordQueueProcessingTime('g2', 'v1', 'q2', 4000, 600, 60);
+
+        $expiredBucket = intdiv(time(), 60) - 100;
+        $this->redis->hincrby(
+            sprintf('rabbitmq_proc_buckets|%s|%s|%s', 'g2', 'v1', 'q2'),
+            (string) $expiredBucket,
+            6000
+        );
+
+        $this->storage->refreshQueueWindowCosts(['g1', 'g2'], 'v1', ['q1', 'q2'], 600, 60);
+
+        $this->assertSame('3000', $this->queueWindowCost('v1', 'q1', 'g1'));
+        $this->assertSame('4000', $this->queueWindowCost('v1', 'q2', 'g2'));
+        $this->assertNull($this->queueWindowCost('v1', 'q2', 'g1'));
+        $this->assertNull($this->queueWindowCost('v1', 'q1', 'g2'));
+    }
+
     public function testGetVhostsWithWeightsReturnsAscendingCostOrder(): void
     {
         $this->indexVhost('v1', ['g']);
