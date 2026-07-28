@@ -10,6 +10,8 @@ use Salesmessage\LibRabbitMQ\Services\GroupsService;
 use Salesmessage\LibRabbitMQ\Services\QueueService;
 use Salesmessage\LibRabbitMQ\Services\VhostsService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\ProcessingTimeSchedulerOptions;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\VhostSchedulerFactory;
 use Generator;
 
 class ScanVhostsCommand extends Command
@@ -29,7 +31,9 @@ class ScanVhostsCommand extends Command
     protected $description = 'Scan and index vhosts';
 
     private array $groups;
+    private array $processingTimeGroups = [];
     private bool $silent = false;
+    private ?ProcessingTimeSchedulerOptions $schedulerOptions = null;
 
     /**
      * @param GroupsService $groupsService
@@ -60,6 +64,19 @@ class ScanVhostsCommand extends Command
         }
 
         $this->groups = $groups;
+
+        // window-cost decay only applies to groups scheduled on processing time;
+        // groups on last_processed never record any, so refreshing them is dead work
+        $this->processingTimeGroups = array_values(array_filter(
+            $groups,
+            fn (string $groupName): bool => VhostSchedulerFactory::STRATEGY_PROCESSING_TIME === (string) (
+                $this->groupsService->getGroupConfig($groupName)['scheduler_strategy'] ?? ''
+            )
+        ));
+
+        $this->schedulerOptions = ProcessingTimeSchedulerOptions::fromConfig(
+            (array) config('queue.drivers.rabbitmq_vhosts.scheduler.strategies.processing_time', [])
+        );
 
         $this->vhostsService->setConnection($connectionName);
         $this->queueService->setConnection($connectionName);
@@ -195,15 +212,26 @@ class ScanVhostsCommand extends Command
             $vhostDto->getMessagesUnacknowledged()
         ));
 
+        if ($isAddedToIndex) {
+            $this->refreshWindowCosts($vhostDto->getName());
+        }
+
         $vhostQueues = $isAddedToIndex ? $this->queueService->getAllVhostQueues($vhostDto) : null;
 
         $oldVhostQueues = $this->internalStorageManager->getVhostQueues($vhostDto->getName());
 
+        $indexedQueueNames = [];
+
         if ($vhostQueues && $vhostQueues->isNotEmpty()) {
             foreach ($vhostQueues as $queueApiData) {
-                $processQueueDto = $this->processVhostQueue($queueApiData);
-                if (null === $processQueueDto) {
+                $processedQueue = $this->processVhostQueue($queueApiData);
+                if (null === $processedQueue) {
                     continue;
+                }
+
+                [$processQueueDto, $isQueueAddedToIndex] = $processedQueue;
+                if ($isQueueAddedToIndex) {
+                    $indexedQueueNames[] = $processQueueDto->getName();
                 }
 
                 $oldVhostQueueIndex = array_search($processQueueDto->getName(), $oldVhostQueues, true);
@@ -220,7 +248,62 @@ class ScanVhostsCommand extends Command
 
         $this->removeOldVhostQueues($vhostDto, $oldVhostQueues);
 
+        if ($isAddedToIndex) {
+            $this->refreshQueueWindowCosts($vhostDto->getName(), $indexedQueueNames);
+        }
+
         return true;
+    }
+
+    /**
+     * Recompute the sliding-window processing cost for a vhost so idle vhosts
+     * decay towards zero even while no worker is recording time. Only groups
+     * scheduled on processing_time are refreshed: the strategy comes from the
+     * same groups file the scanner already loads at startup, so - like any other
+     * groups change - flipping a group's scheduler_strategy requires a scanner
+     * restart to take effect.
+     *
+     * @param string $vhostName
+     * @return void
+     */
+    private function refreshWindowCosts(string $vhostName): void
+    {
+        if (empty($this->processingTimeGroups)) {
+            return;
+        }
+
+        $this->internalStorageManager->refreshWindowCosts(
+            $this->processingTimeGroups,
+            $vhostName,
+            $this->schedulerOptions->getWindow(),
+            $this->schedulerOptions->getBucket()
+        );
+    }
+
+    /**
+     * Queue-level counterpart of refreshWindowCosts(): decay each indexed queue's
+     * window cost for the processing_time groups so queues that are not being
+     * processed slide back toward zero, keeping queue ordering fair. The queue
+     * names come from the scan pass itself, so no extra index read is needed,
+     * and all refreshes go out as a single pipelined round trip.
+     *
+     * @param string $vhostName
+     * @param array $queueNames
+     * @return void
+     */
+    private function refreshQueueWindowCosts(string $vhostName, array $queueNames): void
+    {
+        if (empty($queueNames) || empty($this->processingTimeGroups)) {
+            return;
+        }
+
+        $this->internalStorageManager->refreshQueueWindowCosts(
+            $this->processingTimeGroups,
+            $vhostName,
+            $queueNames,
+            $this->schedulerOptions->getWindow(),
+            $this->schedulerOptions->getBucket()
+        );
     }
 
     private function formatBytes(int $bytes): string
@@ -254,9 +337,9 @@ class ScanVhostsCommand extends Command
 
     /**
      * @param array $queueApiData
-     * @return void
+     * @return array{0: QueueApiDto, 1: bool}|null the processed queue and whether it was added to the index
      */
-    private function processVhostQueue(array $queueApiData): ?QueueApiDto
+    private function processVhostQueue(array $queueApiData): ?array
     {
         $queueApiDto = new QueueApiDto($queueApiData);
         if ('' === $queueApiDto->getName()) {
@@ -274,7 +357,7 @@ class ScanVhostsCommand extends Command
             $queueApiDto->getMessagesUnacknowledged()
         ));
 
-        return $queueApiDto;
+        return [$queueApiDto, $isAddedToIndex];
     }
 
     /**

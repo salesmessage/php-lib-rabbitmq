@@ -39,6 +39,8 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
 
         $this->app->bind(LockProvider::class, RedisStore::class);
 
+        $this->app->singleton(InternalStorageManager::class);
+
         if ($this->app->runningInConsole()) {
             $this->bindDeduplicationService();
 

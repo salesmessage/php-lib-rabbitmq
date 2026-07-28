@@ -11,6 +11,14 @@
     <env name="PORT_SSL" value="5671"/>
     <env name="RABBITMQ_SSL_CAFILE" value="./tests/files/rootCA.pem"/>
     <env name="APP_KEY" value="12345678901234567890123456789012"/>
+
+    <!-- Scheduler/storage tests run on an in-memory Redis fake by default.
+         Set USE_REAL_REDIS to 1 (e.g. in a local git-ignored phpunit.xml) to run them
+         against a live Redis: keys are prefixed with sm_test_rabbitmq_lib_ and purged
+         before/after each test. CLI overrides win, e.g.: USE_REAL_REDIS=1 vendor/bin/phpunit -->
+    <env name="USE_REAL_REDIS" value="0"/>
+    <env name="TEST_REDIS_HOST" value="127.0.0.1"/>
+    <env name="TEST_REDIS_PORT" value="6379"/>
   </php>
   <logging/>
 </phpunit>

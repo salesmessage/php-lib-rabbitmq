@@ -18,7 +18,7 @@ Only the latest version will get new features. Bug fixes will be provided using 
 You can install this package via composer using this command:
 
 ```
-composer require salesmessage/php-lib-rabbitmq:^1.67 --ignore-platform-reqs
+composer require salesmessage/php-lib-rabbitmq:^1.68 --ignore-platform-reqs
 ```
 
 The package will automatically register itself.
@@ -45,6 +45,8 @@ groups:
     queues_mask: test
     batch_size: 100
     prefetch_count: 100
+    # vhost scheduler for this group: last_processed (default) | processing_time
+    scheduler_strategy: last_processed
   test-group-2:
     vhosts:
       - organization_20
@@ -352,6 +354,20 @@ Add connection to `config/queue.php`:
    'rabbitmq_vhosts' => [
         'consumer_type' => env('RABBITMQ_VHOSTS_CONSUMER_TYPE', 'direct'),
         /**
+         * Vhost scheduler tuning options. The scheduler TYPE is set per group in
+         * rabbit-groups.yml via scheduler_strategy, not here. See "Vhost Scheduler" below.
+         */
+        'scheduler' => [
+            'strategies' => [
+                'processing_time' => [
+                    'window' => env('RABBITMQ_VHOSTS_SCHEDULER_WINDOW', 300), // seconds
+                    'bucket' => env('RABBITMQ_VHOSTS_SCHEDULER_BUCKET', 30),  // seconds
+                    'reservation_estimate' => env('RABBITMQ_VHOSTS_SCHEDULER_RESERVATION_ESTIMATE', 3), // seconds
+                    'accrual_interval' => env('RABBITMQ_VHOSTS_SCHEDULER_ACCRUAL_INTERVAL', 7), // seconds
+                ],
+            ],
+        ],
+        /**
          * Provided on 2 levels: transport and application.
          */
         'deduplication' => [
@@ -383,6 +399,115 @@ Add connection to `config/queue.php`:
 ],
 ```
 
+
+### Vhost Scheduler
+
+When a group is consumed across many vhosts, the scheduler decides which vhost a
+worker picks next. The mode is set **per group** in `rabbit-groups.yml` via
+`scheduler_strategy` (so different groups can run different modes), while the tuning
+options live in the driver config. Everything is tracked per `(group, vhost)` so a
+vhost shared by several groups is scheduled independently in each.
+
+```yaml
+# rabbit-groups.yml
+groups:
+  my-group:
+    vhosts_mask: organization
+    queues:
+      - my-queue
+    scheduler_strategy: processing_time   # omit for the default (last_processed)
+```
+
+- `last_processed` (default) - recency-based round-robin. The next vhost is
+  the one whose last processing happened longest ago. Distributes worker turns by
+  count, so a vhost with a huge workload is only pushed back one slot per turn and
+  can dominate the workers.
+
+- `processing_time` - time-based fair round-robin. The next vhost is the one that
+  consumed the least *processing time* for the group within a sliding window. This
+  distributes worker capacity by time rather than by message count, preventing one
+  large workload from monopolizing the workers.
+
+> `lib-rabbitmq:scan-vhosts` needs no scheduler flag: it reads each group's
+> `scheduler_strategy` from the groups file it already loads and maintains the
+> sliding-window decay for the `processing_time` groups only. Like any other groups
+> change, flipping a group's `scheduler_strategy` requires a scanner restart.
+
+`processing_time` tuning options (config `queue.drivers.rabbitmq_vhosts.scheduler.strategies.processing_time`):
+
+| Option | Env | Default | Meaning |
+|--------|-----|---------|---------|
+| `window` | `RABBITMQ_VHOSTS_SCHEDULER_WINDOW` | `300` | How far back (seconds) fairness looks. |
+| `bucket` | `RABBITMQ_VHOSTS_SCHEDULER_BUCKET` | `30` | Resolution (seconds) of the window; keep `bucket <= window / 5`. |
+| `reservation_estimate` | `RABBITMQ_VHOSTS_SCHEDULER_RESERVATION_ESTIMATE` | `3` | Provisional cost (seconds) charged on pick to spread simultaneous workers; `0` disables. |
+| `accrual_interval` | `RABBITMQ_VHOSTS_SCHEDULER_ACCRUAL_INTERVAL` | `7` | How often (seconds) an async worker flushes an in-flight job's elapsed time into the ordering. Async (Swoole) mode only. |
+
+Notes for `processing_time`:
+
+- Processing time is accumulated as integer milliseconds into per-bucket counters
+  in Redis and summed over the window; the resulting cost is used as the ordering
+  key. Integer math keeps provisional reconciliation exact. Idle vhosts decay
+  towards zero as their buckets fall out of the window.
+- The `lib-rabbitmq:scan-vhosts` command refreshes this decay for indexed vhosts
+  of the `processing_time` groups (no flag needed), so it should be running for
+  idle vhosts to become eligible again promptly.
+- Fairness is applied at both levels: every job's processing time is accounted
+  against its vhost and its queue, and queues within a vhost are ordered by their
+  own window cost - so one busy queue does not starve the rest of its vhost.
+- Anti-stampede (when many workers start at once): vhosts with equal cost are
+  shuffled so workers do not all begin on the same vhost, and picking a vhost
+  charges it a provisional `reservation_estimate` cost immediately. The
+  provisional is reconciled exactly once real time is recorded, refunded when
+  the worker leaves without doing any work (empty queue), and self-heals via
+  bucket expiry if a worker dies mid-batch. If a single job can run much longer
+  than the estimate and workers still pile onto its vhost, raise
+  `reservation_estimate`.
+
+#### How processing time is tracked
+
+Time is accumulated into fixed **time buckets** (integer milliseconds). A vhost's
+cost is the sum of the buckets still inside the window; as `now` advances the oldest
+buckets fall out - that is the "slide". Everything is keyed by `(group, vhost)`.
+
+```
+group=billing  vhost=organization_5   bucket=30s   window=300s (10 buckets)
+
+Redis hash  rabbitmq_proc_buckets|billing|organization_5
+  bucketId :  B-10   B-9   B-8   B-7   B-6   B-5   B-4   B-3   B-2   B-1    B
+  ms       : [ 900 ][  0 ][ 300][2000][  0 ][ 120][ 800][  0 ][ 450][1500][ 200]
+              └──┬─┘ └───────────────────────────┬───────────────────────────┘
+           dropped next slide          window = last 10 buckets           ▲
+           (bucketId < now-window                                    current bucket
+            → HDEL, not counted)                                   (writes land here)
+
+  window_cost:billing  =  0+300+2000+0+120+800+0+450+1500+200  =  5370 ms
+                          └── materialized onto rabbitmq_vhost|organization_5,
+                              the field that SORT ... BY *->window_cost:billing reads ──┘
+```
+
+Write path - `record(X ms)` after a job/batch:
+
+```
+bucketId = floor(now / bucket)
+HINCRBY rabbitmq_proc_buckets|billing|organization_5  <bucketId>  X   # add to current bucket
+EXPIRE  rabbitmq_proc_buckets|billing|organization_5  window+bucket   # self-expire when idle
+# recompute window_cost = sum(buckets with bucketId >= floor((now-window)/bucket)),
+# HDEL the older ones, clamp at 0, HSET onto the vhost hash
+```
+
+Reserve / record with the provisional estimate (spreads simultaneous workers):
+
+```
+pick organization_5   → reserve(): HINCRBY current bucket  +5000   (estimate; vhost now looks busy)
+job took 1200 ms      → record():  HINCRBY current bucket  (1200 - 5000)
+                                   net left in the bucket = exactly 1200 ms
+```
+
+Switching modes only requires changing a group's `scheduler_strategy` in
+`rabbit-groups.yml` and restarting that group's workers and the scanner (which
+picks the strategy up from the same file at startup). Switching back is safe -
+the extra Redis keys created by `processing_time` are TTL-bounded and expire on
+their own.
 
 ### Optional Queue Config
 
@@ -1015,6 +1140,17 @@ composer test:style
 
 # To run only unit tests.
 composer test:unit
+```
+
+Scheduler and storage tests run against an in-memory Redis fake by default.
+To run the same tests against a live Redis instead:
+
+```bash
+# keys are prefixed with sm_test_rabbitmq_lib_ and purged before/after each test
+USE_REAL_REDIS=1 vendor/bin/phpunit tests/Unit
+
+# non-default host/port
+USE_REAL_REDIS=1 TEST_REDIS_HOST=127.0.0.1 TEST_REDIS_PORT=6379 vendor/bin/phpunit tests/Unit
 ```
 
 If you receive any errors from the style tests, you can automatically fix most,
