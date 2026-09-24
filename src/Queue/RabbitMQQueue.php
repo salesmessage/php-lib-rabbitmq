@@ -550,8 +550,6 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
                 throw $exception;
             }
         }
-
-        $this->queues[] = $name;
     }
 
     /**
