@@ -38,6 +38,7 @@ class ConfigFactory
             self::getHostFromConfig($connectionConfig, $config);
             self::getHeartbeatFromConfig($connectionConfig, $config);
             self::getNetworkProtocolFromConfig($connectionConfig, $config);
+            self::getConnectionNameFromConfig($connectionConfig, $config);
         });
     }
 
@@ -97,6 +98,13 @@ class ConfigFactory
     {
         if ($networkProtocol = Arr::get($config, 'network_protocol')) {
             $connectionConfig->setNetworkProtocol($networkProtocol);
+        }
+    }
+
+    protected static function getConnectionNameFromConfig(AMQPConnectionConfig $connectionConfig, array $config): void
+    {
+        if ($connectionName = Arr::get($config, 'connection_name')) {
+            $connectionConfig->setConnectionName($connectionName);
         }
     }
 }
