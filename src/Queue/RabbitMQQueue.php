@@ -222,10 +222,8 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
 
         $destination = $this->getQueue($queue) . '.delay.' . $ttl;
 
-        $this->declareQueue(
+        $this->declareDelayQueue(
             $destination,
-            true,
-            false,
             $this->getDelayQueueArguments($this->getQueue($queue), $ttl, $queueType)
         );
 
@@ -538,6 +536,41 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
             false,
             new AMQPTable($arguments)
         );
+    }
+
+    /**
+     * Declare a delay queue, always redeclaring (never cached like
+     * declareQueue()) so RabbitMQ's x-expires timer keeps getting
+     * refreshed -- a long-lived consumer that goes idle past the queue's
+     * expiry must still be able to recreate it on the next delayed
+     * dispatch, instead of silently publishing into a queue that no
+     * longer exists.
+     *
+     * Also tolerates a 406 PRECONDITION_FAILED reply: an old and a new pod
+     * can declare the same delay queue with different arguments (e.g. a
+     * changed x-expires) while a rolling deploy overlaps. The queue
+     * already exists and is still usable, so the mismatch is not fatal --
+     * throwing here would drop the message being published right after.
+     *
+     * @throws AMQPProtocolChannelException
+     */
+    protected function declareDelayQueue(string $name, array $arguments): void
+    {
+        // A dedicated, throwaway channel, so the main channel used for
+        // publishing is not closed by the broker on a protocol exception.
+        $channel = $this->createChannel();
+
+        try {
+            $channel->queue_declare($name, false, true, false, false, false, new AMQPTable($arguments));
+        } catch (AMQPProtocolChannelException $exception) {
+            if (406 !== $exception->amqp_reply_code) {
+                throw $exception;
+            }
+
+            return;
+        }
+
+        $channel->close();
     }
 
     /**
