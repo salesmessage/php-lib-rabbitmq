@@ -31,6 +31,11 @@ use Throwable;
 class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContract
 {
     /**
+     * Minimum lifetime (in milliseconds) of an auto-declared delay queue, regardless of the message TTL.
+     */
+    private const MIN_DELAY_QUEUE_EXPIRES_MS = 5 * 60 * 1000;
+
+    /**
      * The RabbitMQ connection instance.
      */
     protected ?AbstractConnection $connection = null;
@@ -192,7 +197,7 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         bool $confirm = false
     ): int|string|null
     {
-        $requestedTtl = $this->secondsUntil($delay) * 1000;
+        $ttl = $this->secondsUntil($delay) * 1000;
         if (null === $queueType) {
             $queueType = RabbitMQConsumable::MQ_TYPE_QUORUM;
         }
@@ -204,7 +209,7 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         ];
 
         // When no ttl just publish a new message to the exchange or queue
-        if ($requestedTtl <= 0) {
+        if ($ttl <= 0) {
             $options['queue_type'] = $queueType;
             $options['confirm'] = $confirm;
 
@@ -215,13 +220,11 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         [$mainDestination, $exchange, $exchangeType, $attempts] = $this->publishProperties($queue, $options);
         $this->declareDestination($mainDestination, $exchange, $exchangeType, $queueType);
 
-        // Delays are rounded up to a fixed bucket so the set of delay queues stays bounded.
-        $ttl = DelayBuckets::roundUpMs($requestedTtl);
-        $destination = $this->getQueue($queue) . '.delay-bucket.' . $ttl;
+        $destination = $this->getQueue($queue) . '.delay.' . $ttl;
 
         $this->declareDelayQueue(
             $destination,
-            $this->getDelayQueueArguments($this->getQueue($queue), $ttl)
+            $this->getDelayQueueArguments($this->getQueue($queue), $ttl, $queueType)
         );
 
         [$message, $correlationId] = $this->createMessage($payload, $attempts);
@@ -537,15 +540,17 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
 
     /**
      * Declare a delay queue, always redeclaring (never cached like
-     * declareQueue()) so it is recreated if it was removed externally
-     * (e.g. by a cleanup script). Delay queues are permanent (no x-expires):
-     * they are bounded by DelayBuckets, so there is no create/delete churn.
+     * declareQueue()) so RabbitMQ's x-expires timer keeps getting
+     * refreshed -- a long-lived consumer that goes idle past the queue's
+     * expiry must still be able to recreate it on the next delayed
+     * dispatch, instead of silently publishing into a queue that no
+     * longer exists.
      *
-     * Also tolerates a 406 PRECONDITION_FAILED reply: two pods can declare
-     * the same delay queue with different arguments while a rolling deploy
-     * overlaps. The queue already exists and is still usable, so the
-     * mismatch is not fatal -- throwing here would drop the message being
-     * published right after.
+     * Also tolerates a 406 PRECONDITION_FAILED reply: an old and a new pod
+     * can declare the same delay queue with different arguments (e.g. a
+     * changed x-expires) while a rolling deploy overlaps. The queue
+     * already exists and is still usable, so the mismatch is not fatal --
+     * throwing here would drop the message being published right after.
      *
      * @throws AMQPProtocolChannelException
      */
@@ -758,22 +763,28 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     /**
      * Get the Delay queue arguments.
      *
-     * Delay queues are classic, not quorum: they are empty-by-design TTL buffers that dead-letter back
-     * into the main queue, so they need no Raft replication, and quorum queues are not meant for
-     * high-churn/transient use (see SO-23861). The type is explicit because vhosts default to quorum.
-     *
      * @param string $destination
      * @param int $ttl
+     * @param string|null $queueType
      * @return array
      */
-    protected function getDelayQueueArguments(string $destination, int $ttl): array
+    protected function getDelayQueueArguments(
+        string $destination,
+        int $ttl,
+        ?string $queueType = null
+    ): array
     {
-        return [
+        $arguments = [
             'x-dead-letter-exchange' => $this->getExchange(),
             'x-dead-letter-routing-key' => $this->getRoutingKey($destination),
             'x-message-ttl' => $ttl,
-            'x-queue-type' => RabbitMQConsumable::MQ_TYPE_CLASSIC,
+            'x-expires' => max(self::MIN_DELAY_QUEUE_EXPIRES_MS, $ttl * 2),
         ];
+        if (null !== $queueType) {
+            $arguments['x-queue-type'] = $queueType;
+        }
+
+        return $arguments;
     }
 
     /**
