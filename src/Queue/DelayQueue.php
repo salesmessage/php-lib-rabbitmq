@@ -19,7 +19,7 @@ final class DelayQueue
      */
     public static function name(int $ttlMs): string
     {
-        return 'delay.' . $ttlMs;
+        return 'delay.'.$ttlMs;
     }
 
     /**
