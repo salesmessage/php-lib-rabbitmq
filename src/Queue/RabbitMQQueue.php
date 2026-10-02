@@ -31,11 +31,6 @@ use Throwable;
 class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContract
 {
     /**
-     * Minimum lifetime (in milliseconds) of an auto-declared delay queue, regardless of the message TTL.
-     */
-    private const MIN_DELAY_QUEUE_EXPIRES_MS = 5 * 60 * 1000;
-
-    /**
      * The RabbitMQ connection instance.
      */
     protected ?AbstractConnection $connection = null;
@@ -220,17 +215,22 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         [$mainDestination, $exchange, $exchangeType, $attempts] = $this->publishProperties($queue, $options);
         $this->declareDestination($mainDestination, $exchange, $exchangeType, $queueType);
 
-        $destination = $this->getQueue($queue) . '.delay.' . $ttl;
+        // One shared delay queue per TTL in the vhost, for every destination queue.
+        $delayName = DelayQueue::name($ttl);
 
-        $this->declareDelayQueue(
-            $destination,
-            $this->getDelayQueueArguments($this->getQueue($queue), $ttl, $queueType)
-        );
+        $this->declareDelayQueue($delayName, $this->getDelayQueueArguments($ttl));
 
         [$message, $correlationId] = $this->createMessage($payload, $attempts);
 
-        // Publish directly on the delayQueue, no need to publish through an exchange.
-        $this->publishBasic($message, null, $destination, true, confirm: $confirm);
+        // Publish through the delay exchange with the destination routing key: the delay queue has no
+        // x-dead-letter-routing-key, so the message is dead-lettered to the destination it was published for.
+        $this->publishBasic(
+            $message,
+            $delayName,
+            $this->getRoutingKey($this->getQueue($queue)),
+            true,
+            confirm: $confirm
+        );
 
         return $correlationId;
     }
@@ -539,35 +539,41 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     }
 
     /**
-     * Declare a delay queue, always redeclaring (never cached like
-     * declareQueue()) so RabbitMQ's x-expires timer keeps getting
-     * refreshed -- a long-lived consumer that goes idle past the queue's
-     * expiry must still be able to recreate it on the next delayed
-     * dispatch, instead of silently publishing into a queue that no
-     * longer exists.
+     * Declare a shared delay queue with its fanout exchange and the binding between them, always
+     * redeclaring (never cached like declareQueue()): the queue is permanent, but it can still be
+     * removed externally (cleanup commands, vhost removal), and a long-lived consumer must be able
+     * to recreate it on the next delayed dispatch instead of publishing into a missing queue.
      *
-     * Also tolerates a 406 PRECONDITION_FAILED reply: an old and a new pod
-     * can declare the same delay queue with different arguments (e.g. a
-     * changed x-expires) while a rolling deploy overlaps. The queue
-     * already exists and is still usable, so the mismatch is not fatal --
-     * throwing here would drop the message being published right after.
+     * Also tolerates a 406 PRECONDITION_FAILED reply: two pods can declare the same delay queue with
+     * different arguments while a rolling deploy overlaps. The queue already exists and is still
+     * usable, so the mismatch is not fatal -- throwing here would drop the message being published
+     * right after.
      *
      * @throws AMQPProtocolChannelException
      */
     protected function declareDelayQueue(string $name, array $arguments): void
     {
+        $steps = [
+            fn (AMQPChannel $channel) => $channel->exchange_declare($name, AMQPExchangeType::FANOUT, false, true, false),
+            fn (AMQPChannel $channel) => $channel->queue_declare($name, false, true, false, false, false, new AMQPTable($arguments)),
+            fn (AMQPChannel $channel) => $channel->queue_bind($name, $name),
+        ];
+
         // A dedicated, throwaway channel, so the main channel used for
         // publishing is not closed by the broker on a protocol exception.
         $channel = $this->createChannel();
 
-        try {
-            $channel->queue_declare($name, false, true, false, false, false, new AMQPTable($arguments));
-        } catch (AMQPProtocolChannelException $exception) {
-            if (406 !== $exception->amqp_reply_code) {
-                throw $exception;
-            }
+        foreach ($steps as $step) {
+            try {
+                $step($channel);
+            } catch (AMQPProtocolChannelException $exception) {
+                if (406 !== $exception->amqp_reply_code) {
+                    throw $exception;
+                }
 
-            return;
+                // The broker closed the channel; the entity exists, so go on with the next step on a new one.
+                $channel = $this->createChannel();
+            }
         }
 
         $channel->close();
@@ -762,29 +768,10 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
 
     /**
      * Get the Delay queue arguments.
-     *
-     * @param string $destination
-     * @param int $ttl
-     * @param string|null $queueType
-     * @return array
      */
-    protected function getDelayQueueArguments(
-        string $destination,
-        int $ttl,
-        ?string $queueType = null
-    ): array
+    protected function getDelayQueueArguments(int $ttl): array
     {
-        $arguments = [
-            'x-dead-letter-exchange' => $this->getExchange(),
-            'x-dead-letter-routing-key' => $this->getRoutingKey($destination),
-            'x-message-ttl' => $ttl,
-            'x-expires' => max(self::MIN_DELAY_QUEUE_EXPIRES_MS, $ttl * 2),
-        ];
-        if (null !== $queueType) {
-            $arguments['x-queue-type'] = $queueType;
-        }
-
-        return $arguments;
+        return DelayQueue::arguments($ttl, $this->getExchange());
     }
 
     /**
