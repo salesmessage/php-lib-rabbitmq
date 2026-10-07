@@ -13,12 +13,14 @@ use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Connection\AMQPStreamConnection;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
 use PhpAmqpLib\Exception\AMQPConnectionClosedException;
+use PhpAmqpLib\Exception\AMQPProtocolChannelException;
 use PhpAmqpLib\Message\AMQPMessage;
 use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Consumer;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
 use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
+use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Exceptions\MutexTimeout;
 use Salesmessage\LibRabbitMQ\Interfaces\RabbitMQBatchable;
@@ -911,6 +913,31 @@ abstract class AbstractVhostsConsumer extends Consumer
         $options = (array) config('queue.drivers.rabbitmq_vhosts.scheduler.strategies.processing_time', []);
 
         return ProcessingTimeSchedulerOptions::fromConfig($options)->getAccrualInterval();
+    }
+
+    protected function isQueueNotFound(\Throwable $exception): bool
+    {
+        return ($exception instanceof AMQPProtocolChannelException) && (404 === $exception->amqp_reply_code);
+    }
+
+    protected function forgetCurrentQueue(): void
+    {
+        if ((null === $this->currentVhostName) || (null === $this->currentQueueName)) {
+            return;
+        }
+
+        $this->logInfo('forgetCurrentQueue.queue_not_found');
+
+        try {
+            $this->internalStorageManager->removeQueue(new QueueApiDto([
+                'name' => $this->currentQueueName,
+                'vhost' => $this->currentVhostName,
+            ]));
+        } catch (\Throwable $exception) {
+            $this->logWarning('forgetCurrentQueue.exception', [
+                'message' => $exception->getMessage(),
+            ]);
+        }
     }
 
     protected function initConnection(int $attempts = 0): ?RabbitMQQueue

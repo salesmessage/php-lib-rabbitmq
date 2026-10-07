@@ -6,6 +6,12 @@ use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
 
 class QueueConfig
 {
+    public const MAX_DELAY_MODE_LOG = 'log';
+
+    public const MAX_DELAY_MODE_THROW = 'throw';
+
+    public const MAX_DELAY_MODE_CLAMP = 'clamp';
+
     protected string $queue = 'default';
 
     protected bool $dispatchAfterCommit = false;
@@ -35,6 +41,10 @@ class QueueConfig
     protected string $quorumQueuePostfix = '';
 
     protected float $publisherConfirmTimeout = 5.0;
+
+    protected int $maxDelaySeconds = 86400;
+
+    protected string $maxDelayMode = self::MAX_DELAY_MODE_LOG;
 
     protected array $options = [];
 
@@ -296,6 +306,30 @@ class QueueConfig
     public function setPublisherConfirmTimeout(float $timeout): QueueConfig
     {
         $this->publisherConfirmTimeout = max($timeout, 1);
+
+        return $this;
+    }
+
+    public function getMaxDelaySeconds(): int
+    {
+        return $this->maxDelaySeconds;
+    }
+
+    public function setMaxDelaySeconds($maxDelaySeconds): QueueConfig
+    {
+        $this->maxDelaySeconds = (int) $maxDelaySeconds;
+
+        return $this;
+    }
+
+    public function getMaxDelayMode(): string
+    {
+        return $this->maxDelayMode;
+    }
+
+    public function setMaxDelayMode(string $maxDelayMode): QueueConfig
+    {
+        $this->maxDelayMode = $maxDelayMode;
 
         return $this;
     }

@@ -185,11 +185,15 @@ class QueueConsumer extends AbstractVhostsConsumer
         } catch (AMQPProtocolChannelException|AMQPChannelClosedException $exception) {
             $isSuccess = false;
 
-            $this->logError('startConsuming.exception', [
-                'message' => $exception->getMessage(),
-                'trace' => $exception->getTraceAsString(),
-                'error_class' => get_class($exception),
-            ]);
+            if ($this->isQueueNotFound($exception)) {
+                $this->forgetCurrentQueue();
+            } else {
+                $this->logError('startConsuming.exception', [
+                    'message' => $exception->getMessage(),
+                    'trace' => $exception->getTraceAsString(),
+                    'error_class' => get_class($exception),
+                ]);
+            }
         } finally {
             $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
         }
@@ -213,7 +217,9 @@ class QueueConsumer extends AbstractVhostsConsumer
                 return null;
             }
 
-            $this->stopConsuming();
+            if ($this->channel?->is_open()) {
+                $this->stopConsuming();
+            }
 
             return $this->startConsuming(++$attempts);
         }

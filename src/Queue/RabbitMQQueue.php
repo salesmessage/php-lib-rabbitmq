@@ -24,6 +24,7 @@ use PhpAmqpLib\Wire\AMQPTable;
 use Ramsey\Uuid\Uuid;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQQueueContract;
+use Salesmessage\LibRabbitMQ\Exceptions\DelayTooLongException;
 use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
 use RuntimeException;
 use Throwable;
@@ -50,11 +51,6 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
      * List of already declared exchanges.
      */
     protected array $exchanges = [];
-
-    /**
-     * List of already declared queues.
-     */
-    protected array $queues = [];
 
     /**
      * List of already bound queues to exchanges.
@@ -182,6 +178,7 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
 
     /**
      * @throws AMQPProtocolChannelException
+     * @throws DelayTooLongException
      */
     public function laterRaw(
         $delay,
@@ -210,6 +207,8 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
 
             return $this->pushRaw($payload, $queue, $options);
         }
+
+        $ttl = $this->guardMaxDelay($ttl, $payload, $queue);
 
         // Create a main queue to handle delayed messages
         [$mainDestination, $exchange, $exchangeType, $attempts] = $this->publishProperties($queue, $options);
@@ -492,17 +491,11 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     {
         $queueName = $this->getQueue($name);
 
-        if ($this->isQueueDeclared($queueName)) {
-            return true;
-        }
-
         try {
             // create a temporary channel, so the main channel will not be closed on exception
             $channel = $this->createChannel();
             $channel->queue_declare($queueName, true);
             $channel->close();
-
-            $this->queues[] = $queueName;
 
             return true;
         } catch (AMQPProtocolChannelException $exception) {
@@ -515,7 +508,7 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     }
 
     /**
-     * Declare a queue in rabbitMQ, when not already declared.
+     * @throws AMQPProtocolChannelException
      */
     public function declareQueue(
         string $name,
@@ -523,19 +516,27 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         bool $autoDelete = false,
         array $arguments = []
     ): void {
-        if ($this->isQueueDeclared($name)) {
+        $channel = $this->createChannel();
+
+        try {
+            $channel->queue_declare(
+                $name,
+                false,
+                $durable,
+                false,
+                $autoDelete,
+                false,
+                new AMQPTable($arguments)
+            );
+        } catch (AMQPProtocolChannelException $exception) {
+            if (406 !== $exception->amqp_reply_code) {
+                throw $exception;
+            }
+
             return;
         }
 
-        $this->getChannel()->queue_declare(
-            $name,
-            false,
-            $durable,
-            false,
-            $autoDelete,
-            false,
-            new AMQPTable($arguments)
-        );
+        $channel->close();
     }
 
     /**
@@ -590,9 +591,6 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         if (! $this->isQueueExists($name)) {
             return;
         }
-
-        $idx = array_search($name, $this->queues);
-        unset($this->queues[$idx]);
 
         $this->getChannel()->queue_delete($name, $if_unused, $if_empty);
     }
@@ -775,6 +773,46 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     }
 
     /**
+     * SWR-25568
+     *
+     * @return int the TTL in milliseconds to publish with
+     *
+     * @throws DelayTooLongException
+     */
+    protected function guardMaxDelay(int $ttl, string $payload, $queue = null): int
+    {
+        $maxDelaySeconds = $this->getRabbitMQConfig()->getMaxDelaySeconds();
+        if ($maxDelaySeconds <= 0 || $ttl <= $maxDelaySeconds * 1000) {
+            return $ttl;
+        }
+
+        $queue = $this->getQueue($queue);
+        $delaySeconds = intdiv($ttl, 1000);
+        $mode = $this->getRabbitMQConfig()->getMaxDelayMode();
+
+        if ($mode === QueueConfig::MAX_DELAY_MODE_THROW) {
+            throw DelayTooLongException::forQueue($queue, $delaySeconds, $maxDelaySeconds);
+        }
+
+        $context = [
+            'queue' => $queue,
+            'job' => json_decode($payload, true)['displayName'] ?? null,
+            'delay_seconds' => $delaySeconds,
+            'max_delay_seconds' => $maxDelaySeconds,
+        ];
+
+        if ($mode === QueueConfig::MAX_DELAY_MODE_CLAMP) {
+            logger()->warning('RabbitMQQueue.laterRaw.delayClamped', $context);
+
+            return $maxDelaySeconds * 1000;
+        }
+
+        logger()->error('RabbitMQQueue.laterRaw.delayTooLong', $context);
+
+        return $ttl;
+    }
+
+    /**
      * Get the exchange name, or empty string; as default value.
      */
     protected function getExchange(?string $exchange = null): string
@@ -827,14 +865,6 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     }
 
     /**
-     * Checks if the queue was already declared.
-     */
-    protected function isQueueDeclared(string $name): bool
-    {
-        return in_array($name, $this->queues, true);
-    }
-
-    /**
      * Declare the destination when necessary.
      *
      * @throws AMQPProtocolChannelException
@@ -852,11 +882,6 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
 
         // When an exchange is provided, just return.
         if ($exchange) {
-            return;
-        }
-
-        // When the queue already exists, just return.
-        if ($this->isQueueExists($destination)) {
             return;
         }
 

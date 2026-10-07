@@ -4,6 +4,7 @@ namespace Salesmessage\LibRabbitMQ\Services;
 
 use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Services\Api\RabbitApiClient;
+use Salesmessage\LibRabbitMQ\Services\QueueExpiry\QueueExpiryPolicyService;
 use Throwable;
 
 class VhostsService
@@ -16,10 +17,12 @@ class VhostsService
     /**
      * @param RabbitApiClient $rabbitApiClient
      * @param LoggerInterface $logger
+     * @param QueueExpiryPolicyService $queueExpiryPolicyService
      */
     public function __construct(
         private RabbitApiClient $rabbitApiClient,
-        private LoggerInterface $logger
+        private LoggerInterface $logger,
+        private QueueExpiryPolicyService $queueExpiryPolicyService
     )
     {
         $this->setConnection($this->connectionName);
@@ -35,25 +38,34 @@ class VhostsService
 
         $connectionConfig = (array) config('queue.connections.' . $this->connectionName, []);
         $this->rabbitApiClient->setConnectionConfig($connectionConfig);
+        $this->queueExpiryPolicyService->setConnection($this->connectionName);
 
         return $this;
     }
 
     /**
      * @param int $fromPage
+     * @param string $columns
+     * @param bool $disableStats
      * @return \Generator
      * @throws \Salesmessage\LibRabbitMQ\Exceptions\RabbitApiClientException
      */
-    public function getAllVhosts(int $fromPage = 1): \Generator
-    {
+    public function getAllVhosts(
+        int $fromPage = 1,
+        string $columns = 'name,messages,messages_ready,messages_unacknowledged',
+        bool $disableStats = false
+    ): \Generator {
         $isSupportPagination = false === $this->rabbitApiClient->isVersionCorrespond(4);
 
         while (true) {
             $queryParams = [
-                'columns' => 'name,messages,messages_ready,messages_unacknowledged',
+                'columns' => $columns,
                 'sort' => 'name',
                 'sort_reverse' => 'false',
             ];
+            if ($disableStats) {
+                $queryParams['disable_stats'] = 'true';
+            }
             if ($isSupportPagination) {
                 $queryParams['page'] = $fromPage;
                 $queryParams['page_size'] = 500;
@@ -176,7 +188,13 @@ class VhostsService
             return false;
         }
 
-        return $this->setVhostPermissions($vhostName);
+        if (false === $this->setVhostPermissions($vhostName)) {
+            return false;
+        }
+
+        $this->queueExpiryPolicyService->applyIfEnabled($vhostName);
+
+        return true;
     }
 
     /**

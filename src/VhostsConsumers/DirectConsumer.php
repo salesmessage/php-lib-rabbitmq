@@ -45,11 +45,15 @@ class DirectConsumer extends AbstractVhostsConsumer
             } catch (AMQPProtocolChannelException|AMQPChannelClosedException $exception) {
                 $amqpMessage = null;
 
-                $this->logError('daemon.channel_exception', [
-                    'message' => $exception->getMessage(),
-                    'trace' => $exception->getTraceAsString(),
-                    'error_class' => get_class($exception),
-                ]);
+                if ($this->isQueueNotFound($exception)) {
+                    $this->forgetCurrentQueue();
+                } else {
+                    $this->logError('daemon.channel_exception', [
+                        'message' => $exception->getMessage(),
+                        'trace' => $exception->getTraceAsString(),
+                        'error_class' => get_class($exception),
+                    ]);
+                }
             } catch (AMQPRuntimeException $exception) {
                 $this->logError('daemon.amqp_runtime_exception', [
                     'message' => $exception->getMessage(),

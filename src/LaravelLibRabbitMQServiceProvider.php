@@ -134,6 +134,7 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
                 Console\ConsumeVhostsCommand::class,
                 Console\ActualizeInterimVhostsCommand::class,
                 Console\ScanVhostsCommand::class,
+                Console\QueueExpiryPolicySyncCommand::class,
             ]);
         }
 

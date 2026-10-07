@@ -393,11 +393,48 @@ Add connection to `config/queue.php`:
                 'enabled' => env('RABBITMQ_DEDUP_APP_ENABLED', true),
             ],
         ],
+        /**
+         * Operator policy that lets the broker delete idle queues. See "Queue Expiry Policy" below.
+         */
+        'queue_expiry' => [
+            'enabled' => env('RABBITMQ_QUEUE_EXPIRY_ENABLED', false),
+            'name' => env('RABBITMQ_QUEUE_EXPIRY_POLICY_NAME', 'sm-queue-expiry'),
+            'pattern' => env('RABBITMQ_QUEUE_EXPIRY_PATTERN', '^(?!.*failed)(?!.*dlq).+$'),
+            'expires_ms' => env('RABBITMQ_QUEUE_EXPIRY_MS', 259200000),
+            'priority' => env('RABBITMQ_QUEUE_EXPIRY_PRIORITY', 0),
+            'apply_rate_per_second' => env('RABBITMQ_QUEUE_EXPIRY_APPLY_RATE', 2),
+        ],
     ]
 
     // ...    
 ],
 ```
+
+### Queue Expiry Policy
+
+The broker deletes a queue that nobody has declared, consumed or polled (`basic.get`) for `expires_ms`,
+together with the messages still in it. The library manages this as one operator policy per vhost:
+
+- `VhostsService::createVhost()` applies it to every vhost it creates, when `enabled` is true. A failure is
+  logged and does not fail the vhost creation.
+- `lib-rabbitmq:queue-expiry-policy:sync` applies it to existing vhosts and reports drift:
+
+```bash
+# every vhost of the connection: apply where missing or different
+php artisan lib-rabbitmq:queue-expiry-policy:sync --connection=rabbitmq_vhosts
+# only report
+php artisan lib-rabbitmq:queue-expiry-policy:sync --check
+# apply only where missing, log a different policy without touching it (daily mode)
+php artisan lib-rabbitmq:queue-expiry-policy:sync --missing-only
+# rollback: delete the policy everywhere
+php artisan lib-rabbitmq:queue-expiry-policy:sync --remove
+# limit to some vhosts and change the write rate (0 = no limit)
+php artisan lib-rabbitmq:queue-expiry-policy:sync --vhost=/ --vhost=organization_1 --rate=1
+```
+
+Applying modes refuse to run while `enabled` is false; `--check` and `--remove` always run. Every policy
+write touches every matching quorum queue of the vhost, hence the rate limit. Keep `max_delay_seconds`
+well below `expires_ms`, so a delayed message always reaches a queue that is still alive.
 
 
 ### Vhost Scheduler
@@ -595,6 +632,40 @@ by adding extra options.
                 'reroute_failed' => true,
                 'failed_exchange' => 'failed-exchange',
                 'failed_routing_key' => 'application-x.%s',
+            ],
+        ],
+    ],
+
+    // ...    
+],
+```
+
+Every publish declares its destination queue again (no in-process cache), so a queue under an `expires`
+policy has its lease renewed and is recreated if it already expired. A delayed message waits in a delay
+queue and is dead-lettered to the destination when its TTL expires; a delay longer than the queue expiry
+could reach a queue that no longer exists. `max_delay_seconds` caps the delay of `later()`, `laterRaw()`
+and job releases.
+
+- `max_delay_seconds` defaults to `86400` (1 day). `0` disables the check.
+- `max_delay_mode` is one of:
+  - `log` (default): writes an error `RabbitMQQueue.laterRaw.delayTooLong` and publishes with the requested delay;
+  - `clamp`: writes a warning `RabbitMQQueue.laterRaw.delayClamped` and publishes with `max_delay_seconds`
+    instead, so the job runs earlier than requested but is not lost;
+  - `throw`: raises `DelayTooLongException` and publishes nothing.
+
+```php
+'connections' => [
+    // ...
+
+    'rabbitmq_vhosts' => [
+        // ...
+
+        'options' => [
+            'queue' => [
+                // ...
+
+                'max_delay_seconds' => 86400,
+                'max_delay_mode' => 'log',
             ],
         ],
     ],
