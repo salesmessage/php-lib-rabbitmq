@@ -24,13 +24,13 @@ class PrometheusClient
      *
      * @throws PrometheusMetricsException
      */
-    public function fetchDetailedFamily(array $hosts, int $port, string $family, float $timeout): array
+    public function fetchDetailedFamily(array $hosts, string $scheme, int $port, string $family, float $timeout): array
     {
         $promises = [];
         foreach ($hosts as $host) {
             $promises[$host] = $this->client->requestAsync(
                 'GET',
-                sprintf('http://%s:%d/metrics/detailed', $host, $port),
+                sprintf('%s://%s:%d/metrics/detailed', $scheme, $host, $port),
                 [
                     RequestOptions::QUERY => ['family' => $family],
                     RequestOptions::HEADERS => ['Accept-Encoding' => 'gzip'],

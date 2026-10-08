@@ -104,12 +104,17 @@ return [
     'api_timeout' => env('RABBITMQ_API_TIMEOUT', 30),
 
     /**
-     * - 'prometheus': the rabbitmq_prometheus plugin of every node, summed per vhost.
+     * - 'prometheus': the rabbitmq_prometheus plugin of every running node, summed per vhost.
      *   Node hosts are taken from the node names returned by GET /api/nodes (rabbit@<host>).
      * - 'management': GET /api/vhosts, which gets slower with every vhost added.
      */
     'interim_vhosts_source' => env('RABBITMQ_INTERIM_VHOSTS_SOURCE', 'prometheus'),
 
+    /**
+     * The rabbitmq_prometheus plugin has its own TLS listener (prometheus.ssl.port, 15691 by default),
+     * independent of `secure`, which covers AMQP and the management API.
+     */
+    'prometheus_secure' => env('RABBITMQ_PROMETHEUS_SECURE', false),
     'prometheus_port' => env('RABBITMQ_PROMETHEUS_PORT', 15692),
-    'prometheus_timeout' => env('RABBITMQ_PROMETHEUS_TIMEOUT', 30),
+    'prometheus_timeout' => env('RABBITMQ_PROMETHEUS_TIMEOUT', 10),
 ];

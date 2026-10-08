@@ -12,7 +12,8 @@ class QueueMetricsAggregator
 
     /**
      * A queue that no node reports counts for (e.g. a quorum queue without a leader)
-     * adds nothing to its vhost until a leader reports it again.
+     * adds nothing to its vhost until a leader reports it again. A node that reports
+     * no queue counts at all throws, as the vhosts it leads would drop out.
      *
      * @param  array<string, NodeQueueMetricsDto>  $nodesMetrics  keyed by the expected node name
      * @return array<VhostApiDto>
@@ -22,6 +23,7 @@ class QueueMetricsAggregator
     public function aggregate(array $nodesMetrics): array
     {
         $this->assertSameCluster($nodesMetrics);
+        $this->assertEveryNodeReportedQueues($nodesMetrics);
 
         $queueCounts = $this->mergeQueueCounts($nodesMetrics);
 
@@ -69,6 +71,28 @@ class QueueMetricsAggregator
             throw new PrometheusMetricsException(sprintf(
                 'Nodes belong to different clusters: %s',
                 implode(', ', array_keys($clusterIds))
+            ));
+        }
+    }
+
+    /**
+     * @param  array<string, NodeQueueMetricsDto>  $nodesMetrics
+     *
+     * @throws PrometheusMetricsException
+     */
+    private function assertEveryNodeReportedQueues(array $nodesMetrics): void
+    {
+        $silentNodeNames = [];
+        foreach ($nodesMetrics as $nodeName => $nodeMetrics) {
+            if (empty($nodeMetrics->getQueueCounts())) {
+                $silentNodeNames[] = (string) $nodeName;
+            }
+        }
+
+        if (! empty($silentNodeNames)) {
+            throw new PrometheusMetricsException(sprintf(
+                'RabbitMQ nodes reported no queue metrics: %s',
+                implode(', ', $silentNodeNames)
             ));
         }
     }

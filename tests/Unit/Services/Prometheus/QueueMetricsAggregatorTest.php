@@ -49,6 +49,17 @@ class QueueMetricsAggregatorTest extends TestCase
         (new QueueMetricsAggregator)->aggregate(['rabbit@n1' => $this->node('rabbit@other')]);
     }
 
+    public function test_node_without_queue_counts_throws(): void
+    {
+        $this->expectException(PrometheusMetricsException::class);
+        $this->expectExceptionMessage('RabbitMQ nodes reported no queue metrics: rabbit@n2');
+
+        (new QueueMetricsAggregator)->aggregate([
+            'rabbit@n1' => $this->node('rabbit@n1')->setQueueCount('org_1', 'q1', 'messages', 0),
+            'rabbit@n2' => $this->node('rabbit@n2'),
+        ]);
+    }
+
     public function test_nodes_of_different_clusters_throw(): void
     {
         $this->expectException(PrometheusMetricsException::class);

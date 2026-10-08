@@ -1098,12 +1098,20 @@ php artisan lib-rabbitmq:scan-vhosts --type=api --max-memory=200 --with-output=f
 php artisan lib-rabbitmq:actualize-interim-vhosts --max-memory=200 --with-output=false --sleep=1
 ```
 
-The command reads vhost message counts from the `rabbitmq_prometheus` plugin of every node
-(`GET http://<node>:15692/metrics/detailed?family=queue_coarse_metrics`) and sums them per vhost.
+The command reads vhost message counts from the `rabbitmq_prometheus` plugin of every running node
+(`GET http(s)://<node>:15692/metrics/detailed?family=queue_coarse_metrics`) and sums them per vhost.
 Node hosts come from the node names returned by `GET /api/nodes` (`rabbit@<host>`), so they must be
-reachable from the app. If any node is not running or fails, the pass is skipped and the interim vhosts are left
-unchanged. When the nodes report no queues at all (e.g. every vhost was removed), all interim vhosts are removed. A queue that no node reports counts for (e.g. a quorum queue
-without a leader) adds nothing to its vhost until a leader reports it again.
+reachable from the app.
+
+- A node that is not running is skipped: the counts of the running nodes are written, but interim vhosts missing
+  from them are kept until an iteration where every node is running.
+- If a running node fails or reports no queue metrics, or no node is running, the iteration is skipped and the
+  interim vhosts are left unchanged. The command keeps running and retries on the next iteration.
+- A queue that no node reports counts for (e.g. a quorum queue without a leader) adds nothing to its vhost until
+  a leader reports it again.
+
+`prometheus_secure` switches the requests to HTTPS. It is independent of `secure`, because the plugin has its own
+TLS listener (`prometheus.ssl.port`, 15691 by default), so set `prometheus_port` to match.
 
 Connection options:
 
@@ -1113,8 +1121,9 @@ Connection options:
     'api_timeout' => env('RABBITMQ_API_TIMEOUT', 30),
     // 'prometheus' or 'management' (GET /api/vhosts, slows down as vhosts are added)
     'interim_vhosts_source' => env('RABBITMQ_INTERIM_VHOSTS_SOURCE', 'prometheus'),
+    'prometheus_secure' => env('RABBITMQ_PROMETHEUS_SECURE', false),
     'prometheus_port' => env('RABBITMQ_PROMETHEUS_PORT', 15692),
-    'prometheus_timeout' => env('RABBITMQ_PROMETHEUS_TIMEOUT', 30),
+    'prometheus_timeout' => env('RABBITMQ_PROMETHEUS_TIMEOUT', 10),
 ],
 ```
 

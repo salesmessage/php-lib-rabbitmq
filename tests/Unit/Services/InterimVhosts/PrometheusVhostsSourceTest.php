@@ -10,6 +10,7 @@ use GuzzleHttp\Psr7\Response;
 use Mockery;
 use Mockery\Adapter\Phpunit\MockeryPHPUnitIntegration;
 use Psr\Http\Message\RequestInterface;
+use Salesmessage\LibRabbitMQ\Dto\InterimVhostsDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Exceptions\PrometheusMetricsException;
 use Salesmessage\LibRabbitMQ\Services\Api\PrometheusClient;
@@ -25,6 +26,9 @@ class PrometheusVhostsSourceTest extends TestCase
 
     /** @var array<string> */
     private array $requestedUris = [];
+
+    /** @var array<float> */
+    private array $requestedTimeouts = [];
 
     public function test_sums_counts_of_all_nodes(): void
     {
@@ -45,12 +49,13 @@ class PrometheusVhostsSourceTest extends TestCase
             ]
         );
 
-        $vhosts = $source->getVhosts();
+        $result = $source->getVhosts();
 
         $this->assertSame([
             ['name' => 'org_1', 'messages' => 4, 'messages_ready' => 3, 'messages_unacknowledged' => 1],
             ['name' => 'org_2', 'messages' => 2, 'messages_ready' => 0, 'messages_unacknowledged' => 2],
-        ], array_map(fn (VhostApiDto $vhost): array => $vhost->toInternalData(), $vhosts));
+        ], $this->vhostsData($result));
+        $this->assertSame([], $result->getSkippedNodeNames());
 
         sort($this->requestedUris);
         $this->assertSame([
@@ -75,15 +80,36 @@ class PrometheusVhostsSourceTest extends TestCase
                 '10.0.0.2' => new Response(200, [], $this->nodeMetrics('rabbit@10.0.0.2', [
                     ['org_1', 'q1', 0, 0, 'follower'],
                     ['org_1', 'q2', 7, 0, 'follower'],
-                    ['org_2', 'q1', 0, 0, 'follower'],
+                    ['org_2', 'q1', 0, 0, 'leader'],
                 ])),
             ]
         );
 
-        $this->assertSame(
-            [['name' => 'org_1', 'messages' => 1, 'messages_ready' => 1, 'messages_unacknowledged' => 0]],
-            array_map(fn (VhostApiDto $vhost): array => $vhost->toInternalData(), $source->getVhosts())
+        $this->assertSame([
+            ['name' => 'org_1', 'messages' => 1, 'messages_ready' => 1, 'messages_unacknowledged' => 0],
+            ['name' => 'org_2', 'messages' => 0, 'messages_ready' => 0, 'messages_unacknowledged' => 0],
+        ], $this->vhostsData($source->getVhosts()));
+    }
+
+    public function test_node_without_queue_metrics_fails_the_pass(): void
+    {
+        $source = $this->makeSource(
+            [
+                ['name' => 'rabbit@10.0.0.1', 'running' => true],
+                ['name' => 'rabbit@10.0.0.2', 'running' => true],
+            ],
+            [
+                '10.0.0.1' => new Response(200, [], $this->nodeMetrics('rabbit@10.0.0.1', [
+                    ['org_1', 'q1', 1, 0, 'leader'],
+                ])),
+                '10.0.0.2' => new Response(200, [], ''),
+            ]
         );
+
+        $this->expectException(PrometheusMetricsException::class);
+        $this->expectExceptionMessage('RabbitMQ nodes reported no queue metrics: rabbit@10.0.0.2');
+
+        $source->getVhosts();
     }
 
     public function test_uses_configured_prometheus_port(): void
@@ -92,12 +118,39 @@ class PrometheusVhostsSourceTest extends TestCase
 
         $source = $this->makeSource(
             [['name' => 'rabbit@10.0.0.1', 'running' => true]],
-            ['10.0.0.1' => new Response(200, [], $this->nodeMetrics('rabbit@10.0.0.1', []))]
+            ['10.0.0.1' => new Response(200, [], $this->nodeMetrics('rabbit@10.0.0.1', [['org_1', 'q1', 0, 0, 'leader']]))]
         );
 
         $source->getVhosts();
 
         $this->assertSame(['http://10.0.0.1:15999/metrics/detailed?family=queue_coarse_metrics'], $this->requestedUris);
+    }
+
+    public function test_uses_https_when_prometheus_secure(): void
+    {
+        $this->app['config']->set('queue.connections.rabbitmq_vhosts.prometheus_secure', 'true');
+        $this->app['config']->set('queue.connections.rabbitmq_vhosts.prometheus_port', 15691);
+
+        $source = $this->makeSource(
+            [['name' => 'rabbit@10.0.0.1', 'running' => true]],
+            ['10.0.0.1' => new Response(200, [], $this->nodeMetrics('rabbit@10.0.0.1', [['org_1', 'q1', 0, 0, 'leader']]))]
+        );
+
+        $source->getVhosts();
+
+        $this->assertSame(['https://10.0.0.1:15691/metrics/detailed?family=queue_coarse_metrics'], $this->requestedUris);
+    }
+
+    public function test_default_timeout_is_ten_seconds(): void
+    {
+        $source = $this->makeSource(
+            [['name' => 'rabbit@10.0.0.1', 'running' => true]],
+            ['10.0.0.1' => new Response(200, [], $this->nodeMetrics('rabbit@10.0.0.1', [['org_1', 'q1', 0, 0, 'leader']]))]
+        );
+
+        $source->getVhosts();
+
+        $this->assertSame([10.0], $this->requestedTimeouts);
     }
 
     public function test_unreachable_node_fails_the_pass(): void
@@ -131,21 +184,41 @@ class PrometheusVhostsSourceTest extends TestCase
         $source->getVhosts();
     }
 
-    public function test_stopped_node_fails_the_pass_before_reading_metrics(): void
+    public function test_stopped_node_is_skipped(): void
     {
         $source = $this->makeSource(
             [
                 ['name' => 'rabbit@10.0.0.1', 'running' => true],
                 ['name' => 'rabbit@10.0.0.2', 'running' => false],
             ],
-            ['10.0.0.1' => new Response(200, [], $this->nodeMetrics('rabbit@10.0.0.1', []))]
+            ['10.0.0.1' => new Response(200, [], $this->nodeMetrics('rabbit@10.0.0.1', [['org_1', 'q1', 2, 0, 'leader']]))]
+        );
+
+        $result = $source->getVhosts();
+
+        $this->assertSame(
+            [['name' => 'org_1', 'messages' => 2, 'messages_ready' => 2, 'messages_unacknowledged' => 0]],
+            $this->vhostsData($result)
+        );
+        $this->assertSame(['rabbit@10.0.0.2'], $result->getSkippedNodeNames());
+        $this->assertSame(['http://10.0.0.1:15692/metrics/detailed?family=queue_coarse_metrics'], $this->requestedUris);
+    }
+
+    public function test_no_running_nodes_fails_before_reading_metrics(): void
+    {
+        $source = $this->makeSource(
+            [
+                ['name' => 'rabbit@10.0.0.1', 'running' => false],
+                ['name' => 'rabbit@10.0.0.2', 'running' => false],
+            ],
+            []
         );
 
         try {
             $source->getVhosts();
-            $this->fail('A stopped node must fail the pass');
+            $this->fail('No running node must fail the read');
         } catch (PrometheusMetricsException $exception) {
-            $this->assertSame('RabbitMQ nodes are not running: rabbit@10.0.0.2', $exception->getMessage());
+            $this->assertSame('RabbitMQ nodes are not running: rabbit@10.0.0.1, rabbit@10.0.0.2', $exception->getMessage());
         }
 
         $this->assertSame([], $this->requestedUris);
@@ -161,6 +234,11 @@ class PrometheusVhostsSourceTest extends TestCase
         $source->getVhosts();
     }
 
+    private function vhostsData(InterimVhostsDto $result): array
+    {
+        return array_map(fn (VhostApiDto $vhost): array => $vhost->toInternalData(), $result->getVhosts());
+    }
+
     /**
      * @param  array  $nodes  /api/nodes response
      * @param  array<string, Response|string>  $responses  per host; a string fails the connection with that message
@@ -173,8 +251,9 @@ class PrometheusVhostsSourceTest extends TestCase
             ->with('GET', '/api/nodes', ['columns' => 'name,running'])
             ->andReturn($nodes);
 
-        $handler = function (RequestInterface $request) use ($responses) {
+        $handler = function (RequestInterface $request, array $options) use ($responses) {
             $this->requestedUris[] = (string) $request->getUri();
+            $this->requestedTimeouts[] = $options['timeout'];
 
             $response = $responses[$request->getUri()->getHost()];
             if (is_string($response)) {

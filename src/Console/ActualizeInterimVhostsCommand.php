@@ -109,7 +109,7 @@ class ActualizeInterimVhostsCommand extends Command
     private function actualizeInterimVhosts(): void
     {
         try {
-            $vhosts = $this->vhostsSource->getVhosts();
+            $interimVhosts = $this->vhostsSource->getVhosts();
         } catch (Throwable $exception) {
             $this->logger->error('Salesmessage.LibRabbitMQ.Console.ActualizeInterimVhostsCommand.actualizeInterimVhosts.exception', [
                 'connection' => (string) $this->option('connection'),
@@ -121,9 +121,21 @@ class ActualizeInterimVhostsCommand extends Command
             return;
         }
 
-        $oldInterimVhostNames = array_flip(array_keys($this->internalStorageManager->getInterimVhosts()));
+        $skippedNodeNames = $interimVhosts->getSkippedNodeNames();
+        if (! empty($skippedNodeNames)) {
+            $this->logger->warning('Salesmessage.LibRabbitMQ.Console.ActualizeInterimVhostsCommand.actualizeInterimVhosts.skippedNodes', [
+                'connection' => (string) $this->option('connection'),
+                'message' => 'Some nodes were skipped, interim vhosts missing from the result are kept',
+                'nodes' => $skippedNodeNames,
+            ]);
+        }
 
-        foreach ($vhosts as $vhostDto) {
+        $shouldRemoveOld = empty($skippedNodeNames);
+        $oldInterimVhostNames = $shouldRemoveOld
+            ? array_flip(array_keys($this->internalStorageManager->getInterimVhosts()))
+            : [];
+
+        foreach ($interimVhosts->getVhosts() as $vhostDto) {
             $this->internalStorageManager->addInterimVhost($vhostDto);
 
             unset($oldInterimVhostNames[$vhostDto->getName()]);
