@@ -9,16 +9,15 @@ use Salesmessage\LibRabbitMQ\Exceptions\RabbitApiClientException;
 
 class RabbitApiClient
 {
+    private const DEFAULT_TIMEOUT = 30;
+
     private HttpClient $client;
 
     private array $connectionConfig = [];
 
     public function __construct()
     {
-        $this->client = new HttpClient([
-            RequestOptions::TIMEOUT => 30,
-            RequestOptions::CONNECT_TIMEOUT => 30,
-        ]);
+        $this->client = new HttpClient();
     }
 
     /**
@@ -65,6 +64,12 @@ class RabbitApiClient
         array $data = [],
         array $extraHeaders = []
     ): array {
+        $timeout = $this->getTimeout();
+        $options = [
+            RequestOptions::TIMEOUT => $timeout,
+            RequestOptions::CONNECT_TIMEOUT => $timeout,
+        ];
+
         if (!empty($query)) {
             $options[RequestOptions::QUERY] = $query;
         }
@@ -95,6 +100,16 @@ class RabbitApiClient
 
             throw $rethrowException;
         }
+    }
+
+    /**
+     * @return float
+     */
+    private function getTimeout(): float
+    {
+        $timeout = (float) ($this->connectionConfig['api_timeout'] ?? self::DEFAULT_TIMEOUT);
+
+        return $timeout > 0 ? $timeout : self::DEFAULT_TIMEOUT;
     }
 
     /**

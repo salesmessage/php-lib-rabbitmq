@@ -3,9 +3,12 @@
 namespace Salesmessage\LibRabbitMQ\Console;
 
 use Illuminate\Console\Command;
+use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
+use Salesmessage\LibRabbitMQ\Services\InterimVhosts\InterimVhostsSourceFactory;
+use Salesmessage\LibRabbitMQ\Services\InterimVhosts\InterimVhostsSourceInterface;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
-use Salesmessage\LibRabbitMQ\Services\VhostsService;
+use Throwable;
 
 class ActualizeInterimVhostsCommand extends Command
 {
@@ -20,13 +23,17 @@ class ActualizeInterimVhostsCommand extends Command
 
     private bool $silent = false;
 
+    private InterimVhostsSourceInterface $vhostsSource;
+
     /**
-     * @param VhostsService $vhostsService
+     * @param InterimVhostsSourceFactory $vhostsSourceFactory
      * @param InternalStorageManager $internalStorageManager
+     * @param LoggerInterface $logger
      */
     public function __construct(
-        private VhostsService $vhostsService,
-        private InternalStorageManager $internalStorageManager
+        private InterimVhostsSourceFactory $vhostsSourceFactory,
+        private InternalStorageManager $internalStorageManager,
+        private LoggerInterface $logger
     ) {
         parent::__construct();
     }
@@ -37,10 +44,8 @@ class ActualizeInterimVhostsCommand extends Command
     public function handle(): void
     {
         $connectionName = (string) $this->option('connection');
-        if ($connectionName) {
-            $this->vhostsService->setConnection($connectionName);
-            $this->internalStorageManager->setConnection($connectionName);
-        }
+        $this->internalStorageManager->setConnection($connectionName);
+        $this->vhostsSource = $this->vhostsSourceFactory->make($connectionName);
 
         $sleep = (int) $this->option('sleep');
         $maxTime = max(0, (int) $this->option('max-time'));
@@ -103,24 +108,40 @@ class ActualizeInterimVhostsCommand extends Command
      */
     private function actualizeInterimVhosts(): void
     {
-        $oldInterimVhostNames = array_keys($this->internalStorageManager->getInterimVhosts());
+        try {
+            $interimVhosts = $this->vhostsSource->getVhosts();
+        } catch (Throwable $exception) {
+            $this->logger->error('Salesmessage.LibRabbitMQ.Console.ActualizeInterimVhostsCommand.actualizeInterimVhosts.exception', [
+                'connection' => (string) $this->option('connection'),
+                'message' => $exception->getMessage(),
+                'trace' => $exception->getTraceAsString(),
+                'error_class' => get_class($exception),
+            ]);
 
-        foreach ($this->vhostsService->getAllVhosts() as $vhostApiData) {
-            $vhostDto = new VhostApiDto($vhostApiData);
-            if ('' === $vhostDto->getName()) {
-                continue;
-            }
-
-            $this->internalStorageManager->addInterimVhost($vhostDto);
-
-            $oldInterimVhostIndex = array_search($vhostDto->getName(), $oldInterimVhostNames, true);
-            if (false !== $oldInterimVhostIndex) {
-                unset($oldInterimVhostNames[$oldInterimVhostIndex]);
-            }
+            return;
         }
 
-        $this->removeOldInterimVhosts($oldInterimVhostNames);
-        unset($oldInterimVhostNames);
+        $skippedNodeNames = $interimVhosts->getSkippedNodeNames();
+        if (! empty($skippedNodeNames)) {
+            $this->logger->warning('Salesmessage.LibRabbitMQ.Console.ActualizeInterimVhostsCommand.actualizeInterimVhosts.skippedNodes', [
+                'connection' => (string) $this->option('connection'),
+                'message' => 'Some nodes were skipped, interim vhosts missing from the result are kept',
+                'nodes' => $skippedNodeNames,
+            ]);
+        }
+
+        $shouldRemoveOld = empty($skippedNodeNames);
+        $oldInterimVhostNames = $shouldRemoveOld
+            ? array_flip(array_keys($this->internalStorageManager->getInterimVhosts()))
+            : [];
+
+        foreach ($interimVhosts->getVhosts() as $vhostDto) {
+            $this->internalStorageManager->addInterimVhost($vhostDto);
+
+            unset($oldInterimVhostNames[$vhostDto->getName()]);
+        }
+
+        $this->removeOldInterimVhosts(array_keys($oldInterimVhostNames));
     }
 
     /**

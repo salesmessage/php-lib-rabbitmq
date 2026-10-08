@@ -11,7 +11,7 @@ Only the latest version will get new features. Bug fixes will be provided using 
 
 | Package Version | Laravel Version | Bug Fixes Until |                                                                                             |
 |-----------------|-----------------|-----------------|---------------------------------------------------------------------------------------------|
-| 1               | 74              | October 1st, 2026 | [Documentation](https://github.com/vyuldashev/laravel-queue-rabbitmq/blob/master/README.md) |
+| 1               | 75              | October 8th, 2026 | [Documentation](https://github.com/vyuldashev/laravel-queue-rabbitmq/blob/master/README.md) |
 
 ## Installation
 
@@ -1096,6 +1096,38 @@ php artisan lib-rabbitmq:scan-vhosts --type=api --max-memory=200 --with-output=f
 
 ```bash
 php artisan lib-rabbitmq:actualize-interim-vhosts --max-memory=200 --with-output=false --sleep=1
+```
+
+The command reads vhost message counts from the `rabbitmq_prometheus` plugin of every running node
+(`GET http(s)://<node>:15692/metrics/detailed?family=queue_coarse_metrics`) and sums them per vhost.
+Node hosts come from the node names returned by `GET /api/nodes` (`rabbit@<host>`), so they must be
+reachable from the app.
+
+- A node that is not running is skipped: the counts of the running nodes are written, but interim vhosts missing
+  from them are kept until an iteration where every node is running.
+- If a running node fails (no response, timeout, HTTP error) or its response has no `rabbitmq_identity_info`, or no
+  node is running, the iteration is skipped and the interim vhosts are left unchanged. The command keeps running and
+  retries on the next iteration.
+- A node that reports no queues (the cluster has none, or the node leads none) is valid. When no node reports any
+  queue, every interim vhost is removed.
+- A queue that no node reports counts for (e.g. a quorum queue without a leader) adds nothing to its vhost until
+  a leader reports it again.
+
+`prometheus_secure` switches the requests to HTTPS. It is independent of `secure`, because the plugin has its own
+TLS listener (`prometheus.ssl.port`, 15691 by default), so set `prometheus_port` to match.
+
+Connection options:
+
+```php
+'rabbitmq_vhosts' => [
+    // ...
+    'api_timeout' => env('RABBITMQ_API_TIMEOUT', 30),
+    // 'prometheus' or 'management' (GET /api/vhosts, slows down as vhosts are added)
+    'interim_vhosts_source' => env('RABBITMQ_INTERIM_VHOSTS_SOURCE', 'prometheus'),
+    'prometheus_secure' => env('RABBITMQ_PROMETHEUS_SECURE', false),
+    'prometheus_port' => env('RABBITMQ_PROMETHEUS_PORT', 15692),
+    'prometheus_timeout' => env('RABBITMQ_PROMETHEUS_TIMEOUT', 10),
+],
 ```
 
 ```bash
