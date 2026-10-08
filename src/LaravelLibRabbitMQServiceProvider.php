@@ -13,11 +13,13 @@ use Salesmessage\LibRabbitMQ\Console\ConsumeCommand;
 use Salesmessage\LibRabbitMQ\Console\ConsumeVhostsCommand;
 use Salesmessage\LibRabbitMQ\Console\ScanVhostsCommand;
 use Salesmessage\LibRabbitMQ\Queue\Connectors\RabbitMQVhostsConnector;
+use Salesmessage\LibRabbitMQ\Services\Api\PrometheusClient;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationStore;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\NullDeduplicationStore;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\RedisDeduplicationStore;
 use Salesmessage\LibRabbitMQ\Services\GroupsService;
+use Salesmessage\LibRabbitMQ\Services\InterimVhosts\InterimVhostsSourceFactory;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Salesmessage\LibRabbitMQ\Services\QueueService;
 use Salesmessage\LibRabbitMQ\Services\VhostsService;
@@ -40,6 +42,9 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
         $this->app->bind(LockProvider::class, RedisStore::class);
 
         $this->app->singleton(InternalStorageManager::class);
+
+        // without this the container would inject any GuzzleHttp\ClientInterface the app binds
+        $this->app->bind(PrometheusClient::class, static fn () => new PrometheusClient());
 
         if ($this->app->runningInConsole()) {
             $this->bindDeduplicationService();
@@ -115,8 +120,9 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
 
             $this->app->singleton(ActualizeInterimVhostsCommand::class, static function ($app) {
                 return new ActualizeInterimVhostsCommand(
-                    $app[VhostsService::class],
-                    $app[InternalStorageManager::class]
+                    $app[InterimVhostsSourceFactory::class],
+                    $app[InternalStorageManager::class],
+                    $app[LoggerInterface::class]
                 );
             });
 

@@ -11,7 +11,7 @@ Only the latest version will get new features. Bug fixes will be provided using 
 
 | Package Version | Laravel Version | Bug Fixes Until |                                                                                             |
 |-----------------|-----------------|-----------------|---------------------------------------------------------------------------------------------|
-| 1               | 74              | October 1st, 2026 | [Documentation](https://github.com/vyuldashev/laravel-queue-rabbitmq/blob/master/README.md) |
+| 1               | 75              | October 8th, 2026 | [Documentation](https://github.com/vyuldashev/laravel-queue-rabbitmq/blob/master/README.md) |
 
 ## Installation
 
@@ -1095,7 +1095,26 @@ php artisan lib-rabbitmq:scan-vhosts --type=api --max-memory=200 --with-output=f
 ## Scan Vhosts Interim
 
 ```bash
-php artisan lib-rabbitmq:actualize-interim-vhosts --max-memory=200 --with-output=false --sleep=1
+php artisan lib-rabbitmq:actualize-interim-vhosts --max-memory=200 --with-output=false --sleep=5
+```
+
+The command reads vhost message counts from the `rabbitmq_prometheus` plugin of every running node
+(`GET http://<node>:15692/metrics/detailed?family=queue_coarse_metrics`) and sums them per vhost.
+Node hosts come from the node names returned by `GET /api/nodes` (`rabbit@<host>`), so they must be
+reachable from the app. If any running node fails, or any queue has no counts, the pass is skipped and
+the interim vhosts are left unchanged. Queue stats refresh every ~5 seconds, so a shorter `--sleep` adds no freshness.
+
+Connection options:
+
+```php
+'rabbitmq_vhosts' => [
+    // ...
+    'api_timeout' => env('RABBITMQ_API_TIMEOUT', 30),
+    // 'prometheus' or 'management' (GET /api/vhosts, slows down as vhosts are added)
+    'interim_vhosts_source' => env('RABBITMQ_INTERIM_VHOSTS_SOURCE', 'prometheus'),
+    'prometheus_port' => env('RABBITMQ_PROMETHEUS_PORT', 15692),
+    'prometheus_timeout' => env('RABBITMQ_PROMETHEUS_TIMEOUT', 30),
+],
 ```
 
 ```bash

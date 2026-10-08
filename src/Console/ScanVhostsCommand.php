@@ -216,7 +216,18 @@ class ScanVhostsCommand extends Command
             $this->refreshWindowCosts($vhostDto->getName());
         }
 
-        $vhostQueues = $isAddedToIndex ? $this->queueService->getAllVhostQueues($vhostDto) : null;
+        $vhostQueues = null;
+        if ($isAddedToIndex) {
+            $vhostQueues = $this->queueService->getAllVhostQueues($vhostDto);
+            if (null === $vhostQueues) {
+                $this->warn(sprintf(
+                    'Failed to fetch queues for vhost "%s", indexed queues are kept.',
+                    $vhostDto->getName()
+                ));
+
+                return true;
+            }
+        }
 
         $oldVhostQueues = $this->internalStorageManager->getVhostQueues($vhostDto->getName());
 

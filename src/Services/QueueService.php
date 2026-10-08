@@ -46,9 +46,7 @@ class QueueService
      * @param int $page
      * @param int $pageSize
      * @param Collection|null $queues
-     * @return Collection|null
-     * @throws \GuzzleHttp\Exception\GuzzleException
-     * @throws \Salesmessage\LibRabbitMQ\Exceptions\RabbitApiClientException
+     * @return Collection|null null when any page failed to load, so a partial list is never taken for the full one
      */
     public function getAllVhostQueues(
         VhostApiDto $vhostDto,
@@ -73,12 +71,14 @@ class QueueService
             ]);
         } catch (Throwable $exception) {
             $this->logger->warning('Salesmessage.LibRabbitMQ.Services.QueueService.getAllVhostQueues.exception', [
+                'vhost_name' => $vhostDto->getName(),
+                'page' => $page,
                 'message' => $exception->getMessage(),
                 'code' => $exception->getCode(),
                 'trace' => $exception->getTraceAsString(),
             ]);
 
-            $data = [];
+            return null;
         }
 
         $items = (array) ($data['items'] ?? []);

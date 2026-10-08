@@ -100,4 +100,16 @@ return [
      */
     'vhost_prefix' => env('RABBITMQ_VHOST_PREFIX', 'organization_'),
     'debug' => env('RABBITMQ_VHOST_DEBUG', false),
+
+    'api_timeout' => env('RABBITMQ_API_TIMEOUT', 30),
+
+    /**
+     * - 'prometheus': the rabbitmq_prometheus plugin of every running node, summed per vhost.
+     *   Node hosts are taken from the node names returned by GET /api/nodes (rabbit@<host>).
+     * - 'management': GET /api/vhosts, which gets slower with every vhost added.
+     */
+    'interim_vhosts_source' => env('RABBITMQ_INTERIM_VHOSTS_SOURCE', 'prometheus'),
+
+    'prometheus_port' => env('RABBITMQ_PROMETHEUS_PORT', 15692),
+    'prometheus_timeout' => env('RABBITMQ_PROMETHEUS_TIMEOUT', 30),
 ];
