@@ -49,14 +49,35 @@ class QueueMetricsAggregatorTest extends TestCase
         (new QueueMetricsAggregator)->aggregate(['rabbit@n1' => $this->node('rabbit@other')]);
     }
 
-    public function test_node_without_queue_counts_throws(): void
+    public function test_node_without_queue_counts_is_valid(): void
+    {
+        $vhosts = (new QueueMetricsAggregator)->aggregate([
+            'rabbit@n1' => $this->node('rabbit@n1')->setQueueCount('org_1', 'q1', 'messages_ready', 2),
+            'rabbit@n2' => $this->node('rabbit@n2'),
+        ]);
+
+        $this->assertCount(1, $vhosts);
+        $this->assertSame(2, $vhosts[0]->getMessagesReady());
+    }
+
+    public function test_nodes_without_any_queue_counts_return_no_vhosts(): void
+    {
+        $vhosts = (new QueueMetricsAggregator)->aggregate([
+            'rabbit@n1' => $this->node('rabbit@n1'),
+            'rabbit@n2' => $this->node('rabbit@n2'),
+        ]);
+
+        $this->assertSame([], $vhosts);
+    }
+
+    public function test_node_without_identity_throws(): void
     {
         $this->expectException(PrometheusMetricsException::class);
-        $this->expectExceptionMessage('RabbitMQ nodes reported no queue metrics: rabbit@n2');
+        $this->expectExceptionMessage('Node rabbit@n2 returned no rabbitmq_identity_info');
 
         (new QueueMetricsAggregator)->aggregate([
             'rabbit@n1' => $this->node('rabbit@n1')->setQueueCount('org_1', 'q1', 'messages', 0),
-            'rabbit@n2' => $this->node('rabbit@n2'),
+            'rabbit@n2' => new NodeQueueMetricsDto,
         ]);
     }
 

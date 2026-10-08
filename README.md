@@ -1105,8 +1105,11 @@ reachable from the app.
 
 - A node that is not running is skipped: the counts of the running nodes are written, but interim vhosts missing
   from them are kept until an iteration where every node is running.
-- If a running node fails or reports no queue metrics, or no node is running, the iteration is skipped and the
-  interim vhosts are left unchanged. The command keeps running and retries on the next iteration.
+- If a running node fails (no response, timeout, HTTP error) or its response has no `rabbitmq_identity_info`, or no
+  node is running, the iteration is skipped and the interim vhosts are left unchanged. The command keeps running and
+  retries on the next iteration.
+- A node that reports no queues (the cluster has none, or the node leads none) is valid. When no node reports any
+  queue, every interim vhost is removed.
 - A queue that no node reports counts for (e.g. a quorum queue without a leader) adds nothing to its vhost until
   a leader reports it again.
 

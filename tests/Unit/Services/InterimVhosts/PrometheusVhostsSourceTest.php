@@ -91,7 +91,23 @@ class PrometheusVhostsSourceTest extends TestCase
         ], $this->vhostsData($source->getVhosts()));
     }
 
-    public function test_node_without_queue_metrics_fails_the_pass(): void
+    public function test_cluster_without_queues_returns_no_vhosts(): void
+    {
+        $source = $this->makeSource(
+            [
+                ['name' => 'rabbit@10.0.0.1', 'running' => true],
+                ['name' => 'rabbit@10.0.0.2', 'running' => true],
+            ],
+            [
+                '10.0.0.1' => new Response(200, [], $this->nodeMetrics('rabbit@10.0.0.1', [])),
+                '10.0.0.2' => new Response(200, [], $this->nodeMetrics('rabbit@10.0.0.2', [])),
+            ]
+        );
+
+        $this->assertSame([], $this->vhostsData($source->getVhosts()));
+    }
+
+    public function test_response_without_identity_fails_the_pass(): void
     {
         $source = $this->makeSource(
             [
@@ -107,7 +123,7 @@ class PrometheusVhostsSourceTest extends TestCase
         );
 
         $this->expectException(PrometheusMetricsException::class);
-        $this->expectExceptionMessage('RabbitMQ nodes reported no queue metrics: rabbit@10.0.0.2');
+        $this->expectExceptionMessage('Node rabbit@10.0.0.2 returned no rabbitmq_identity_info');
 
         $source->getVhosts();
     }
