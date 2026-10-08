@@ -104,7 +104,7 @@ return [
     'api_timeout' => env('RABBITMQ_API_TIMEOUT', 30),
 
     /**
-     * - 'prometheus': the rabbitmq_prometheus plugin of every running node, summed per vhost.
+     * - 'prometheus': the rabbitmq_prometheus plugin of every node, summed per vhost.
      *   Node hosts are taken from the node names returned by GET /api/nodes (rabbit@<host>).
      * - 'management': GET /api/vhosts, which gets slower with every vhost added.
      */

@@ -2,7 +2,7 @@
 
 namespace Salesmessage\LibRabbitMQ\Services\InterimVhosts;
 
-use Salesmessage\LibRabbitMQ\Dto\InterimVhostsDto;
+use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 
 interface InterimVhostsSourceInterface
 {
@@ -12,7 +12,9 @@ interface InterimVhostsSourceInterface
     public function setConnection(string $connectionName): self;
 
     /**
+     * @return array<VhostApiDto>
+     *
      * @throws \Throwable
      */
-    public function getVhosts(): InterimVhostsDto;
+    public function getVhosts(): array;
 }

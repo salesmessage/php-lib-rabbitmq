@@ -1098,12 +1098,12 @@ php artisan lib-rabbitmq:scan-vhosts --type=api --max-memory=200 --with-output=f
 php artisan lib-rabbitmq:actualize-interim-vhosts --max-memory=200 --with-output=false --sleep=1
 ```
 
-The command reads vhost message counts from the `rabbitmq_prometheus` plugin of every running node
+The command reads vhost message counts from the `rabbitmq_prometheus` plugin of every node
 (`GET http://<node>:15692/metrics/detailed?family=queue_coarse_metrics`) and sums them per vhost.
 Node hosts come from the node names returned by `GET /api/nodes` (`rabbit@<host>`), so they must be
-reachable from the app. If any running node fails, or no node reports any queue, the pass is skipped and
-the interim vhosts are left unchanged. A vhost with a queue that no node reports counts for (e.g. a quorum queue
-without a leader) keeps its previous interim data, while the other vhosts are updated.
+reachable from the app. If any node is not running or fails, the pass is skipped and the interim vhosts are left
+unchanged. When the nodes report no queues at all (e.g. every vhost was removed), all interim vhosts are removed. A queue that no node reports counts for (e.g. a quorum queue
+without a leader) adds nothing to its vhost until a leader reports it again.
 
 Connection options:
 

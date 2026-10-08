@@ -14,11 +14,6 @@ class NodeQueueMetricsDto
     private array $queueCounts = [];
 
     /**
-     * @var array<string, array<string, true>> vhost => queue => true
-     */
-    private array $queueMembers = [];
-
-    /**
      * @return $this
      */
     public function setIdentity(?string $nodeName, ?string $clusterId): self
@@ -55,23 +50,5 @@ class NodeQueueMetricsDto
     public function getQueueCounts(): array
     {
         return $this->queueCounts;
-    }
-
-    /**
-     * @return $this
-     */
-    public function addQueueMember(string $vhost, string $queue): self
-    {
-        $this->queueMembers[$vhost][$queue] = true;
-
-        return $this;
-    }
-
-    /**
-     * @return array<string, array<string, true>>
-     */
-    public function getQueueMembers(): array
-    {
-        return $this->queueMembers;
     }
 }

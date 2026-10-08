@@ -9,7 +9,7 @@ use Salesmessage\LibRabbitMQ\Services\Prometheus\QueueMetricsParser;
 
 class QueueMetricsParserTest extends TestCase
 {
-    public function test_parses_counts_members_and_identity(): void
+    public function test_parses_counts_and_identity(): void
     {
         $body = <<<'PROM'
 # TYPE rabbitmq_detailed_queue_messages_ready gauge
@@ -32,10 +32,6 @@ PROM;
         $this->assertSame(
             ['org_1' => ['q1' => ['messages_ready' => 4, 'messages_unacknowledged' => 2, 'messages' => 6]]],
             $metrics->getQueueCounts()
-        );
-        $this->assertSame(
-            ['org_1' => ['q1' => true], 'org_2' => ['q2' => true]],
-            $metrics->getQueueMembers()
         );
     }
 

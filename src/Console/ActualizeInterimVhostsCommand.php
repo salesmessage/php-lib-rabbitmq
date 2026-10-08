@@ -109,7 +109,7 @@ class ActualizeInterimVhostsCommand extends Command
     private function actualizeInterimVhosts(): void
     {
         try {
-            $interimVhosts = $this->vhostsSource->getVhosts();
+            $vhosts = $this->vhostsSource->getVhosts();
         } catch (Throwable $exception) {
             $this->logger->error('Salesmessage.LibRabbitMQ.Console.ActualizeInterimVhostsCommand.actualizeInterimVhosts.exception', [
                 'connection' => (string) $this->option('connection'),
@@ -121,25 +121,7 @@ class ActualizeInterimVhostsCommand extends Command
             return;
         }
 
-        $uncountedQueues = $interimVhosts->getUncountedQueues();
-        if (!empty($uncountedQueues)) {
-            $this->logger->warning('Salesmessage.LibRabbitMQ.Console.ActualizeInterimVhostsCommand.actualizeInterimVhosts.uncounted', [
-                'connection' => (string) $this->option('connection'),
-                'message' => 'Some queues have no message counts, their vhosts keep the previous interim data',
-                'count' => count($uncountedQueues),
-                'examples' => array_slice($uncountedQueues, 0, 5, true),
-            ]);
-        }
-
-        $vhosts = $interimVhosts->getVhosts();
-        if (empty($vhosts)) {
-            return;
-        }
-
-        $oldInterimVhostNames = array_diff_key(
-            array_flip(array_keys($this->internalStorageManager->getInterimVhosts())),
-            $uncountedQueues
-        );
+        $oldInterimVhostNames = array_flip(array_keys($this->internalStorageManager->getInterimVhosts()));
 
         foreach ($vhosts as $vhostDto) {
             $this->internalStorageManager->addInterimVhost($vhostDto);

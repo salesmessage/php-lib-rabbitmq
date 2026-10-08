@@ -2,9 +2,7 @@
 
 namespace Salesmessage\LibRabbitMQ\Services\InterimVhosts;
 
-use Psr\Log\LoggerInterface;
-use Salesmessage\LibRabbitMQ\Dto\InterimVhostsDto;
-use Salesmessage\LibRabbitMQ\Dto\NodeQueueMetricsDto;
+use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Exceptions\PrometheusMetricsException;
 use Salesmessage\LibRabbitMQ\Services\Api\PrometheusClient;
 use Salesmessage\LibRabbitMQ\Services\Api\RabbitApiClient;
@@ -25,8 +23,7 @@ class PrometheusVhostsSource implements InterimVhostsSourceInterface
         private RabbitApiClient $rabbitApiClient,
         private PrometheusClient $prometheusClient,
         private QueueMetricsParser $parser,
-        private QueueMetricsAggregator $aggregator,
-        private LoggerInterface $logger
+        private QueueMetricsAggregator $aggregator
     ) {}
 
     /**
@@ -41,13 +38,15 @@ class PrometheusVhostsSource implements InterimVhostsSourceInterface
     }
 
     /**
+     * @return array<VhostApiDto>
+     *
      * @throws PrometheusMetricsException
      * @throws \Salesmessage\LibRabbitMQ\Exceptions\RabbitApiClientException
      * @throws \GuzzleHttp\Exception\GuzzleException
      */
-    public function getVhosts(): InterimVhostsDto
+    public function getVhosts(): array
     {
-        $hostsByNode = $this->getRunningNodeHosts();
+        $hostsByNode = $this->getNodeHosts();
 
         $bodies = $this->prometheusClient->fetchDetailedFamily(
             array_values($hostsByNode),
@@ -61,37 +60,11 @@ class PrometheusVhostsSource implements InterimVhostsSourceInterface
             $nodesMetrics[$nodeName] = $this->parser->parse($bodies[$host]);
         }
 
-        $this->logNodesWithoutQueueInfo($nodesMetrics);
-
         return $this->aggregator->aggregate($nodesMetrics);
     }
 
     /**
-     * @param  array<string, NodeQueueMetricsDto>  $nodesMetrics
-     */
-    private function logNodesWithoutQueueInfo(array $nodesMetrics): void
-    {
-        $nodeNames = [];
-        foreach ($nodesMetrics as $nodeName => $nodeMetrics) {
-            if (! empty($nodeMetrics->getQueueCounts()) && empty($nodeMetrics->getQueueMembers())) {
-                $nodeNames[] = (string) $nodeName;
-            }
-        }
-
-        if (empty($nodeNames)) {
-            return;
-        }
-
-        $this->logger->error('Salesmessage.LibRabbitMQ.Services.InterimVhosts.PrometheusVhostsSource.getVhosts.noQueueInfo', [
-            'nodes' => $nodeNames,
-            'family' => self::METRICS_FAMILY,
-            'message' => 'Nodes report queue counts without rabbitmq_detailed_queue_info, queues whose leader was not read go undetected',
-        ]);
-    }
-
-    /**
-     * A stopped node leads no queues, so it is skipped rather than failing the pass;
-     * a queue left without a leader is still reported as uncounted by the aggregator.
+     * A stopped node fails the pass like an unreachable one, so the totals never miss the queues it held.
      *
      * @return array<string, string> node name => host
      *
@@ -99,19 +72,22 @@ class PrometheusVhostsSource implements InterimVhostsSourceInterface
      * @throws \Salesmessage\LibRabbitMQ\Exceptions\RabbitApiClientException
      * @throws \GuzzleHttp\Exception\GuzzleException
      */
-    private function getRunningNodeHosts(): array
+    private function getNodeHosts(): array
     {
         $nodes = $this->rabbitApiClient->request('GET', '/api/nodes', [
             'columns' => 'name,running',
         ]);
 
         $hostsByNode = [];
+        $stoppedNodeNames = [];
         foreach ($nodes as $node) {
+            $nodeName = (string) ($node['name'] ?? '');
             if (true !== ($node['running'] ?? false)) {
+                $stoppedNodeNames[] = $nodeName;
+
                 continue;
             }
 
-            $nodeName = (string) ($node['name'] ?? '');
             $atPosition = strpos($nodeName, '@');
             $host = ($atPosition === false) ? '' : substr($nodeName, $atPosition + 1);
             if ($host === '') {
@@ -121,8 +97,15 @@ class PrometheusVhostsSource implements InterimVhostsSourceInterface
             $hostsByNode[$nodeName] = $host;
         }
 
+        if (! empty($stoppedNodeNames)) {
+            throw new PrometheusMetricsException(sprintf(
+                'RabbitMQ nodes are not running: %s',
+                implode(', ', $stoppedNodeNames)
+            ));
+        }
+
         if (empty($hostsByNode)) {
-            throw new PrometheusMetricsException('RabbitMQ management API reported no running nodes');
+            throw new PrometheusMetricsException('RabbitMQ management API reported no nodes');
         }
 
         return $hostsByNode;
