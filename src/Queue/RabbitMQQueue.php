@@ -229,7 +229,9 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
             $delayName,
             $this->getRoutingKey($this->getQueue($queue)),
             true,
-            confirm: $confirm
+            // Always confirm a delayed publish: it is mandatory, and without confirm mode the plain
+            // channel has no return listener, so an unroutable message would be dropped silently.
+            confirm: true
         );
 
         return $correlationId;
