@@ -2,6 +2,7 @@
 
 namespace Salesmessage\LibRabbitMQ\Services\InterimVhosts;
 
+use Salesmessage\LibRabbitMQ\Dto\InterimVhostsDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Services\VhostsService;
 
@@ -20,12 +21,10 @@ class ManagementApiVhostsSource implements InterimVhostsSourceInterface
     }
 
     /**
-     * @return array<VhostApiDto>
-     *
      * @throws \Salesmessage\LibRabbitMQ\Exceptions\RabbitApiClientException
      * @throws \GuzzleHttp\Exception\GuzzleException
      */
-    public function getVhosts(): array
+    public function getVhosts(): InterimVhostsDto
     {
         $vhosts = [];
         foreach ($this->vhostsService->getAllVhosts() as $vhostApiData) {
@@ -35,6 +34,6 @@ class ManagementApiVhostsSource implements InterimVhostsSourceInterface
             }
         }
 
-        return $vhosts;
+        return new InterimVhostsDto($vhosts);
     }
 }

@@ -14,7 +14,7 @@ class ActualizeInterimVhostsCommand extends Command
 {
     protected $signature = 'lib-rabbitmq:actualize-interim-vhosts
                             {--connection=rabbitmq_vhosts : The name of the queue connection to work}
-                            {--sleep=5 : Number of seconds to sleep}
+                            {--sleep=1 : Number of seconds to sleep}
                             {--max-time=0 : Maximum seconds the command can run before stopping}
                             {--with-output=true : Show output details during iteration}
                             {--max-memory=0 : Maximum memory usage in megabytes before stopping}';
@@ -109,7 +109,7 @@ class ActualizeInterimVhostsCommand extends Command
     private function actualizeInterimVhosts(): void
     {
         try {
-            $vhosts = $this->vhostsSource->getVhosts();
+            $interimVhosts = $this->vhostsSource->getVhosts();
         } catch (Throwable $exception) {
             $this->logger->error('Salesmessage.LibRabbitMQ.Console.ActualizeInterimVhostsCommand.actualizeInterimVhosts.exception', [
                 'connection' => (string) $this->option('connection'),
@@ -121,7 +121,25 @@ class ActualizeInterimVhostsCommand extends Command
             return;
         }
 
-        $oldInterimVhostNames = array_flip(array_keys($this->internalStorageManager->getInterimVhosts()));
+        $uncountedQueues = $interimVhosts->getUncountedQueues();
+        if (!empty($uncountedQueues)) {
+            $this->logger->warning('Salesmessage.LibRabbitMQ.Console.ActualizeInterimVhostsCommand.actualizeInterimVhosts.uncounted', [
+                'connection' => (string) $this->option('connection'),
+                'message' => 'Some queues have no message counts, their vhosts keep the previous interim data',
+                'count' => count($uncountedQueues),
+                'examples' => array_slice($uncountedQueues, 0, 5, true),
+            ]);
+        }
+
+        $vhosts = $interimVhosts->getVhosts();
+        if (empty($vhosts)) {
+            return;
+        }
+
+        $oldInterimVhostNames = array_diff_key(
+            array_flip(array_keys($this->internalStorageManager->getInterimVhosts())),
+            $uncountedQueues
+        );
 
         foreach ($vhosts as $vhostDto) {
             $this->internalStorageManager->addInterimVhost($vhostDto);

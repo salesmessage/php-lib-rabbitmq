@@ -2,7 +2,9 @@
 
 namespace Salesmessage\LibRabbitMQ\Services\InterimVhosts;
 
-use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
+use Psr\Log\LoggerInterface;
+use Salesmessage\LibRabbitMQ\Dto\InterimVhostsDto;
+use Salesmessage\LibRabbitMQ\Dto\NodeQueueMetricsDto;
 use Salesmessage\LibRabbitMQ\Exceptions\PrometheusMetricsException;
 use Salesmessage\LibRabbitMQ\Services\Api\PrometheusClient;
 use Salesmessage\LibRabbitMQ\Services\Api\RabbitApiClient;
@@ -23,7 +25,8 @@ class PrometheusVhostsSource implements InterimVhostsSourceInterface
         private RabbitApiClient $rabbitApiClient,
         private PrometheusClient $prometheusClient,
         private QueueMetricsParser $parser,
-        private QueueMetricsAggregator $aggregator
+        private QueueMetricsAggregator $aggregator,
+        private LoggerInterface $logger
     ) {}
 
     /**
@@ -38,13 +41,11 @@ class PrometheusVhostsSource implements InterimVhostsSourceInterface
     }
 
     /**
-     * @return array<VhostApiDto>
-     *
      * @throws PrometheusMetricsException
      * @throws \Salesmessage\LibRabbitMQ\Exceptions\RabbitApiClientException
      * @throws \GuzzleHttp\Exception\GuzzleException
      */
-    public function getVhosts(): array
+    public function getVhosts(): InterimVhostsDto
     {
         $hostsByNode = $this->getRunningNodeHosts();
 
@@ -60,12 +61,37 @@ class PrometheusVhostsSource implements InterimVhostsSourceInterface
             $nodesMetrics[$nodeName] = $this->parser->parse($bodies[$host]);
         }
 
+        $this->logNodesWithoutQueueInfo($nodesMetrics);
+
         return $this->aggregator->aggregate($nodesMetrics);
     }
 
     /**
-     * A stopped node leads no queues, so it is skipped rather than failing the
-     * pass; the aggregator still refuses the result if any queue lost its counts.
+     * @param  array<string, NodeQueueMetricsDto>  $nodesMetrics
+     */
+    private function logNodesWithoutQueueInfo(array $nodesMetrics): void
+    {
+        $nodeNames = [];
+        foreach ($nodesMetrics as $nodeName => $nodeMetrics) {
+            if (! empty($nodeMetrics->getQueueCounts()) && empty($nodeMetrics->getQueueMembers())) {
+                $nodeNames[] = (string) $nodeName;
+            }
+        }
+
+        if (empty($nodeNames)) {
+            return;
+        }
+
+        $this->logger->error('Salesmessage.LibRabbitMQ.Services.InterimVhosts.PrometheusVhostsSource.getVhosts.noQueueInfo', [
+            'nodes' => $nodeNames,
+            'family' => self::METRICS_FAMILY,
+            'message' => 'Nodes report queue counts without rabbitmq_detailed_queue_info, queues whose leader was not read go undetected',
+        ]);
+    }
+
+    /**
+     * A stopped node leads no queues, so it is skipped rather than failing the pass;
+     * a queue left without a leader is still reported as uncounted by the aggregator.
      *
      * @return array<string, string> node name => host
      *

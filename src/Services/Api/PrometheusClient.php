@@ -2,7 +2,6 @@
 
 namespace Salesmessage\LibRabbitMQ\Services\Api;
 
-use GuzzleHttp\Client as HttpClient;
 use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Promise\PromiseInterface;
 use GuzzleHttp\Promise\Utils;
@@ -13,12 +12,7 @@ use Throwable;
 
 class PrometheusClient
 {
-    private ClientInterface $client;
-
-    public function __construct(ClientInterface $client = null)
-    {
-        $this->client = $client ?? new HttpClient;
-    }
+    public function __construct(private ClientInterface $client) {}
 
     /**
      * Fetch one metric family from the rabbitmq_prometheus detailed endpoint of every

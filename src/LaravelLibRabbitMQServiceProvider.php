@@ -2,6 +2,7 @@
 
 namespace Salesmessage\LibRabbitMQ;
 
+use GuzzleHttp\Client as HttpClient;
 use Illuminate\Cache\RedisStore;
 use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Debug\ExceptionHandler;
@@ -44,7 +45,7 @@ class LaravelLibRabbitMQServiceProvider extends ServiceProvider
         $this->app->singleton(InternalStorageManager::class);
 
         // without this the container would inject any GuzzleHttp\ClientInterface the app binds
-        $this->app->bind(PrometheusClient::class, static fn () => new PrometheusClient());
+        $this->app->bind(PrometheusClient::class, static fn () => new PrometheusClient(new HttpClient()));
 
         if ($this->app->runningInConsole()) {
             $this->bindDeduplicationService();

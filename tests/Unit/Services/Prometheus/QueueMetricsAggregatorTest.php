@@ -22,7 +22,7 @@ class QueueMetricsAggregatorTest extends TestCase
             ->setQueueCount('org_2', 'q2', 'messages_ready', 5)
             ->setQueueCount('org_2', 'q2', 'messages_unacknowledged', 0);
 
-        $vhosts = (new QueueMetricsAggregator)->aggregate(['rabbit@n1' => $node1, 'rabbit@n2' => $node2]);
+        $vhosts = (new QueueMetricsAggregator)->aggregate(['rabbit@n1' => $node1, 'rabbit@n2' => $node2])->getVhosts();
 
         $this->assertSame([
             ['name' => 'org_1', 'messages' => 0, 'messages_ready' => 0, 'messages_unacknowledged' => 0],
@@ -35,26 +35,30 @@ class QueueMetricsAggregatorTest extends TestCase
         $node1 = $this->node('rabbit@n1')->setQueueCount('org_1', 'q1', 'messages_ready', 2);
         $node2 = $this->node('rabbit@n2')->setQueueCount('org_1', 'q1', 'messages_ready', 3);
 
-        $vhosts = (new QueueMetricsAggregator)->aggregate(['rabbit@n1' => $node1, 'rabbit@n2' => $node2]);
+        $vhosts = (new QueueMetricsAggregator)->aggregate(['rabbit@n1' => $node1, 'rabbit@n2' => $node2])->getVhosts();
 
         $this->assertCount(1, $vhosts);
         $this->assertSame(3, $vhosts[0]->getMessagesReady());
     }
 
-    public function test_queue_listed_without_counts_from_any_node_throws(): void
+    public function test_vhosts_with_queues_listed_without_counts_are_left_out_and_reported(): void
     {
         $node1 = $this->node('rabbit@n1')
             ->setQueueCount('org_1', 'q1', 'messages_ready', 0)
             ->addQueueMember('org_1', 'q1')
-            ->addQueueMember('org_1', 'q2');
+            ->addQueueMember('org_1', 'q2')
+            ->setQueueCount('org_2', 'q1', 'messages_ready', 4)
+            ->addQueueMember('org_2', 'q1');
         $node2 = $this->node('rabbit@n2')
             ->addQueueMember('org_1', 'q1')
-            ->addQueueMember('org_1', 'q2');
+            ->addQueueMember('org_1', 'q2')
+            ->addQueueMember('org_2', 'q1')
+            ->addQueueMember('org_3', 'q1');
 
-        $this->expectException(PrometheusMetricsException::class);
-        $this->expectExceptionMessage('1 queue(s) have no message counts from any node, e.g. org_1/q2');
+        $result = (new QueueMetricsAggregator)->aggregate(['rabbit@n1' => $node1, 'rabbit@n2' => $node2]);
 
-        (new QueueMetricsAggregator)->aggregate(['rabbit@n1' => $node1, 'rabbit@n2' => $node2]);
+        $this->assertSame(['org_2'], array_map(fn (VhostApiDto $vhost): string => $vhost->getName(), $result->getVhosts()));
+        $this->assertSame(['org_1' => ['q2'], 'org_3' => ['q1']], $result->getUncountedQueues());
     }
 
     public function test_metrics_from_unexpected_node_throws(): void

@@ -2,6 +2,7 @@
 
 namespace Salesmessage\LibRabbitMQ\Services\Prometheus;
 
+use Salesmessage\LibRabbitMQ\Dto\InterimVhostsDto;
 use Salesmessage\LibRabbitMQ\Dto\NodeQueueMetricsDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Exceptions\PrometheusMetricsException;
@@ -10,26 +11,23 @@ class QueueMetricsAggregator
 {
     private const COUNT_FIELDS = ['messages', 'messages_ready', 'messages_unacknowledged'];
 
-    private const MISSING_QUEUES_EXAMPLES = 5;
-
     /**
      * @param  array<string, NodeQueueMetricsDto>  $nodesMetrics  keyed by the expected node name
-     * @return array<VhostApiDto> sorted by vhost name
      *
      * @throws PrometheusMetricsException
      */
-    public function aggregate(array $nodesMetrics): array
+    public function aggregate(array $nodesMetrics): InterimVhostsDto
     {
         $this->assertSameCluster($nodesMetrics);
 
         $queueCounts = $this->mergeQueueCounts($nodesMetrics);
-
-        $this->assertEveryQueueCounted($nodesMetrics, $queueCounts);
+        $uncountedQueues = $this->findUncountedQueues($nodesMetrics, $queueCounts);
 
         ksort($queueCounts, SORT_STRING);
 
         $vhosts = [];
-        foreach ($queueCounts as $vhostName => $queues) {
+        // a partial total could flag a busy vhost as idle, so such vhosts are left out
+        foreach (array_diff_key($queueCounts, $uncountedQueues) as $vhostName => $queues) {
             $totals = array_fill_keys(self::COUNT_FIELDS, 0);
             foreach ($queues as $counts) {
                 foreach (self::COUNT_FIELDS as $field) {
@@ -40,7 +38,7 @@ class QueueMetricsAggregator
             $vhosts[] = new VhostApiDto(['name' => (string) $vhostName] + $totals);
         }
 
-        return $vhosts;
+        return new InterimVhostsDto($vhosts, $uncountedQueues);
     }
 
     /**
@@ -100,30 +98,21 @@ class QueueMetricsAggregator
     /**
      * @param  array<string, NodeQueueMetricsDto>  $nodesMetrics
      * @param  array<string, array<string, array<string, int>>>  $queueCounts
-     *
-     * @throws PrometheusMetricsException
+     * @return array<string, array<string>> vhost => queues
      */
-    private function assertEveryQueueCounted(array $nodesMetrics, array $queueCounts): void
+    private function findUncountedQueues(array $nodesMetrics, array $queueCounts): array
     {
-        $missing = [];
+        $uncounted = [];
         foreach ($nodesMetrics as $nodeMetrics) {
             foreach ($nodeMetrics->getQueueMembers() as $vhostName => $queues) {
                 foreach ($queues as $queueName => $isMember) {
                     if (! isset($queueCounts[$vhostName][$queueName])) {
-                        $missing[$vhostName.'/'.$queueName] = true;
+                        $uncounted[$vhostName][$queueName] = true;
                     }
                 }
             }
         }
 
-        if (empty($missing)) {
-            return;
-        }
-
-        throw new PrometheusMetricsException(sprintf(
-            '%d queue(s) have no message counts from any node, e.g. %s',
-            count($missing),
-            implode(', ', array_slice(array_keys($missing), 0, self::MISSING_QUEUES_EXAMPLES))
-        ));
+        return array_map('array_keys', $uncounted);
     }
 }
