@@ -8,6 +8,7 @@ use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Wire\AMQPTable;
 use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
+use Salesmessage\LibRabbitMQ\Queue\DelayQueue;
 use Salesmessage\LibRabbitMQ\Services\DlqDetector;
 
 /**
@@ -284,7 +285,7 @@ class DeduplicationService
         $deltaMs = 5000;
         $lockTtlMs = ($lockTtl * 1000) + $deltaMs;
         $baseQueue = $queueName ?? $message->getRoutingKey();
-        $delayQueue = $baseQueue . '.dedup-lock-delay.' . $lockTtlMs;
+        $delayQueue = DelayQueue::lockQueueName($baseQueue, $lockTtlMs);
 
         $channel->queue_declare(
             $delayQueue,
@@ -293,15 +294,11 @@ class DeduplicationService
             false,
             false,
             false,
-            new AMQPTable([
-                'x-message-ttl' => $lockTtlMs,
-                'x-dead-letter-exchange' => $message->getExchange(),
-                'x-dead-letter-routing-key' => $message->getRoutingKey(),
-                // Must exceed x-message-ttl so the queue is not auto-deleted at the
-                // exact moment its messages dead-letter back (matches getDelayQueueArguments).
-                'x-expires' => $lockTtlMs * 2,
-                'x-queue-type' => RabbitMQConsumable::MQ_TYPE_QUORUM,
-            ])
+            new AMQPTable(DelayQueue::lockQueueArguments(
+                $lockTtlMs,
+                $message->getExchange(),
+                $message->getRoutingKey()
+            ))
         );
 
         // The lock-requeue republish always uses publisher confirms: there is no job here to
@@ -310,7 +307,9 @@ class DeduplicationService
         // unacked so it is redelivered instead of being lost at the ack.
         $this->enablePublisherConfirms($channel);
 
-        $channel->basic_publish($newMessage, '', $delayQueue);
+        // mandatory: an unroutable message is returned and, with the return listener of the confirm
+        // channel, throws, leaving the original unacked so it is redelivered instead of lost.
+        $channel->basic_publish($newMessage, '', $delayQueue, true);
 
         $channel->wait_for_pending_acks_returns(
             $this->getPublisherConfirmTimeout()
