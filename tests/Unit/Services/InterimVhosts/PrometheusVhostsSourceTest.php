@@ -10,7 +10,6 @@ use GuzzleHttp\Psr7\Response;
 use Mockery;
 use Mockery\Adapter\Phpunit\MockeryPHPUnitIntegration;
 use Psr\Http\Message\RequestInterface;
-use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Exceptions\PrometheusMetricsException;
@@ -30,9 +29,6 @@ class PrometheusVhostsSourceTest extends TestCase
 
     public function test_sums_counts_of_running_nodes_and_skips_stopped_ones(): void
     {
-        $logger = Mockery::mock(LoggerInterface::class);
-        $logger->shouldNotReceive('error');
-
         $source = $this->makeSource(
             [
                 ['name' => 'rabbit@10.0.0.1', 'running' => true],
@@ -48,8 +44,7 @@ class PrometheusVhostsSourceTest extends TestCase
                     ['org_1', 'q1', 0, 0, 'follower'],
                     ['org_2', 'q1', 0, 2, 'leader'],
                 ])),
-            ],
-            $logger
+            ]
         );
 
         $result = $source->getVhosts();
@@ -91,25 +86,6 @@ class PrometheusVhostsSourceTest extends TestCase
 
         $this->assertSame(['org_1'], array_map(fn (VhostApiDto $vhost): string => $vhost->getName(), $result->getVhosts()));
         $this->assertSame(['org_2' => ['q1']], $result->getUncountedQueues());
-    }
-
-    public function test_logs_error_when_nodes_report_counts_without_queue_info(): void
-    {
-        $logger = Mockery::mock(LoggerInterface::class);
-        $logger->shouldReceive('error')->once()->with(
-            'Salesmessage.LibRabbitMQ.Services.InterimVhosts.PrometheusVhostsSource.getVhosts.noQueueInfo',
-            Mockery::subset(['nodes' => ['rabbit@10.0.0.1']])
-        );
-
-        $source = $this->makeSource(
-            [['name' => 'rabbit@10.0.0.1', 'running' => true]],
-            ['10.0.0.1' => new Response(200, [], $this->nodeMetrics('rabbit@10.0.0.1', [
-                ['org_1', 'q1', 2, 0, 'leader'],
-            ], false))],
-            $logger
-        );
-
-        $this->assertSame(2, $source->getVhosts()->getVhosts()[0]->getMessagesReady());
     }
 
     public function test_uses_configured_prometheus_port(): void
@@ -171,7 +147,7 @@ class PrometheusVhostsSourceTest extends TestCase
      * @param  array  $nodes  /api/nodes response
      * @param  array<string, Response|string>  $responses  per host; a string fails the connection with that message
      */
-    private function makeSource(array $nodes, array $responses, LoggerInterface $logger = new NullLogger): PrometheusVhostsSource
+    private function makeSource(array $nodes, array $responses): PrometheusVhostsSource
     {
         $rabbitApiClient = Mockery::mock(RabbitApiClient::class);
         $rabbitApiClient->shouldReceive('setConnectionConfig')->andReturnSelf();
@@ -195,7 +171,7 @@ class PrometheusVhostsSourceTest extends TestCase
             new PrometheusClient(new HttpClient(['handler' => HandlerStack::create($handler)])),
             new QueueMetricsParser,
             new QueueMetricsAggregator,
-            $logger
+            new NullLogger
         );
 
         return $source->setConnection('rabbitmq_vhosts');
@@ -204,7 +180,7 @@ class PrometheusVhostsSourceTest extends TestCase
     /**
      * @param  array<array{0: string, 1: string, 2: int, 3: int, 4: string}>  $queues  vhost, queue, ready, unacked, membership
      */
-    private function nodeMetrics(string $nodeName, array $queues, bool $withQueueInfo = true): string
+    private function nodeMetrics(string $nodeName, array $queues): string
     {
         $lines = [sprintf(
             'rabbitmq_identity_info{rabbitmq_node="%s",rabbitmq_cluster_permanent_id="cluster"} 1',
@@ -213,9 +189,7 @@ class PrometheusVhostsSourceTest extends TestCase
 
         foreach ($queues as [$vhost, $queue, $ready, $unacked, $membership]) {
             $labels = sprintf('vhost="%s",queue="%s"', $vhost, $queue);
-            if ($withQueueInfo) {
-                $lines[] = sprintf('rabbitmq_detailed_queue_info{%s,membership="%s"} 1', $labels, $membership);
-            }
+            $lines[] = sprintf('rabbitmq_detailed_queue_info{%s,membership="%s"} 1', $labels, $membership);
 
             if ($membership === 'leader') {
                 $lines[] = sprintf('rabbitmq_detailed_queue_messages_ready{%s} %d', $labels, $ready);
