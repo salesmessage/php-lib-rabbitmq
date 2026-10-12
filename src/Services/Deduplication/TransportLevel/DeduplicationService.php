@@ -8,8 +8,10 @@ use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Wire\AMQPTable;
 use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
+use Salesmessage\LibRabbitMQ\Exceptions\LockRequeueLimitReachedException;
 use Salesmessage\LibRabbitMQ\Queue\DelayQueue;
 use Salesmessage\LibRabbitMQ\Services\DlqDetector;
+use Salesmessage\LibRabbitMQ\Services\FailedJobWriter;
 
 /**
  * DeduplicationService provides a way to deduplicate messages on the transport level.
@@ -58,6 +60,7 @@ class DeduplicationService
     public function __construct(
         private DeduplicationStore $store,
         private LoggerInterface $logger,
+        private FailedJobWriter $failedJobWriter,
     ) {
         $this->confirmedChannels = new \WeakMap();
     }
@@ -66,15 +69,20 @@ class DeduplicationService
      * @param \Closure $handler
      * @param AMQPMessage $message
      * @param string|null $queueName
+     * @param string|null $connectionName
      * @return bool - return "true" if the handler was run
      * @throws \Throwable
      */
-    public function decorateWithDeduplication(\Closure $handler, AMQPMessage $message, ?string $queueName = null): bool
-    {
+    public function decorateWithDeduplication(
+        \Closure $handler,
+        AMQPMessage $message,
+        ?string $queueName = null,
+        ?string $connectionName = null,
+    ): bool {
         $messageState = $this->getState($message, $queueName);
         try {
             if ($messageState === DeduplicationService::IN_PROGRESS) {
-                $action = $this->applyActionOnLock($message, $queueName);
+                $action = $this->applyActionOnLock($message, $queueName, $connectionName);
                 $this->logger->warning('DeduplicationService.message_already_in_progress', [
                     'action' => $action,
                     'message_id' => $message->get_properties()['message_id'] ?? null,
@@ -95,7 +103,7 @@ class DeduplicationService
 
             $hasPutAsInProgress = $this->markAsInProgress($message, $queueName);
             if ($hasPutAsInProgress === false) {
-                $action = $this->applyActionOnLock($message, $queueName);
+                $action = $this->applyActionOnLock($message, $queueName, $connectionName);
                 $this->logger->warning('DeduplicationService.message_already_in_progress.skip', [
                     'action' => $action,
                     'message_id' => $message->get_properties()['message_id'] ?? null,
@@ -213,7 +221,7 @@ class DeduplicationService
         return $messageId;
     }
 
-    protected function applyActionOnLock(AMQPMessage $message, ?string $queueName = null): string
+    protected function applyActionOnLock(AMQPMessage $message, ?string $queueName = null, ?string $connectionName = null): string
     {
         $action = $this->getConfig('action_on_lock', self::ACTION_REQUEUE);
         if ($action === self::ACTION_REJECT) {
@@ -221,7 +229,7 @@ class DeduplicationService
         } elseif ($action === self::ACTION_ACK) {
             $message->ack();
         } else {
-            $action = $this->republishLockedMessage($message, $queueName);
+            $action = $this->republishLockedMessage($message, $queueName, $connectionName);
         }
 
         return $action;
@@ -246,10 +254,14 @@ class DeduplicationService
      *
      * @param AMQPMessage $message
      * @param string|null $queueName
+     * @param string|null $connectionName
      * @return string
      */
-    protected function republishLockedMessage(AMQPMessage $message, ?string $queueName = null): string
-    {
+    protected function republishLockedMessage(
+        AMQPMessage $message,
+        ?string $queueName = null,
+        ?string $connectionName = null,
+    ): string {
         $props = $message->get_properties();
         $headers = [];
         if (($props['application_headers'] ?? null) instanceof AMQPTable) {
@@ -264,9 +276,14 @@ class DeduplicationService
             $this->logger->warning('DeduplicationService.republishLockedMessage.max_attempts_reached', [
                 'message_id' => $props['message_id'] ?? null,
             ]);
-            $message->reject(false);
+            $isRejected = $this->failedJobWriter->rejectMessage(
+                $message,
+                (string) $connectionName,
+                $queueName ?? (string) $message->getRoutingKey(),
+                new LockRequeueLimitReachedException($attempts, $maxAttempts)
+            );
 
-            return self::ACTION_REJECT;
+            return $isRejected ? self::ACTION_REJECT : self::ACTION_REQUEUE;
         }
 
         $headers[self::HEADER_LOCK_REQUEUE_COUNT] = $attempts;

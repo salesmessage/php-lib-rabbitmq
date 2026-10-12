@@ -50,6 +50,10 @@ class RabbitMQJob extends Job implements JobContract
      */
     protected ?object $payloadData = null;
 
+    protected bool $failedJobLogged = false;
+
+    protected bool $requeuedAfterFail = false;
+
     public function __construct(
         Container $container,
         RabbitMQQueue $rabbitmq,
@@ -96,16 +100,32 @@ class RabbitMQJob extends Job implements JobContract
     }
 
     /**
+     * The message is rejected (dead-lettered) only after the "JobFailed" listeners ran. When they
+     * threw before the failed_jobs row was confirmed, the row may be missing, so the message is
+     * requeued instead of being dropped.
+     *
      * {@inheritdoc}
      */
-    public function markAsFailed(): void
+    public function fail($e = null): void
     {
-        parent::markAsFailed();
+        $isFailHandled = false;
+        try {
+            parent::fail($e);
+            $isFailHandled = true;
+        } finally {
+            $this->requeuedAfterFail = ! $isFailHandled && ! $this->failedJobLogged;
+            $this->rabbitmq->reject($this, $this->requeuedAfterFail);
+        }
+    }
 
-        // We must tel rabbitMQ this Job is failed
-        // The message must be rejected when the Job marked as failed, in case rabbitMQ wants to do some extra magic.
-        // like: Death lettering the message to an other exchange/routing-key.
-        $this->rabbitmq->reject($this);
+    public function markFailedJobLogged(): void
+    {
+        $this->failedJobLogged = true;
+    }
+
+    public function isRequeuedAfterFail(): bool
+    {
+        return $this->requeuedAfterFail;
     }
 
     /**

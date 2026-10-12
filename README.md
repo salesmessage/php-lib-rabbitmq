@@ -603,6 +603,22 @@ by adding extra options.
 ],
 ```
 
+Messages that leave a vhost queue without Laravel's fail flow are written to the failed jobs table
+(`queue.failer`) before they are rejected: the delivery limit (`quorum.delivery_limit`, also with
+`on_limit_action = ack`), the transport deduplication lock requeue limit (`lock_requeue_max_attempts`) and a payload
+that cannot be decoded into a job. The row keeps the full connection name (`<connection>:vhost:<vhost>`) and the
+queue, so `php artisan queue:retry <id>` republishes the job to its original vhost and queue. A body that is not a
+JSON job payload with a `uuid` is stored as `{"uuid": ..., "body": <original body>}`, so every failer can store it.
+When the row cannot be written, the message is requeued instead of rejected.
+
+In Laravel's fail flow a failed job's message is rejected only after the `JobFailed` listeners ran. Under
+`lib-rabbitmq:consume` and `lib-rabbitmq:consume-vhosts` the failed jobs row is confirmed by the command, so when a
+listener throws before the row is written, the message is requeued instead of rejected. A requeued message runs
+again until the row is written or the delivery limit writes it.
+
+Producers can write a job that could not be published with
+`Salesmessage\LibRabbitMQ\Services\FailedJobWriter::write($connectionName, $queue, $payload, $exception)`.
+
 By default a publish is fire-and-forget: `dispatch()` returns as soon as the message is written to
 the socket, without any guarantee that RabbitMQ accepted it. When you want the broker to acknowledge
 a produced message ("ack on producing"), opt the job into

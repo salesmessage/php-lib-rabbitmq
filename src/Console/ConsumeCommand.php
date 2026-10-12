@@ -3,8 +3,10 @@
 namespace Salesmessage\LibRabbitMQ\Console;
 
 use Illuminate\Queue\Console\WorkCommand;
+use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Support\Str;
 use Salesmessage\LibRabbitMQ\Consumer;
+use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
 
 class ConsumeCommand extends WorkCommand
 {
@@ -46,6 +48,15 @@ class ConsumeCommand extends WorkCommand
         $consumer->setPrefetchCount((int) $this->option('prefetch-count'));
 
         parent::handle();
+    }
+
+    protected function logFailedJob(JobFailed $event)
+    {
+        parent::logFailedJob($event);
+
+        if ($event->job instanceof RabbitMQJob) {
+            $event->job->markFailedJobLogged();
+        }
     }
 
     protected function consumerTag(): string

@@ -4,10 +4,12 @@ namespace Salesmessage\LibRabbitMQ\Console;
 
 use Illuminate\Contracts\Cache\Repository as Cache;
 use Illuminate\Queue\Console\WorkCommand;
+use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Queue\Worker;
 use Illuminate\Support\Str;
 use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
 use Salesmessage\LibRabbitMQ\Exceptions\RabbitVhostsGroupsException;
+use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
 use Salesmessage\LibRabbitMQ\Services\GroupsService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Salesmessage\LibRabbitMQ\Services\Scheduler\VhostSchedulerFactory;
@@ -132,6 +134,15 @@ class ConsumeVhostsCommand extends WorkCommand
             $connectionName,
             ''
         );
+    }
+
+    protected function logFailedJob(JobFailed $event)
+    {
+        parent::logFailedJob($event);
+
+        if ($event->job instanceof RabbitMQJob) {
+            $event->job->markFailedJobLogged();
+        }
     }
 
     protected function consumerTag(): string
