@@ -4,9 +4,11 @@ namespace Salesmessage\LibRabbitMQ\Queue\Jobs;
 
 use Illuminate\Container\Container;
 use Illuminate\Contracts\Container\BindingResolutionException;
+use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Encryption\Encrypter;
 use Illuminate\Contracts\Queue\Job as JobContract;
 use Illuminate\Queue\Jobs\Job;
+use Illuminate\Queue\ManuallyFailedException;
 use Illuminate\Support\Arr;
 use PhpAmqpLib\Exception\AMQPProtocolChannelException;
 use PhpAmqpLib\Message\AMQPMessage;
@@ -14,6 +16,8 @@ use PhpAmqpLib\Wire\AMQPTable;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Horizon\RabbitMQQueue as HorizonRabbitMQQueue;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
+use Salesmessage\LibRabbitMQ\Services\FailedJobWriter;
+use Throwable;
 
 class RabbitMQJob extends Job implements JobContract
 {
@@ -100,22 +104,41 @@ class RabbitMQJob extends Job implements JobContract
     }
 
     /**
-     * The message is rejected (dead-lettered) only after the "JobFailed" listeners ran. When they
-     * threw before the failed_jobs row was confirmed, the row may be missing, so the message is
-     * requeued instead of being dropped.
+     * The message is rejected only after the failed_jobs row is written. When a "JobFailed" listener
+     * threw before the row was confirmed, the row is written here. When that write fails too, the
+     * message is requeued and the exception is reported instead of thrown, so the timeout handler
+     * still kills the worker rather than leaving the timed-out job running next to its redelivery.
      *
      * {@inheritdoc}
      */
     public function fail($e = null): void
     {
-        $isFailHandled = false;
         try {
             parent::fail($e);
-            $isFailHandled = true;
-        } finally {
-            $this->requeuedAfterFail = ! $isFailHandled && ! $this->failedJobLogged;
-            $this->rabbitmq->reject($this, $this->requeuedAfterFail);
+        } catch (Throwable $failException) {
+            if (! $this->failedJobLogged) {
+                $this->failedJobLogged = $this->container->make(FailedJobWriter::class)->write(
+                    $this->getConnectionName(),
+                    $this->getQueue(),
+                    $this->getRawBody(),
+                    $e ?: new ManuallyFailedException
+                );
+            }
+
+            if (! $this->failedJobLogged) {
+                $this->requeuedAfterFail = true;
+                $this->rabbitmq->reject($this, true);
+                $this->container->make(ExceptionHandler::class)->report($failException);
+
+                return;
+            }
+
+            $this->rabbitmq->reject($this, false);
+
+            throw $failException;
         }
+
+        $this->rabbitmq->reject($this, false);
     }
 
     public function markFailedJobLogged(): void

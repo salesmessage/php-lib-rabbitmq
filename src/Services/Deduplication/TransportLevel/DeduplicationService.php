@@ -9,6 +9,7 @@ use PhpAmqpLib\Wire\AMQPTable;
 use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Exceptions\LockRequeueLimitReachedException;
+use Salesmessage\LibRabbitMQ\Exceptions\MessageLockedException;
 use Salesmessage\LibRabbitMQ\Queue\DelayQueue;
 use Salesmessage\LibRabbitMQ\Services\DlqDetector;
 use Salesmessage\LibRabbitMQ\Services\FailedJobWriter;
@@ -225,7 +226,7 @@ class DeduplicationService
     {
         $action = $this->getConfig('action_on_lock', self::ACTION_REQUEUE);
         if ($action === self::ACTION_REJECT) {
-            $message->reject(false);
+            $action = $this->rejectLockedMessage($message, $queueName, $connectionName, new MessageLockedException());
         } elseif ($action === self::ACTION_ACK) {
             $message->ack();
         } else {
@@ -276,14 +277,12 @@ class DeduplicationService
             $this->logger->warning('DeduplicationService.republishLockedMessage.max_attempts_reached', [
                 'message_id' => $props['message_id'] ?? null,
             ]);
-            $isRejected = $this->failedJobWriter->rejectMessage(
+            return $this->rejectLockedMessage(
                 $message,
-                (string) $connectionName,
-                $queueName ?? (string) $message->getRoutingKey(),
+                $queueName,
+                $connectionName,
                 new LockRequeueLimitReachedException($attempts, $maxAttempts)
             );
-
-            return $isRejected ? self::ACTION_REJECT : self::ACTION_REQUEUE;
         }
 
         $headers[self::HEADER_LOCK_REQUEUE_COUNT] = $attempts;
@@ -341,6 +340,22 @@ class DeduplicationService
         $message->ack();
 
         return self::ACTION_REQUEUE;
+    }
+
+    private function rejectLockedMessage(
+        AMQPMessage $message,
+        ?string $queueName,
+        ?string $connectionName,
+        \Throwable $reason,
+    ): string {
+        $isRejected = $this->failedJobWriter->rejectMessage(
+            $message,
+            (string) $connectionName,
+            $queueName ?? (string) $message->getRoutingKey(),
+            $reason
+        );
+
+        return $isRejected ? self::ACTION_REJECT : self::ACTION_REQUEUE;
     }
 
     private function enablePublisherConfirms(AMQPChannel $channel): void

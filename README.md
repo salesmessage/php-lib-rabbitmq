@@ -605,16 +605,21 @@ by adding extra options.
 
 Messages that leave a vhost queue without Laravel's fail flow are written to the failed jobs table
 (`queue.failer`) before they are rejected: the delivery limit (`quorum.delivery_limit`, also with
-`on_limit_action = ack`), the transport deduplication lock requeue limit (`lock_requeue_max_attempts`) and a payload
-that cannot be decoded into a job. The row keeps the full connection name (`<connection>:vhost:<vhost>`) and the
-queue, so `php artisan queue:retry <id>` republishes the job to its original vhost and queue. A body that is not a
-JSON job payload with a `uuid` is stored as `{"uuid": ..., "body": <original body>}`, so every failer can store it.
-When the row cannot be written, the message is requeued instead of rejected.
+`on_limit_action = ack`), the transport deduplication lock (`action_on_lock = reject`, and the
+`lock_requeue_max_attempts` limit of `action_on_lock = requeue`) and a payload that cannot be decoded into a job.
+`action_on_lock = ack` and `action_on_duplication` drop the message without a row. The row keeps the full connection
+name (`<connection>:vhost:<vhost>`) and the queue, so `php artisan queue:retry <id>` republishes the job to its
+original vhost and queue. A body that is not a JSON job payload with a `uuid` is stored as
+`{"uuid": ..., "body": <original body>}`, so every failer can store it; retrying such a row fails it again, so forget
+it with `queue:forget <id>` instead. A row written for a locked message may belong to a message whose twin was
+processed, and `queue:retry` publishes it with a new `message_id` that transport deduplication does not match, so
+check it before retrying. When the row cannot be written, the message is requeued instead of rejected.
 
 In Laravel's fail flow a failed job's message is rejected only after the `JobFailed` listeners ran. Under
 `lib-rabbitmq:consume` and `lib-rabbitmq:consume-vhosts` the failed jobs row is confirmed by the command, so when a
-listener throws before the row is written, the message is requeued instead of rejected. A requeued message runs
-again until the row is written or the delivery limit writes it.
+listener throws before the row is written, the job writes the row itself. Only when that write fails too is the
+message requeued, and the exception is then reported instead of thrown, so a timed-out worker is still killed. A
+requeued message runs again until the row is written or the delivery limit writes it.
 
 Producers can write a job that could not be published with
 `Salesmessage\LibRabbitMQ\Services\FailedJobWriter::write($connectionName, $queue, $payload, $exception)`.

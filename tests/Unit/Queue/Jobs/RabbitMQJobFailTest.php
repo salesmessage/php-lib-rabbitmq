@@ -4,19 +4,24 @@ namespace Salesmessage\LibRabbitMQ\Tests\Unit\Queue\Jobs;
 
 use Illuminate\Config\Repository;
 use Illuminate\Container\Container;
+use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Events\Dispatcher as DispatcherContract;
 use Illuminate\Database\Connection;
 use Illuminate\Database\DatabaseManager;
 use Illuminate\Events\Dispatcher;
 use Illuminate\Queue\Events\JobFailed;
+use Illuminate\Queue\Failed\FailedJobProviderInterface;
 use Illuminate\Queue\TimeoutExceededException;
 use Mockery;
 use Mockery\Adapter\Phpunit\MockeryPHPUnitIntegration;
+use Mockery\MockInterface;
 use PhpAmqpLib\Message\AMQPMessage;
 use PHPUnit\Framework\TestCase;
+use Psr\Log\NullLogger;
 use RuntimeException;
 use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
+use Salesmessage\LibRabbitMQ\Services\FailedJobWriter;
 
 class RabbitMQJobFailTest extends TestCase
 {
@@ -25,6 +30,10 @@ class RabbitMQJobFailTest extends TestCase
     private Container $container;
 
     private Dispatcher $events;
+
+    private FailedJobProviderInterface&MockInterface $failer;
+
+    private ExceptionHandler&MockInterface $exceptionHandler;
 
     /** @var list<string> */
     private array $calls = [];
@@ -39,6 +48,10 @@ class RabbitMQJobFailTest extends TestCase
         $this->container->instance('config', new Repository([
             'queue' => ['failed' => ['driver' => 'database', 'database' => 'pgsql', 'table' => 'failed_jobs']],
         ]));
+        $this->failer = Mockery::mock(FailedJobProviderInterface::class);
+        $this->container->instance(FailedJobWriter::class, new FailedJobWriter($this->failer, new NullLogger));
+        $this->exceptionHandler = Mockery::mock(ExceptionHandler::class);
+        $this->container->instance(ExceptionHandler::class, $this->exceptionHandler);
     }
 
     public function test_message_is_rejected_after_the_failed_job_row_is_written(): void
@@ -47,6 +60,7 @@ class RabbitMQJobFailTest extends TestCase
             $this->calls[] = 'logged';
             $event->job->markFailedJobLogged();
         });
+        $this->failer->shouldNotReceive('log');
         $job = $this->makeJob($this->expectReject(false));
 
         $job->fail(new RuntimeException('job failed'));
@@ -55,19 +69,44 @@ class RabbitMQJobFailTest extends TestCase
         $this->assertFalse($job->isRequeuedAfterFail());
     }
 
-    public function test_message_is_requeued_when_the_failed_job_row_is_not_written(): void
+    public function test_job_writes_the_row_when_a_listener_throws_before_the_row_is_written(): void
     {
         $this->events->listen(JobFailed::class, function () {
-            throw new RuntimeException('database is down');
+            throw new RuntimeException('listener broke');
         });
-        $job = $this->makeJob($this->expectReject(true));
+        $jobException = new RuntimeException('job failed');
+        $this->failer->shouldReceive('log')->once()
+            ->with('rabbitmq_vhosts', 'default-quorum', $this->payload(), $jobException)
+            ->andReturnUsing(function () {
+                $this->calls[] = 'logged';
+
+                return 1;
+            });
+        $this->exceptionHandler->shouldNotReceive('report');
+        $job = $this->makeJob($this->expectReject(false));
 
         try {
-            $job->fail(new RuntimeException('job failed'));
+            $job->fail($jobException);
             $this->fail('The listener exception must be rethrown');
         } catch (RuntimeException $exception) {
-            $this->assertSame('database is down', $exception->getMessage());
+            $this->assertSame('listener broke', $exception->getMessage());
         }
+
+        $this->assertSame(['logged', 'rejected'], $this->calls);
+        $this->assertFalse($job->isRequeuedAfterFail());
+    }
+
+    public function test_message_is_requeued_and_the_exception_reported_when_the_row_is_not_written(): void
+    {
+        $listenerException = new RuntimeException('database is down');
+        $this->events->listen(JobFailed::class, function () use ($listenerException) {
+            throw $listenerException;
+        });
+        $this->failer->shouldReceive('log')->once()->andThrow(new RuntimeException('database is still down'));
+        $this->exceptionHandler->shouldReceive('report')->once()->with($listenerException);
+        $job = $this->makeJob($this->expectReject(true));
+
+        $job->fail(new RuntimeException('job failed'));
 
         $this->assertTrue($job->isRequeuedAfterFail());
     }
@@ -122,13 +161,18 @@ class RabbitMQJobFailTest extends TestCase
 
     private function makeJob(RabbitMQQueue $rabbitmq, string $handler = 'stdClass@call'): RabbitMQJob
     {
-        $message = new AMQPMessage(json_encode([
-            'uuid' => '0b6a0d5c-2a8e-4f6e-9a39-3f8d1f7b9a10',
-            'job' => $handler,
-            'data' => ['commandName' => 'stdClass', 'command' => ''],
-        ]));
+        $message = new AMQPMessage($this->payload($handler));
         $message->setDeliveryInfo(5, false, '', 'default-quorum');
 
         return new RabbitMQJob($this->container, $rabbitmq, $message, 'rabbitmq_vhosts', 'default-quorum');
+    }
+
+    private function payload(string $handler = 'stdClass@call'): string
+    {
+        return json_encode([
+            'uuid' => '0b6a0d5c-2a8e-4f6e-9a39-3f8d1f7b9a10',
+            'job' => $handler,
+            'data' => ['commandName' => 'stdClass', 'command' => ''],
+        ]);
     }
 }
