@@ -69,10 +69,11 @@ class RabbitMQJobFailTest extends TestCase
         $this->assertFalse($job->isRequeuedAfterFail());
     }
 
-    public function test_job_writes_the_row_when_a_listener_throws_before_the_row_is_written(): void
+    public function test_job_writes_the_row_and_reports_the_exception_when_a_listener_throws_before_the_row_is_written(): void
     {
-        $this->events->listen(JobFailed::class, function () {
-            throw new RuntimeException('listener broke');
+        $listenerException = new RuntimeException('listener broke');
+        $this->events->listen(JobFailed::class, function () use ($listenerException) {
+            throw $listenerException;
         });
         $jobException = new RuntimeException('job failed');
         $this->failer->shouldReceive('log')->once()
@@ -82,15 +83,10 @@ class RabbitMQJobFailTest extends TestCase
 
                 return 1;
             });
-        $this->exceptionHandler->shouldNotReceive('report');
+        $this->exceptionHandler->shouldReceive('report')->once()->with($listenerException);
         $job = $this->makeJob($this->expectReject(false));
 
-        try {
-            $job->fail($jobException);
-            $this->fail('The listener exception must be rethrown');
-        } catch (RuntimeException $exception) {
-            $this->assertSame('listener broke', $exception->getMessage());
-        }
+        $job->fail($jobException);
 
         $this->assertSame(['logged', 'rejected'], $this->calls);
         $this->assertFalse($job->isRequeuedAfterFail());
@@ -111,7 +107,7 @@ class RabbitMQJobFailTest extends TestCase
         $this->assertTrue($job->isRequeuedAfterFail());
     }
 
-    public function test_message_is_rejected_when_the_row_is_written_but_the_failed_callback_throws(): void
+    public function test_message_is_rejected_and_the_exception_reported_when_the_row_is_written_but_the_failed_callback_throws(): void
     {
         $this->container->instance('FailingHandler', new class
         {
@@ -121,10 +117,53 @@ class RabbitMQJobFailTest extends TestCase
             }
         });
         $this->events->listen(JobFailed::class, fn (JobFailed $event) => $event->job->markFailedJobLogged());
-
-        $this->expectExceptionMessage('failed callback broke');
+        $this->exceptionHandler->shouldReceive('report')->once()
+            ->with(Mockery::on(fn (RuntimeException $exception) => $exception->getMessage() === 'failed callback broke'));
 
         $this->makeJob($this->expectReject(false), 'FailingHandler@call')->fail(new RuntimeException('job failed'));
+    }
+
+    public function test_failing_the_same_job_twice_rejects_its_message_once(): void
+    {
+        $this->events->listen(JobFailed::class, function (JobFailed $event) {
+            $this->calls[] = 'logged';
+            $event->job->markFailedJobLogged();
+        });
+        $job = $this->makeJob($this->expectReject(false));
+
+        $job->fail(new TimeoutExceededException('job timed out'));
+        $job->fail(new TimeoutExceededException('job timed out'));
+
+        $this->assertSame(['logged', 'rejected'], $this->calls);
+    }
+
+    public function test_requeued_message_is_not_rejected_when_the_job_fails_again(): void
+    {
+        $this->events->listen(JobFailed::class, function () {
+            throw new RuntimeException('database is down');
+        });
+        $this->failer->shouldReceive('log')->once()->andThrow(new RuntimeException('database is still down'));
+        $this->exceptionHandler->shouldReceive('report')->once();
+        $job = $this->makeJob($this->expectReject(true));
+
+        $job->fail(new TimeoutExceededException('job timed out'));
+        $job->fail(new TimeoutExceededException('job timed out'));
+
+        $this->assertTrue($job->isRequeuedAfterFail());
+    }
+
+    public function test_message_of_a_job_deleted_before_it_failed_is_not_rejected(): void
+    {
+        $this->failer->shouldNotReceive('log');
+        $rabbitmq = Mockery::mock(RabbitMQQueue::class);
+        $rabbitmq->shouldReceive('ack')->once();
+        $rabbitmq->shouldNotReceive('reject');
+        $job = $this->makeJob($rabbitmq);
+        $job->delete();
+
+        $job->fail(new RuntimeException('job failed'));
+
+        $this->assertTrue($job->hasFailed());
     }
 
     public function test_timed_out_job_rolls_back_the_open_transaction_before_the_row_is_written(): void

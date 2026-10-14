@@ -105,14 +105,18 @@ class RabbitMQJob extends Job implements JobContract
 
     /**
      * The message is rejected only after the failed_jobs row is written. When a "JobFailed" listener
-     * threw before the row was confirmed, the row is written here. When that write fails too, the
-     * message is requeued and the exception is reported instead of thrown, so the timeout handler
-     * still kills the worker rather than leaving the timed-out job running next to its redelivery.
+     * threw before the row was confirmed, the row is written here, and when that write fails too, the
+     * message is requeued. An exception of the fail flow is reported instead of thrown, so the timeout
+     * handler still kills the worker rather than leaving the timed-out job running. A job deleted before
+     * it failed was already settled, so its message is not rejected again: the timeout handler can fail
+     * the same job twice, and a second reject of a delivery tag closes the channel.
      *
      * {@inheritdoc}
      */
     public function fail($e = null): void
     {
+        $wasDeleted = $this->isDeleted();
+
         try {
             parent::fail($e);
         } catch (Throwable $failException) {
@@ -125,20 +129,16 @@ class RabbitMQJob extends Job implements JobContract
                 );
             }
 
-            if (! $this->failedJobLogged) {
-                $this->requeuedAfterFail = true;
-                $this->rabbitmq->reject($this, true);
-                $this->container->make(ExceptionHandler::class)->report($failException);
+            $this->requeuedAfterFail = ! $this->failedJobLogged;
+            $this->rabbitmq->reject($this, $this->requeuedAfterFail);
+            $this->container->make(ExceptionHandler::class)->report($failException);
 
-                return;
-            }
-
-            $this->rabbitmq->reject($this, false);
-
-            throw $failException;
+            return;
         }
 
-        $this->rabbitmq->reject($this, false);
+        if (! $wasDeleted) {
+            $this->rabbitmq->reject($this, false);
+        }
     }
 
     public function markFailedJobLogged(): void
