@@ -4,9 +4,11 @@ namespace Salesmessage\LibRabbitMQ\Queue\Jobs;
 
 use Illuminate\Container\Container;
 use Illuminate\Contracts\Container\BindingResolutionException;
+use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Encryption\Encrypter;
 use Illuminate\Contracts\Queue\Job as JobContract;
 use Illuminate\Queue\Jobs\Job;
+use Illuminate\Queue\ManuallyFailedException;
 use Illuminate\Support\Arr;
 use PhpAmqpLib\Exception\AMQPProtocolChannelException;
 use PhpAmqpLib\Message\AMQPMessage;
@@ -14,6 +16,8 @@ use PhpAmqpLib\Wire\AMQPTable;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Horizon\RabbitMQQueue as HorizonRabbitMQQueue;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
+use Salesmessage\LibRabbitMQ\Services\FailedJobWriter;
+use Throwable;
 
 class RabbitMQJob extends Job implements JobContract
 {
@@ -49,6 +53,10 @@ class RabbitMQJob extends Job implements JobContract
      * @var object|null
      */
     protected ?object $payloadData = null;
+
+    protected bool $failedJobLogged = false;
+
+    protected bool $requeuedAfterFail = false;
 
     public function __construct(
         Container $container,
@@ -96,16 +104,51 @@ class RabbitMQJob extends Job implements JobContract
     }
 
     /**
+     * The message is rejected only after the failed_jobs row is written. When a "JobFailed" listener
+     * threw before the row was confirmed, the row is written here, and when that write fails too, the
+     * message is requeued. An exception of the fail flow is reported instead of thrown, so the timeout
+     * handler still kills the worker rather than leaving the timed-out job running. A job deleted before
+     * it failed was already settled, so its message is not rejected again: the timeout handler can fail
+     * the same job twice, and a second reject of a delivery tag closes the channel.
+     *
      * {@inheritdoc}
      */
-    public function markAsFailed(): void
+    public function fail($e = null): void
     {
-        parent::markAsFailed();
+        $wasDeleted = $this->isDeleted();
 
-        // We must tel rabbitMQ this Job is failed
-        // The message must be rejected when the Job marked as failed, in case rabbitMQ wants to do some extra magic.
-        // like: Death lettering the message to an other exchange/routing-key.
-        $this->rabbitmq->reject($this);
+        try {
+            parent::fail($e);
+        } catch (Throwable $failException) {
+            if (! $this->failedJobLogged) {
+                $this->failedJobLogged = $this->container->make(FailedJobWriter::class)->write(
+                    $this->getConnectionName(),
+                    $this->getQueue(),
+                    $this->getRawBody(),
+                    $e ?: new ManuallyFailedException
+                );
+            }
+
+            $this->requeuedAfterFail = ! $this->failedJobLogged;
+            $this->rabbitmq->reject($this, $this->requeuedAfterFail);
+            $this->container->make(ExceptionHandler::class)->report($failException);
+
+            return;
+        }
+
+        if (! $wasDeleted) {
+            $this->rabbitmq->reject($this, false);
+        }
+    }
+
+    public function markFailedJobLogged(): void
+    {
+        $this->failedJobLogged = true;
+    }
+
+    public function isRequeuedAfterFail(): bool
+    {
+        return $this->requeuedAfterFail;
     }
 
     /**

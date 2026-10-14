@@ -6,18 +6,22 @@ use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Wire\AMQPTable;
 use Psr\Log\LoggerInterface;
+use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
+use Salesmessage\LibRabbitMQ\Exceptions\DeliveryLimitReachedException;
 
 class DeliveryLimitService
 {
     public function __construct(
         private ConfigRepository $config,
         private LoggerInterface  $logger,
+        private FailedJobWriter $failedJobWriter,
     ) {
     }
 
-    public function isAllowed(AMQPMessage $message, string $connectionName = 'rabbitmq_vhosts'): bool
+    public function isAllowed(AMQPMessage $message, string $connectionName = 'rabbitmq_vhosts', ?string $queue = null): bool
     {
-        $config = (array) $this->config->get('queue.connections.' . $connectionName . '.options', []);
+        $configName = (new ConnectionNameDto($connectionName))->getConfigName();
+        $config = (array) $this->config->get('queue.connections.' . $configName . '.options', []);
         $limit = (int) ($config['quorum']['delivery_limit'] ?? 0);
         if ($limit <= 0) {
             return true;
@@ -39,11 +43,13 @@ class DeliveryLimitService
                 'action' => $action,
             ]);
 
-            if ($action === 'ack') {
-                $message->ack();
-            } else {
-                $message->reject(false);
-            }
+            $this->failedJobWriter->rejectMessage(
+                $message,
+                $connectionName,
+                $queue ?? (string) $message->getRoutingKey(),
+                new DeliveryLimitReachedException($deliveryCount, $limit),
+                $action === 'ack'
+            );
         } catch (\Throwable $exception) {
             $this->logger->error('Salesmessage.LibRabbitMQ.Services.DeliveryLimitService.handle.exception', [
                 'message' => $exception->getMessage(),

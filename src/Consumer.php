@@ -13,6 +13,7 @@ use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Message\AMQPMessage;
 use Psr\Log\LoggerInterface;
+use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationService;
 use Throwable;
@@ -143,10 +144,11 @@ class Consumer extends Worker
                 $transportDedupService->decorateWithDeduplication(
                     function () use ($job, $message, $connectionName, $queue, $options, $transportDedupService) {
                         $this->runJob($job, $connectionName, $options);
-                        $transportDedupService->markAsProcessed($message, $queue);
+                        $this->completeDeduplication($transportDedupService, $job, $message, $queue);
                     },
                     $message,
-                    $queue
+                    $queue,
+                    $connectionName
                 );
 
                 if ($this->supportsAsyncSignals()) {
@@ -208,6 +210,25 @@ class Consumer extends Worker
 
             $this->currentJob = null;
         }
+    }
+
+    /**
+     * A message requeued because its failed_jobs row was not written comes back with the same id: marking it
+     * as processed would make the redelivery acked as a duplicate, so its deduplication key is released instead.
+     */
+    protected function completeDeduplication(
+        DeduplicationService $deduplicationService,
+        RabbitMQJob $job,
+        AMQPMessage $message,
+        ?string $queueName,
+    ): void {
+        if ($job->isRequeuedAfterFail()) {
+            $deduplicationService->release($message, $queueName);
+
+            return;
+        }
+
+        $deduplicationService->markAsProcessed($message, $queueName);
     }
 
     /**

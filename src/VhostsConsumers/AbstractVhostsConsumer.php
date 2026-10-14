@@ -21,6 +21,7 @@ use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
 use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Exceptions\MutexTimeout;
+use Salesmessage\LibRabbitMQ\Exceptions\UndecodablePayloadException;
 use Salesmessage\LibRabbitMQ\Interfaces\RabbitMQBatchable;
 use Salesmessage\LibRabbitMQ\Mutex;
 use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
@@ -29,6 +30,7 @@ use Salesmessage\LibRabbitMQ\Services\Deduplication\AppDeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationService as TransportDeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Salesmessage\LibRabbitMQ\Services\DeliveryLimitService;
+use Salesmessage\LibRabbitMQ\Services\FailedJobWriter;
 use Salesmessage\LibRabbitMQ\Services\Scheduler\LastProcessedSchedulerStrategy;
 use Salesmessage\LibRabbitMQ\Services\Scheduler\ProcessingTimeSchedulerOptions;
 use Salesmessage\LibRabbitMQ\Services\Scheduler\VhostSchedulerInterface;
@@ -99,6 +101,7 @@ abstract class AbstractVhostsConsumer extends Consumer
      * @param callable $isDownForMaintenance
      * @param TransportDeduplicationService $transportDeduplicationService
      * @param DeliveryLimitService $deliveryLimitService
+     * @param FailedJobWriter $failedJobWriter
      * @param callable|null $resetScope
      */
     public function __construct(
@@ -110,6 +113,7 @@ abstract class AbstractVhostsConsumer extends Consumer
         callable $isDownForMaintenance,
         protected TransportDeduplicationService $transportDeduplicationService,
         protected DeliveryLimitService $deliveryLimitService,
+        protected FailedJobWriter $failedJobWriter,
         callable $resetScope = null,
     ) {
         parent::__construct($manager, $events, $exceptions, $isDownForMaintenance, $logger, $resetScope);
@@ -257,17 +261,31 @@ abstract class AbstractVhostsConsumer extends Consumer
      */
     protected function processAmqpMessage(AMQPMessage $message, RabbitMQQueue $connection): void
     {
-        if (!$this->deliveryLimitService->isAllowed($message, $this->configConnectionName)) {
+        if (!$this->deliveryLimitService->isAllowed($message, $this->currentConnectionName, $this->currentQueueName)) {
             $this->logWarning('processAMQPMessage.delivery_limit_reached');
             return;
         }
 
         $this->hadJobs = true;
-        $isSupportBatching = $this->isSupportBatching($message);
-        if ($isSupportBatching) {
+        try {
+            $job = $this->isSupportBatching($message) ? null : $this->getJobByMessage($message, $connection);
+        } catch (UndecodablePayloadException $exception) {
+            $this->logWarning('processAMQPMessage.undecodable_payload', [
+                'message_id' => $message->get_properties()['message_id'] ?? null,
+                'reason' => $exception->getMessage(),
+            ]);
+            $this->failedJobWriter->rejectMessage(
+                $message,
+                $this->currentConnectionName,
+                (string) $this->currentQueueName,
+                $exception
+            );
+            return;
+        }
+
+        if ($job === null) {
             $this->addMessageToBatch($message);
         } else {
-            $job = $this->getJobByMessage($message, $connection);
             $this->processSingleJob($job, $message);
         }
 
@@ -276,7 +294,7 @@ abstract class AbstractVhostsConsumer extends Consumer
 
         $this->logInfo('processAMQPMessage.message_consumed', [
             'processed_jobs_count' => $this->jobsProcessed,
-            'is_support_batching' => $isSupportBatching ? 'Y' :'N',
+            'is_support_batching' => $job === null ? 'Y' :'N',
         ]);
     }
 
@@ -290,7 +308,8 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     /**
      * @param AMQPMessage $message
-     * @return non-empty-string
+     * @return class-string
+     * @throws UndecodablePayloadException
      */
     protected function getMessageClass(AMQPMessage $message): string
     {
@@ -298,23 +317,27 @@ abstract class AbstractVhostsConsumer extends Consumer
 
         $messageClass = (string) ($body['data']['commandName'] ?? '');
         if (empty($messageClass)) {
-            throw new \RuntimeException('Message class is not defined');
+            throw new UndecodablePayloadException('Message class is not defined');
         }
+
+        if (!class_exists($messageClass)) {
+            // the message is stored in failed_jobs, and Postgres text rejects NUL bytes
+            throw new UndecodablePayloadException(
+                sprintf('Message class %s does not exist', addcslashes($messageClass, "\0"))
+            );
+        }
+
         return $messageClass;
     }
 
     /**
      * @param AMQPMessage $message
      * @return bool
-     * @throws \ReflectionException
+     * @throws UndecodablePayloadException
      */
     protected function isSupportBatching(AMQPMessage $message): bool
     {
-        $class = $this->getMessageClass($message);
-
-        $reflection = new \ReflectionClass($class);
-
-        return $reflection->implementsInterface(RabbitMQBatchable::class);
+        return is_subclass_of($this->getMessageClass($message), RabbitMQBatchable::class);
     }
 
     /**
@@ -361,7 +384,8 @@ abstract class AbstractVhostsConsumer extends Consumer
                             $batchData[] = $job->getPayloadData();
                         },
                         $batchMessage,
-                        $this->currentQueueName
+                        $this->currentQueueName,
+                        $this->currentConnectionName
                     );
                 }
                 $this->logDebug('processBatch.messagesLockedForProcessing');
@@ -451,6 +475,7 @@ abstract class AbstractVhostsConsumer extends Consumer
      * @param AMQPMessage $message
      * @param RabbitMQQueue $connection
      * @return RabbitMQJob
+     * @throws UndecodablePayloadException
      * @throws \Throwable
      */
     protected function getJobByMessage(AMQPMessage $message, RabbitMQQueue $connection): RabbitMQJob
@@ -471,7 +496,7 @@ abstract class AbstractVhostsConsumer extends Consumer
         }
 
         if (!is_subclass_of($payloadClass, RabbitMQConsumable::class)) {
-            throw new \RuntimeException(
+            throw new UndecodablePayloadException(
                 sprintf('Job class %s must implement %s', $payloadClass, RabbitMQConsumable::class)
             );
         }
@@ -504,11 +529,17 @@ abstract class AbstractVhostsConsumer extends Consumer
                     $this->logDebug('processSingleJob.jobFinished');
                 }
 
-                $this->transportDeduplicationService->markAsProcessed($message, $this->currentQueueName);
-                $this->logDebug('processSingleJob.messageMarkedAsProcessed');
+                $this->completeDeduplication(
+                    $this->transportDeduplicationService,
+                    $job,
+                    $message,
+                    $this->currentQueueName
+                );
+                $this->logDebug('processSingleJob.deduplicationCompleted');
             },
             $message,
             $this->currentQueueName,
+            $this->currentConnectionName,
         );
 
         $duration = microtime(true) - $timeStarted;

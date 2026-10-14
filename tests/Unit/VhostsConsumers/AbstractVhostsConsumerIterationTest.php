@@ -14,6 +14,7 @@ use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\DeliveryLimitService;
+use Salesmessage\LibRabbitMQ\Services\FailedJobWriter;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Salesmessage\LibRabbitMQ\Services\Scheduler\VhostSchedulerInterface;
 use Salesmessage\LibRabbitMQ\VhostsConsumers\AbstractVhostsConsumer;
@@ -95,6 +96,7 @@ class AbstractVhostsConsumerIterationTest extends TestCase
             fn () => false,
             Mockery::mock(DeduplicationService::class),
             Mockery::mock(DeliveryLimitService::class),
+            Mockery::mock(FailedJobWriter::class),
         ) extends AbstractVhostsConsumer {
             protected function vhostDaemon($connectionName, WorkerOptions $options)
             {
