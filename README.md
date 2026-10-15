@@ -641,7 +641,8 @@ a produced message ("ack on producing"), opt the job into
   change - they simply keep publishing without confirms.
 - It is honored across all publish paths: `push`, `later`, `bulk`/batch, and job release/retry. The
   transport-level deduplication lock-requeue republish always uses confirms (there is no job there to
-  opt in, and the message must be confirmed before the original is acked).
+  opt in, and the message must be confirmed before the original is acked), waiting for them with the
+  `publisher_confirm_timeout` of the connection the message was consumed from.
 - For quorum queues, a confirm is issued once a majority of the queue's members have persisted the
   message. The number of members is controlled by `quorum_initial_group_size`
   (`x-quorum-initial-group-size`); leave it unset to use RabbitMQ's default (3).
