@@ -8,6 +8,7 @@ use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Wire\AMQPTable;
 use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
+use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
 use Salesmessage\LibRabbitMQ\Exceptions\LockRequeueLimitReachedException;
 use Salesmessage\LibRabbitMQ\Exceptions\MessageLockedException;
 use Salesmessage\LibRabbitMQ\Queue\DelayQueue;
@@ -328,7 +329,7 @@ class DeduplicationService
         $channel->basic_publish($newMessage, '', $delayQueue, true);
 
         $channel->wait_for_pending_acks_returns(
-            $this->getPublisherConfirmTimeout()
+            $this->getPublisherConfirmTimeout($connectionName)
         );
 
         $this->logger->warning('DeduplicationService.republishLockedMessage.republish', [
@@ -403,9 +404,10 @@ class DeduplicationService
         return $value !== null ? $value : $default;
     }
 
-    protected function getPublisherConfirmTimeout(): float
+    protected function getPublisherConfirmTimeout(?string $connectionName): float
     {
-        $value = config('queue.connections.rabbitmq_vhosts.options.queue.publisher_confirm_timeout');
+        $configName = (new ConnectionNameDto((string) $connectionName))->getConfigName();
+        $value = config("queue.connections.$configName.options.queue.publisher_confirm_timeout");
 
         return $value !== null ? (float) $value : 5.0;
     }
