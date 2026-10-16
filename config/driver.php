@@ -4,6 +4,15 @@ return [
     'consumer_type' => env('RABBITMQ_VHOSTS_CONSUMER_TYPE', 'direct'),
 
     /**
+     * Redis connection (config/database.php) holding the vhost and queue index that
+     * lib-rabbitmq:scan-vhosts and publishing write and lib-rabbitmq:consume-vhosts reads.
+     * Every service consuming the same vhosts has to point it at the same Redis database.
+     */
+    'storage' => [
+        'connection' => env('RABBITMQ_VHOSTS_STORAGE_CONNECTION', 'persistent'),
+    ],
+
+    /**
      * Vhost round-robin scheduler options.
      *
      * The scheduler strategy (last_processed | processing_time) is set per group
