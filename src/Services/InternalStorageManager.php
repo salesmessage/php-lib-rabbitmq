@@ -20,6 +20,11 @@ class InternalStorageManager
     private string $connectionName = 'rabbitmq_vhosts';
 
     /**
+     * @var string
+     */
+    private string $redisConnectionName;
+
+    /**
      * @var PredisConnection
      */
     private PredisConnection $redis;
@@ -30,8 +35,10 @@ class InternalStorageManager
     private ProcessingTimeStore $processingTimeStore;
 
     public function __construct() {
+        $this->redisConnectionName = (string) config('queue.drivers.rabbitmq_vhosts.storage.connection', 'persistent');
+
         /** @var PredisConnection $redis */
-        $redis = Redis::connection('persistent');
+        $redis = Redis::connection($this->redisConnectionName);
         $this->redis = $redis;
         $this->processingTimeStore = new ProcessingTimeStore($this->redis);
     }
@@ -59,7 +66,7 @@ class InternalStorageManager
     public function usePooledConnection(): void
     {
         /** @var PredisConnection $connection */
-        $connection = Redis::resolve('persistent');
+        $connection = Redis::resolve($this->redisConnectionName);
 
         $this->redis = new RedisConnectionPool($connection);
         $this->processingTimeStore->setConnection($this->redis);
