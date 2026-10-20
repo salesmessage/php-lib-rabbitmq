@@ -169,7 +169,7 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
                 'error' => $exception->getMessage(),
             ]);
 
-            $this->reconnect(2);
+            $this->recoverConnection($exception, 2);
         }
     }
 
@@ -379,13 +379,24 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
                     throw $exception;
                 }
 
-                // Recover before retrying: recreate a missing vhost, then reconnect.
-                if ($this->isVhostFailedException($exception) && (false === $this->createNotExistsVhost())) {
-                    throw $exception;
-                }
-
-                $this->reconnect($reconnectAttempts);
+                $this->recoverConnection($exception, $reconnectAttempts);
             }
         }
+    }
+
+    /**
+     * Recover after a connection/channel failure: recreate a missing vhost, then reconnect.
+     *
+     * @throws AMQPConnectionClosedException|AMQPChannelClosedException The original failure when the vhost cannot be recreated.
+     */
+    private function recoverConnection(
+        AMQPConnectionClosedException|AMQPChannelClosedException $exception,
+        int $reconnectAttempts
+    ): void {
+        if ($this->isVhostFailedException($exception) && (false === $this->createNotExistsVhost())) {
+            throw $exception;
+        }
+
+        $this->reconnect($reconnectAttempts);
     }
 }

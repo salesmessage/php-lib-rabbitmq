@@ -31,11 +31,19 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
 
     private const QUEUE = 'hubspot-listener';
 
+    private const VHOST = 'organization_1';
+
     private LoggerInterface&MockInterface $logger;
+
+    private VhostsService&MockInterface $vhostsService;
+
+    private LockService&MockInterface $lockService;
 
     private RabbitMQQueueBatchable $queue;
 
     private bool $connectionDead = false;
+
+    private bool $vhostDeleted = false;
 
     private float $lastActivity;
 
@@ -58,19 +66,21 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
         $this->lastActivity = $this->secondsAgo(1);
 
         $this->logger = Mockery::spy(LoggerInterface::class);
+        $this->vhostsService = Mockery::mock(VhostsService::class);
+        $this->lockService = Mockery::mock(LockService::class);
 
         $container = new Container;
         $container->instance('config', new Repository([]));
         $container->instance(InternalStorageManager::class, Mockery::mock(InternalStorageManager::class));
         $container->instance(GroupsService::class, Mockery::mock(GroupsService::class));
-        $container->instance(VhostsService::class, Mockery::mock(VhostsService::class));
-        $container->instance(LockService::class, Mockery::mock(LockService::class));
+        $container->instance(VhostsService::class, $this->vhostsService);
+        $container->instance(LockService::class, $this->lockService);
         $container->instance(LoggerInterface::class, $this->logger);
         Container::setInstance($container);
 
         $this->queue = new RabbitMQQueueBatchable(QueueConfigFactory::make([]));
         $this->queue->setContainer($container);
-        $this->queue->setConnectionName('rabbitmq_cluster:vhost:organization_1');
+        $this->queue->setConnectionName('rabbitmq_cluster:vhost:'.self::VHOST);
         $this->queue->setConnection($this->fakeConnection());
     }
 
@@ -115,11 +125,36 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
             'RabbitMQQueueBatchable.reconnect',
             Mockery::subset([
                 'reason' => 'idle_guard',
-                'vhost' => 'organization_1',
+                'vhost' => self::VHOST,
                 'idle_seconds' => 45.0,
                 'job' => self::LISTENER,
             ])
         );
+    }
+
+    public function test_publish_after_the_vhost_of_an_idle_connection_was_deleted_recreates_the_vhost(): void
+    {
+        $this->lockService->shouldReceive('lock')->andReturnUsing(function (string $key, \Closure $handler): bool {
+            $handler();
+
+            return true;
+        });
+        $this->vhostsService->shouldReceive('setConnection')->andReturnSelf();
+        $this->vhostsService->shouldReceive('createVhost')->once()->with(self::VHOST, Mockery::any())
+            ->andReturnUsing(function (): bool {
+                $this->vhostDeleted = false;
+
+                return true;
+            });
+        $this->queue->push(self::listenerJob(), '', self::QUEUE);
+        $this->published = [];
+
+        $this->lastActivity = $this->secondsAgo(45);
+        $this->connectionDead = true;
+        $this->vhostDeleted = true;
+        $this->queue->push(self::listenerJob(), '', self::QUEUE);
+
+        $this->assertSame([['delivered', self::LISTENER]], $this->published);
     }
 
     public function test_alive_idle_connection_is_kept_so_a_consumer_sharing_it_keeps_its_channel(): void
@@ -180,6 +215,10 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
         $connection->shouldReceive('getHeartbeat')->andReturnUsing(fn () => $this->heartbeat);
         $connection->shouldReceive('getLastActivity')->andReturnUsing(fn () => $this->lastActivity);
         $connection->shouldReceive('reconnect')->andReturnUsing(function (): void {
+            if ($this->vhostDeleted) {
+                throw new AMQPConnectionClosedException('NOT_ALLOWED - vhost '.self::VHOST.' not found', 530);
+            }
+
             $this->connectionDead = false;
             $this->generation++;
             $this->reconnects++;
@@ -192,7 +231,9 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
     private function openChannel(): AMQPChannel
     {
         if ($this->connectionDead) {
-            throw new AMQPConnectionClosedException('Broken pipe or closed connection');
+            throw new AMQPConnectionClosedException($this->vhostDeleted
+                ? "CONNECTION_FORCED - vhost '".self::VHOST."' is deleted"
+                : 'Broken pipe or closed connection');
         }
 
         $this->channelsOpened++;
