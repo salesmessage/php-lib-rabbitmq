@@ -17,6 +17,20 @@ class VhostApiDto
     private ?string $groupName = null;
 
     /**
+     * Queues of the vhost that may hold messages, by name: their counts, or null for a queue that
+     * exists but no node reported counts for (e.g. a quorum queue electing a leader). Null when the
+     * source does not read queues, so they have to be fetched separately.
+     *
+     * @var array<string, QueueApiDto|null>|null
+     */
+    private ?array $queues = null;
+
+    /**
+     * False when some nodes were not read, so a queue missing from $queues may still hold messages.
+     */
+    private bool $isQueuesComplete = true;
+
+    /**
      * @param array $data
      */
     public function __construct(array $data)
@@ -26,6 +40,18 @@ class VhostApiDto
         $this->messages = (int) ($data['messages'] ?? 0);
         $this->messagesReady = (int) ($data['messages_ready'] ?? 0);
         $this->messagesUnacknowledged = (int) ($data['messages_unacknowledged'] ?? 0);
+
+        if (isset($data['queues']) && is_array($data['queues'])) {
+            $queues = [];
+            foreach ($data['queues'] as $queueName => $counts) {
+                $queues[(string) $queueName] = is_array($counts)
+                    ? new QueueApiDto(['name' => (string) $queueName, 'vhost' => $this->name] + $counts)
+                    : null;
+            }
+
+            $this->queues = $queues;
+            $this->isQueuesComplete = (bool) ($data['queues_complete'] ?? true);
+        }
     }
 
     /**
@@ -125,6 +151,42 @@ class VhostApiDto
     }
 
     /**
+     * @return array<string, QueueApiDto|null>|null
+     */
+    public function getQueues(): ?array
+    {
+        return $this->queues;
+    }
+
+    /**
+     * @param  array<string, QueueApiDto|null>|null  $queues
+     * @return $this
+     */
+    public function setQueues(?array $queues): self
+    {
+        $this->queues = $queues;
+        return $this;
+    }
+
+    /**
+     * @return bool
+     */
+    public function isQueuesComplete(): bool
+    {
+        return $this->isQueuesComplete;
+    }
+
+    /**
+     * @param bool $isQueuesComplete
+     * @return $this
+     */
+    public function setQueuesComplete(bool $isQueuesComplete): self
+    {
+        $this->isQueuesComplete = $isQueuesComplete;
+        return $this;
+    }
+
+    /**
      * @return array
      */
     public function toInternalData(): array
@@ -135,6 +197,28 @@ class VhostApiDto
             'messages_ready' => $this->getMessagesReady(),
             'messages_unacknowledged' => $this->getMessagesUnacknowledged(),
         ];
+    }
+
+    /**
+     * Internal data plus the queues, when they were read. The constructor reads it back.
+     *
+     * @return array
+     */
+    public function toInterimData(): array
+    {
+        $data = $this->toInternalData();
+        if (null === $this->queues) {
+            return $data;
+        }
+
+        $data['queues'] = array_map(fn (?QueueApiDto $queueDto): ?array => (null === $queueDto) ? null : [
+            'messages' => $queueDto->getMessages(),
+            'messages_ready' => $queueDto->getMessagesReady(),
+            'messages_unacknowledged' => $queueDto->getMessagesUnacknowledged(),
+        ], $this->queues);
+        $data['queues_complete'] = $this->isQueuesComplete;
+
+        return $data;
     }
 }
 
