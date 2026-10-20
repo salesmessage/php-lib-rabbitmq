@@ -393,8 +393,15 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         AMQPConnectionClosedException|AMQPChannelClosedException $exception,
         int $reconnectAttempts
     ): void {
-        if ($this->isVhostFailedException($exception) && (false === $this->createNotExistsVhost())) {
-            throw $exception;
+        if ($this->isVhostFailedException($exception)) {
+            if (false === $this->createNotExistsVhost()) {
+                throw $exception;
+            }
+
+            // The recreated vhost is empty: without this, publishes to the remembered queues are unroutable and lost.
+            $this->queues = [];
+            $this->exchanges = [];
+            $this->boundQueues = [];
         }
 
         $this->reconnect($reconnectAttempts);

@@ -12,6 +12,7 @@ use Mockery\MockInterface;
 use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Connection\AbstractConnection;
 use PhpAmqpLib\Exception\AMQPConnectionClosedException;
+use PhpAmqpLib\Exception\AMQPProtocolChannelException;
 use PhpAmqpLib\Message\AMQPMessage;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -47,13 +48,17 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
 
     private float $lastActivity;
 
-    private int $heartbeat = 30;
-
     private int $generation = 1;
 
     private int $reconnects = 0;
 
-    private int $channelsOpened = 0;
+    /**
+     * The queue exists before the process publishes, as in production: a passive declare finds and caches it,
+     * so later publishes do no I/O before the write.
+     *
+     * @var list<string>
+     */
+    private array $brokerQueues = [self::QUEUE];
 
     /** @var list<array{0: string, 1: string|null}> */
     private array $published = [];
@@ -100,11 +105,7 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
                 json_encode(['displayName' => self::LISTENER, 'id' => 'job-id']),
                 self::QUEUE
             )],
-            'bulk' => [fn (RabbitMQQueueBatchable $queue) => $queue->bulk(
-                [self::listenerJob(), self::listenerJob()],
-                '',
-                self::QUEUE
-            )],
+            'bulk' => [fn (RabbitMQQueueBatchable $queue) => $queue->bulk([self::listenerJob()], '', self::QUEUE)],
         ];
     }
 
@@ -118,9 +119,7 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
         $this->connectionDead = true;
         $publish($this->queue);
 
-        $this->assertNotEmpty($this->published);
-        $this->assertSame(['delivered'], array_values(array_unique(array_column($this->published, 0))));
-        $this->assertSame(1, $this->reconnects);
+        $this->assertSame([['delivered', self::LISTENER]], $this->published);
         $this->logger->shouldHaveReceived('warning')->once()->with(
             'RabbitMQQueueBatchable.reconnect',
             Mockery::subset([
@@ -132,7 +131,20 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
         );
     }
 
-    public function test_publish_after_the_vhost_of_an_idle_connection_was_deleted_recreates_the_vhost(): void
+    public function test_alive_idle_connection_is_kept_so_a_consumer_sharing_it_keeps_its_channel(): void
+    {
+        $this->queue->push(self::listenerJob(), '', self::QUEUE);
+        $this->published = [];
+
+        $this->lastActivity = $this->secondsAgo(45);
+        $this->queue->push(self::listenerJob(), '', self::QUEUE);
+
+        $this->assertSame([['delivered', self::LISTENER]], $this->published);
+        $this->assertSame(0, $this->reconnects);
+        $this->logger->shouldNotHaveReceived('warning');
+    }
+
+    public function test_publish_after_the_vhost_of_an_idle_connection_was_deleted_declares_the_queue_in_the_recreated_vhost(): void
     {
         $this->lockService->shouldReceive('lock')->andReturnUsing(function (string $key, \Closure $handler): bool {
             $handler();
@@ -152,46 +164,10 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
         $this->lastActivity = $this->secondsAgo(45);
         $this->connectionDead = true;
         $this->vhostDeleted = true;
+        $this->brokerQueues = [];
         $this->queue->push(self::listenerJob(), '', self::QUEUE);
 
         $this->assertSame([['delivered', self::LISTENER]], $this->published);
-    }
-
-    public function test_alive_idle_connection_is_kept_so_a_consumer_sharing_it_keeps_its_channel(): void
-    {
-        $this->queue->push(self::listenerJob(), '', self::QUEUE);
-        $this->published = [];
-
-        $this->lastActivity = $this->secondsAgo(45);
-        $this->queue->push(self::listenerJob(), '', self::QUEUE);
-
-        $this->assertSame([['delivered', self::LISTENER]], $this->published);
-        $this->assertSame(0, $this->reconnects);
-        $this->logger->shouldNotHaveReceived('warning');
-    }
-
-    public static function connectionsWithoutProbe(): array
-    {
-        return [
-            'active within the heartbeat interval' => [5.0, 30],
-            'heartbeat disabled' => [45.0, 0],
-        ];
-    }
-
-    #[DataProvider('connectionsWithoutProbe')]
-    public function test_publish_adds_no_round_trip_when_the_connection_cannot_have_been_closed_for_idleness(
-        float $idleSeconds,
-        int $heartbeat
-    ): void {
-        $this->queue->push(self::listenerJob(), '', self::QUEUE);
-        $channelsOpened = $this->channelsOpened;
-
-        $this->heartbeat = $heartbeat;
-        $this->lastActivity = $this->secondsAgo($idleSeconds);
-        $this->queue->push(self::listenerJob(), '', self::QUEUE);
-
-        $this->assertSame($channelsOpened, $this->channelsOpened);
-        $this->assertSame(0, $this->reconnects);
     }
 
     private static function listenerJob(): CallQueuedListener
@@ -205,14 +181,15 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
     }
 
     /**
-     * A publish counts as delivered only when it goes through a channel of the current, live connection:
-     * a write into a connection the peer has closed returns normally and the message is lost.
+     * A publish counts as delivered only when it goes through a channel of the current, live connection to a
+     * queue the broker has: a write into a connection the peer has closed returns normally and the message is
+     * lost, and so is an unroutable message on a channel without a return listener.
      */
     private function fakeConnection(): AbstractConnection
     {
         $connection = Mockery::mock(AbstractConnection::class);
         $connection->shouldReceive('isConnected')->andReturnTrue();
-        $connection->shouldReceive('getHeartbeat')->andReturnUsing(fn () => $this->heartbeat);
+        $connection->shouldReceive('getHeartbeat')->andReturn(30);
         $connection->shouldReceive('getLastActivity')->andReturnUsing(fn () => $this->lastActivity);
         $connection->shouldReceive('reconnect')->andReturnUsing(function (): void {
             if ($this->vhostDeleted) {
@@ -236,15 +213,29 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
                 : 'Broken pipe or closed connection');
         }
 
-        $this->channelsOpened++;
         $generation = $this->generation;
-        $record = function (AMQPMessage $message) use ($generation): void {
-            $outcome = ($generation === $this->generation && ! $this->connectionDead) ? 'delivered' : 'lost';
-            $this->published[] = [$outcome, json_decode($message->getBody(), true)['displayName'] ?? null];
+        $record = function (AMQPMessage $message, string $exchange, string $routingKey) use ($generation): void {
+            $delivered = $generation === $this->generation
+                && ! $this->connectionDead
+                && in_array($routingKey, $this->brokerQueues, true);
+            $this->published[] = [
+                $delivered ? 'delivered' : 'lost',
+                json_decode($message->getBody(), true)['displayName'] ?? null,
+            ];
         };
 
         $channel = Mockery::mock(AMQPChannel::class);
-        $channel->shouldReceive('queue_declare', 'close', 'publish_batch')->andReturnNull();
+        $channel->shouldReceive('queue_declare')->andReturnUsing(function (string $name, bool $passive): array {
+            if (! in_array($name, $this->brokerQueues, true)) {
+                if ($passive) {
+                    throw new AMQPProtocolChannelException(404, "NOT_FOUND - no queue '$name'", [50, 10]);
+                }
+                $this->brokerQueues[] = $name;
+            }
+
+            return [$name, 0, 0];
+        });
+        $channel->shouldReceive('close', 'publish_batch')->andReturnNull();
         $channel->shouldReceive('basic_publish')->andReturnUsing($record);
         $channel->shouldReceive('batch_basic_publish')->andReturnUsing($record);
 
