@@ -13,7 +13,6 @@ use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue as BaseRabbitMQQueue;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
 use PhpAmqpLib\Exception\AMQPConnectionClosedException;
 use PhpAmqpLib\Channel\AMQPChannel;
-use PhpAmqpLib\Message\AMQPMessage;
 use Salesmessage\LibRabbitMQ\Services\GroupsService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Salesmessage\LibRabbitMQ\Services\Lock\LockService;
@@ -54,11 +53,29 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         $ticket = null,
         bool $confirm = false
     ): void {
-        $this->probeIdleConnection($msg);
-
         $this->withConnectionRetry(
             fn() => parent::publishBasic($msg, $exchange, $destination, $mandatory, $immediate, $ticket, $confirm)
         );
+    }
+
+    public function pushRaw($payload, $queue = null, array $options = []): int|string|null
+    {
+        $this->probeIdleConnection($payload);
+
+        return parent::pushRaw($payload, $queue, $options);
+    }
+
+    public function laterRaw(
+        $delay,
+        string $payload,
+        $queue = null,
+        int $attempts = 0,
+        ?string $queueType = null,
+        bool $confirm = false
+    ): int|string|null {
+        $this->probeIdleConnection($payload);
+
+        return parent::laterRaw($delay, $payload, $queue, $attempts, $queueType, $confirm);
     }
 
     protected function publishBatch($jobs, $data = '', $queue = null): void
@@ -67,7 +84,7 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         $prepared = $this->prepareMessages($jobs, $data, $queue);
 
         if (! empty($prepared)) {
-            $this->probeIdleConnection($prepared[0][0]);
+            $this->probeIdleConnection($prepared[0][0]->getBody());
         }
 
         // Phase 2: declare + publish as a single retried unit. The same pre-built
@@ -144,9 +161,10 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
      * is lost without an error. A temporary channel round trip either finds the connection alive (and
      * resets the proxy's idle timer) or fails, and only then is the connection re-established. An alive
      * connection is not reconnected: a vhost consumer shares it, and a reconnect would close the channel
-     * that holds its unacked delivery.
+     * that holds its unacked delivery. Callers run it before declaring anything, so the queues of a vhost
+     * recreated here are declared again by the publish that follows.
      */
-    private function probeIdleConnection(AMQPMessage $message): void
+    private function probeIdleConnection(string $payload): void
     {
         $connection = $this->getConnection();
         if (! $connection->isConnected() || $connection->getHeartbeat() <= 0) {
@@ -165,7 +183,7 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
                 'reason' => 'idle_guard',
                 'vhost' => (new ConnectionNameDto($this->getConnectionName()))->getVhostName(),
                 'idle_seconds' => round($idleSeconds, 1),
-                'job' => json_decode($message->getBody(), true)['displayName'] ?? null,
+                'job' => json_decode($payload, true)['displayName'] ?? null,
                 'error' => $exception->getMessage(),
             ]);
 
@@ -191,7 +209,7 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         // reconnect retry publish the same message_id - necessary for transport-level
         // deduplication. Declaration + publish are the only retried steps (reusing the
         // pre-built message); parent::publishBasic is called directly to avoid the
-        // extra retry layer and idle probe in the overridden publishBasic.
+        // extra retry layer in the overridden publishBasic.
         $confirm = $this->jobRequestsConfirm($job);
 
         $publishQueue = $this->addQueuePostfix($job, $queue);
@@ -204,8 +222,8 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
             $payload,
             $publishQueue,
             null,
-            function () use ($message, $exchange, $destination, $exchangeType, $queueType, $correlationId, $confirm) {
-                $this->probeIdleConnection($message);
+            function () use ($payload, $message, $exchange, $destination, $exchangeType, $queueType, $correlationId, $confirm) {
+                $this->probeIdleConnection($payload);
 
                 return $this->withConnectionRetry(function () use ($message, $exchange, $destination, $exchangeType, $queueType, $correlationId, $confirm) {
                     $this->declareDestination($destination, $exchange, $exchangeType, $queueType);

@@ -106,6 +106,11 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
                 self::QUEUE
             )],
             'bulk' => [fn (RabbitMQQueueBatchable $queue) => $queue->bulk([self::listenerJob()], '', self::QUEUE)],
+            'laterRaw with a delay' => [fn (RabbitMQQueueBatchable $queue) => $queue->laterRaw(
+                30,
+                json_encode(['displayName' => self::LISTENER, 'id' => 'job-id']),
+                self::QUEUE
+            )],
         ];
     }
 
@@ -144,7 +149,8 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
         $this->logger->shouldNotHaveReceived('warning');
     }
 
-    public function test_publish_after_the_vhost_of_an_idle_connection_was_deleted_declares_the_queue_in_the_recreated_vhost(): void
+    #[DataProvider('publishPaths')]
+    public function test_publish_after_the_vhost_of_an_idle_connection_was_deleted_declares_the_queue_in_the_recreated_vhost(callable $publish): void
     {
         $this->lockService->shouldReceive('lock')->andReturnUsing(function (string $key, \Closure $handler): bool {
             $handler();
@@ -158,14 +164,14 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
 
                 return true;
             });
-        $this->queue->push(self::listenerJob(), '', self::QUEUE);
+        $publish($this->queue);
         $this->published = [];
 
         $this->lastActivity = $this->secondsAgo(45);
         $this->connectionDead = true;
         $this->vhostDeleted = true;
         $this->brokerQueues = [];
-        $this->queue->push(self::listenerJob(), '', self::QUEUE);
+        $publish($this->queue);
 
         $this->assertSame([['delivered', self::LISTENER]], $this->published);
     }
@@ -224,7 +230,8 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
             ];
         };
 
-        $channel = Mockery::mock(AMQPChannel::class);
+        // Publisher confirms and the delay queue exchange/binding calls need no behaviour here.
+        $channel = Mockery::mock(AMQPChannel::class)->shouldIgnoreMissing();
         $channel->shouldReceive('queue_declare')->andReturnUsing(function (string $name, bool $passive): array {
             if (! in_array($name, $this->brokerQueues, true)) {
                 if ($passive) {
