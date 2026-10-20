@@ -1011,6 +1011,15 @@ You can alter the heartbeat settings by changing the config.
 ],
 ```
 
+With a heartbeat set, `RabbitMQQueueBatchable` checks a connection that has had no read or write for at
+least the heartbeat interval before publishing on it: it opens and closes a temporary channel. A proxy such
+as AMQProxy closes a client that sent no frame for 2 x heartbeat, while php-amqplib notices that only after
+2 x heartbeat + 1 s, so without the check a publish in between would be lost without an error. When the
+connection is alive the round trip resets the proxy's idle timer and nothing else happens; when it is closed
+the connection is re-established and a `RabbitMQQueueBatchable.reconnect` warning is logged with
+`reason: idle_guard`, the vhost, the idle seconds and the job. An alive connection is never reconnected,
+because a vhost consumer may share it.
+
 ### SSL Secure
 
 If you need a secure connection to rabbitMQ server(s), you will need to add these extra config options.
