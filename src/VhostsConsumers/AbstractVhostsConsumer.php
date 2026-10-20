@@ -8,6 +8,7 @@ use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Events\CallQueuedListener;
 use Illuminate\Queue\QueueManager;
 use Illuminate\Queue\WorkerOptions;
+use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Str;
 use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Connection\AMQPStreamConnection;
@@ -220,7 +221,11 @@ abstract class AbstractVhostsConsumer extends Consumer
                 $this->startHeartbeatCheck();
                 $this->startProcessingTimeAccrual();
                 \go(function () use ($connectionName, $options) {
-                    $this->vhostDaemon($connectionName, $options);
+                    try {
+                        $this->vhostDaemon($connectionName, $options);
+                    } finally {
+                        $this->closeConnections();
+                    }
                 });
             };
 
@@ -1094,6 +1099,51 @@ abstract class AbstractVhostsConsumer extends Consumer
                 }
             }
         });
+    }
+
+    /**
+     * Close the RabbitMQ and Redis connections before the async worker exits, while
+     * still inside the coroutine. Otherwise the sockets opened under Swoole hooks stay
+     * open until PHP shutdown, which runs outside the coroutine, and that is where the
+     * worker crashes with a segmentation fault after its last job.
+     *
+     * @return void
+     */
+    protected function closeConnections(): void
+    {
+        // the heartbeat and accrual coroutines quit on their next wake-up instead of
+        // reopening a connection that has just been closed
+        $this->shouldQuit = true;
+
+        $this->logInfo('closeConnections.start');
+
+        try {
+            $this->connection?->close();
+        } catch (\Throwable $exception) {
+            $this->logWarning('closeConnections.rabbitmq_exception', [
+                'message' => $exception->getMessage(),
+            ]);
+        }
+
+        try {
+            $this->internalStorageManager->disconnect();
+        } catch (\Throwable $exception) {
+            $this->logWarning('closeConnections.storage_redis_exception', [
+                'message' => $exception->getMessage(),
+            ]);
+        }
+
+        // connections opened by jobs through the application's Redis manager
+        foreach (Redis::connections() ?? [] as $name => $redisConnection) {
+            try {
+                $redisConnection->disconnect();
+            } catch (\Throwable $exception) {
+                $this->logWarning('closeConnections.redis_exception', [
+                    'connection' => $name,
+                    'message' => $exception->getMessage(),
+                ]);
+            }
+        }
     }
 
     /**

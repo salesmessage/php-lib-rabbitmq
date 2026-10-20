@@ -73,6 +73,17 @@ class InternalStorageManager
     }
 
     /**
+     * Close the storage connection. A pooled connection is closed through the pool,
+     * so a coroutine that is still using it finishes its command first.
+     *
+     * @return void
+     */
+    public function disconnect(): void
+    {
+        $this->redis->disconnect();
+    }
+
+    /**
      * @return array
      */
     public function getInterimVhosts(): array
