@@ -92,6 +92,14 @@ class QueueApiDto
     }
 
     /**
+     * @return bool
+     */
+    public function hasMessages(): bool
+    {
+        return ($this->messagesReady > 0) || ($this->messagesUnacknowledged > 0);
+    }
+
+    /**
      * @return int
      */
     public function getLastProcessedAt(): int

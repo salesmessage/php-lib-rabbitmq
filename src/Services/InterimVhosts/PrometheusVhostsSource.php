@@ -39,7 +39,8 @@ class PrometheusVhostsSource implements InterimVhostsSourceInterface
 
     /**
      * A stopped node is left out: its quorum queues elect a leader on a running node and its classic
-     * queues cannot be consumed. Its vhosts may be missing from the counts, so it is reported as skipped.
+     * queues cannot be consumed. Its vhosts may be missing from the counts, so it is reported as skipped,
+     * and its queues may be missing from every vhost, so their queue lists are marked as incomplete.
      *
      * @throws PrometheusMetricsException
      * @throws \Salesmessage\LibRabbitMQ\Exceptions\RabbitApiClientException
@@ -75,7 +76,14 @@ class PrometheusVhostsSource implements InterimVhostsSourceInterface
             $nodesMetrics[$nodeName] = $this->parser->parse($bodies[$host]);
         }
 
-        return new InterimVhostsDto($this->aggregator->aggregate($nodesMetrics), $stoppedNodeNames);
+        $vhosts = $this->aggregator->aggregate($nodesMetrics);
+        if (! empty($stoppedNodeNames)) {
+            foreach ($vhosts as $vhostDto) {
+                $vhostDto->setQueuesComplete(false);
+            }
+        }
+
+        return new InterimVhostsDto($vhosts, $stoppedNodeNames);
     }
 
     /**

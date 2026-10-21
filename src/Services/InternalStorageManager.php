@@ -105,7 +105,7 @@ class InternalStorageManager
      */
     public function addInterimVhost(VhostApiDto $vhostDto): void
     {
-        $this->redis->hset($this->getInterimKeyVhosts(), $vhostDto->getName(), json_encode($vhostDto->toInternalData()));
+        $this->redis->hset($this->getInterimKeyVhosts(), $vhostDto->getName(), json_encode($vhostDto->toInterimData()));
     }
 
     /**
@@ -328,7 +328,7 @@ class InternalStorageManager
      */
     public function indexQueue(QueueApiDto $queueDto, array $groups): bool
     {
-        $isAddQueue = ($queueDto->getMessagesReady() > 0) || ($queueDto->getMessagesUnacknowledged() > 0);
+        $isAddQueue = $queueDto->hasMessages();
         if ($isAddQueue) {
             $this->addQueue($queueDto, $groups);
         } else {

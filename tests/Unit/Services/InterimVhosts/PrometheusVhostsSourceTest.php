@@ -56,6 +56,11 @@ class PrometheusVhostsSourceTest extends TestCase
             ['name' => 'org_2', 'messages' => 2, 'messages_ready' => 0, 'messages_unacknowledged' => 2],
         ], $this->vhostsData($result));
         $this->assertSame([], $result->getSkippedNodeNames());
+        $this->assertSame([
+            'org_1' => ['q1' => ['messages' => 4, 'messages_ready' => 3, 'messages_unacknowledged' => 1]],
+            'org_2' => ['q1' => ['messages' => 2, 'messages_ready' => 0, 'messages_unacknowledged' => 2]],
+        ], $this->queuesData($result));
+        $this->assertSame([true, true], $this->queuesComplete($result));
 
         sort($this->requestedUris);
         $this->assertSame([
@@ -85,10 +90,16 @@ class PrometheusVhostsSourceTest extends TestCase
             ]
         );
 
+        $result = $source->getVhosts();
+
         $this->assertSame([
             ['name' => 'org_1', 'messages' => 1, 'messages_ready' => 1, 'messages_unacknowledged' => 0],
             ['name' => 'org_2', 'messages' => 0, 'messages_ready' => 0, 'messages_unacknowledged' => 0],
-        ], $this->vhostsData($source->getVhosts()));
+        ], $this->vhostsData($result));
+        $this->assertSame([
+            'org_1' => ['q1' => ['messages' => 1, 'messages_ready' => 1, 'messages_unacknowledged' => 0], 'q2' => null],
+            'org_2' => [],
+        ], $this->queuesData($result));
     }
 
     public function test_cluster_without_queues_returns_no_vhosts(): void
@@ -217,6 +228,7 @@ class PrometheusVhostsSourceTest extends TestCase
             $this->vhostsData($result)
         );
         $this->assertSame(['rabbit@10.0.0.2'], $result->getSkippedNodeNames());
+        $this->assertSame([false], $this->queuesComplete($result));
         $this->assertSame(['http://10.0.0.1:15692/metrics/detailed?family=queue_coarse_metrics'], $this->requestedUris);
     }
 
@@ -253,6 +265,27 @@ class PrometheusVhostsSourceTest extends TestCase
     private function vhostsData(InterimVhostsDto $result): array
     {
         return array_map(fn (VhostApiDto $vhost): array => $vhost->toInternalData(), $result->getVhosts());
+    }
+
+    /**
+     * @return array<string, array> vhost => interim queues
+     */
+    private function queuesData(InterimVhostsDto $result): array
+    {
+        $queues = [];
+        foreach ($result->getVhosts() as $vhost) {
+            $queues[$vhost->getName()] = $vhost->toInterimData()['queues'];
+        }
+
+        return $queues;
+    }
+
+    /**
+     * @return array<bool>
+     */
+    private function queuesComplete(InterimVhostsDto $result): array
+    {
+        return array_map(fn (VhostApiDto $vhost): bool => $vhost->isQueuesComplete(), $result->getVhosts());
     }
 
     /**

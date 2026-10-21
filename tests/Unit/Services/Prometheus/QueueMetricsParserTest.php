@@ -33,6 +33,14 @@ PROM;
             ['org_1' => ['q1' => ['messages_ready' => 4, 'messages_unacknowledged' => 2, 'messages' => 6]]],
             $metrics->getQueueCounts()
         );
+        $this->assertSame(['org_1' => ['q1' => true], 'org_2' => ['q2' => true]], $metrics->getQueues());
+    }
+
+    public function test_queue_info_without_queue_label_throws(): void
+    {
+        $this->expectException(PrometheusMetricsException::class);
+
+        (new QueueMetricsParser)->parse(Utils::streamFor('rabbitmq_detailed_queue_info{vhost="v",membership="leader"} 1'));
     }
 
     public function test_unescapes_label_values(): void

@@ -3,6 +3,7 @@
 namespace Salesmessage\LibRabbitMQ\Services\Prometheus;
 
 use Salesmessage\LibRabbitMQ\Dto\NodeQueueMetricsDto;
+use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Exceptions\PrometheusMetricsException;
 
@@ -12,9 +13,13 @@ class QueueMetricsAggregator
 
     /**
      * A queue that no node reports counts for (e.g. a quorum queue without a leader)
-     * adds nothing to its vhost until a leader reports it again. A node may report no
-     * queue counts at all (the cluster has no queues, or the node leads none); only a
-     * response without the node's rabbitmq_identity_info throws.
+     * adds nothing to its vhost until a leader reports it again; it is still listed in
+     * the vhost queues, without counts, while a node reports it as existing. A node may
+     * report no queue counts at all (the cluster has no queues, or the node leads none);
+     * only a response without the node's rabbitmq_identity_info throws.
+     *
+     * Each vhost carries the queues that may hold messages: the ones with messages and
+     * the ones without counts. Idle queues are left out.
      *
      * @param  array<string, NodeQueueMetricsDto>  $nodesMetrics  keyed by the expected node name
      * @return array<VhostApiDto>
@@ -26,19 +31,34 @@ class QueueMetricsAggregator
         $this->assertSameCluster($nodesMetrics);
 
         $queueCounts = $this->mergeQueueCounts($nodesMetrics);
+        $existingQueues = $this->mergeQueues($nodesMetrics);
 
-        ksort($queueCounts, SORT_STRING);
+        $vhostNames = array_map('strval', array_keys($queueCounts + $existingQueues));
+        sort($vhostNames, SORT_STRING);
 
         $vhosts = [];
-        foreach ($queueCounts as $vhostName => $queues) {
+        foreach ($vhostNames as $vhostName) {
             $totals = array_fill_keys(self::COUNT_FIELDS, 0);
-            foreach ($queues as $counts) {
+            $vhostQueues = [];
+
+            foreach ($queueCounts[$vhostName] ?? [] as $queueName => $counts) {
                 foreach (self::COUNT_FIELDS as $field) {
                     $totals[$field] += $counts[$field] ?? 0;
                 }
+
+                $queueDto = new QueueApiDto(['name' => (string) $queueName, 'vhost' => $vhostName] + $counts);
+                if ($queueDto->hasMessages()) {
+                    $vhostQueues[(string) $queueName] = $queueDto;
+                }
             }
 
-            $vhosts[] = new VhostApiDto(['name' => (string) $vhostName] + $totals);
+            foreach (array_keys(array_diff_key($existingQueues[$vhostName] ?? [], $queueCounts[$vhostName] ?? [])) as $queueName) {
+                $vhostQueues[(string) $queueName] = null;
+            }
+
+            ksort($vhostQueues, SORT_STRING);
+
+            $vhosts[] = (new VhostApiDto(['name' => $vhostName] + $totals))->setQueues($vhostQueues);
         }
 
         return $vhosts;
@@ -99,6 +119,22 @@ class QueueMetricsAggregator
                         $merged[$vhostName][$queueName][$field] = max($merged[$vhostName][$queueName][$field] ?? 0, $count);
                     }
                 }
+            }
+        }
+
+        return $merged;
+    }
+
+    /**
+     * @param  array<string, NodeQueueMetricsDto>  $nodesMetrics
+     * @return array<string, array<string, true>>
+     */
+    private function mergeQueues(array $nodesMetrics): array
+    {
+        $merged = [];
+        foreach ($nodesMetrics as $nodeMetrics) {
+            foreach ($nodeMetrics->getQueues() as $vhostName => $queues) {
+                $merged[$vhostName] = ($merged[$vhostName] ?? []) + $queues;
             }
         }
 

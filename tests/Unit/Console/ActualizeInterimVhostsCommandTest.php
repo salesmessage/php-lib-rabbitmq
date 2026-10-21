@@ -7,6 +7,7 @@ use Mockery\Adapter\Phpunit\MockeryPHPUnitIntegration;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 use Salesmessage\LibRabbitMQ\Dto\InterimVhostsDto;
+use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Exceptions\PrometheusMetricsException;
 use Salesmessage\LibRabbitMQ\Services\InterimVhosts\InterimVhostsSourceFactory;
@@ -44,6 +45,37 @@ class ActualizeInterimVhostsCommandTest extends RedisBackedTestCase
         $this->assertSame(
             ['name' => 'org_1', 'messages' => 3, 'messages_ready' => 3, 'messages_unacknowledged' => 0],
             json_decode($this->redis->hget(self::INTERIM_KEY, 'org_1'), true)
+        );
+    }
+
+    public function test_writes_queues_read_with_vhosts(): void
+    {
+        $source = Mockery::mock(InterimVhostsSourceInterface::class);
+        $source->shouldReceive('getVhosts')->once()->andReturn(new InterimVhostsDto([
+            (new VhostApiDto(['name' => 'org_1', 'messages' => 3, 'messages_ready' => 3]))->setQueues([
+                'q_busy' => new QueueApiDto(['name' => 'q_busy', 'vhost' => 'org_1', 'messages' => 3, 'messages_ready' => 3]),
+                'q_electing' => null,
+            ]),
+            (new VhostApiDto(['name' => 'org_2']))->setQueues([])->setQueuesComplete(false),
+        ]));
+        $this->bindSource($source);
+
+        $this->artisan('lib-rabbitmq:actualize-interim-vhosts', ['--sleep' => 0])->assertExitCode(0);
+
+        $this->assertSame([
+            'name' => 'org_1',
+            'messages' => 3,
+            'messages_ready' => 3,
+            'messages_unacknowledged' => 0,
+            'queues' => [
+                'q_busy' => ['messages' => 3, 'messages_ready' => 3, 'messages_unacknowledged' => 0],
+                'q_electing' => null,
+            ],
+            'queues_complete' => true,
+        ], json_decode($this->redis->hget(self::INTERIM_KEY, 'org_1'), true));
+        $this->assertSame(
+            ['queues' => [], 'queues_complete' => false],
+            array_intersect_key(json_decode($this->redis->hget(self::INTERIM_KEY, 'org_2'), true), ['queues' => 0, 'queues_complete' => 0])
         );
     }
 

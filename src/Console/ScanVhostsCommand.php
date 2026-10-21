@@ -202,6 +202,13 @@ class ScanVhostsCommand extends Command
             return false;
         }
 
+        // queues read together with the vhost (Prometheus) need no management API call
+        if (null !== $vhostDto->getQueues()) {
+            $this->processVhostWithQueues($vhostDto);
+
+            return true;
+        }
+
         $isAddedToIndex = $this->internalStorageManager->indexVhost($vhostDto, $this->groups);
 
         $this->info(sprintf(
@@ -235,7 +242,7 @@ class ScanVhostsCommand extends Command
 
         if ($vhostQueues && $vhostQueues->isNotEmpty()) {
             foreach ($vhostQueues as $queueApiData) {
-                $processedQueue = $this->processVhostQueue($queueApiData);
+                $processedQueue = $this->processVhostQueue(new QueueApiDto($queueApiData));
                 if (null === $processedQueue) {
                     continue;
                 }
@@ -264,6 +271,78 @@ class ScanVhostsCommand extends Command
         }
 
         return true;
+    }
+
+    /**
+     * Index a vhost and its queues from the queues read with it. They are only the ones that may hold
+     * messages, so an indexed queue missing from them is idle or gone and is removed. It is kept instead
+     * when it exists without counts (e.g. its quorum queue elects a leader) or when the read was
+     * incomplete (a node was not read). Their messages are not in the vhost totals, so a vhost with no
+     * queue holding messages is kept as it is while it has kept queues.
+     *
+     * @param VhostApiDto $vhostDto
+     * @return void
+     */
+    private function processVhostWithQueues(VhostApiDto $vhostDto): void
+    {
+        $queues = (array) $vhostDto->getQueues();
+
+        $keptQueueNames = [];
+        $removedQueueNames = [];
+        foreach ($this->internalStorageManager->getVhostQueues($vhostDto->getName()) as $indexedQueueName) {
+            if (array_key_exists($indexedQueueName, $queues)) {
+                if (null === $queues[$indexedQueueName]) {
+                    $keptQueueNames[] = $indexedQueueName;
+                }
+
+                continue;
+            }
+
+            if ($vhostDto->isQueuesComplete()) {
+                $removedQueueNames[] = $indexedQueueName;
+            } else {
+                $keptQueueNames[] = $indexedQueueName;
+            }
+        }
+
+        $indexedQueueNames = [];
+        foreach (array_filter($queues) as $queueDto) {
+            $processedQueue = $this->processVhostQueue($queueDto);
+            if ((null !== $processedQueue) && $processedQueue[1]) {
+                $indexedQueueNames[] = $processedQueue[0]->getName();
+            }
+        }
+
+        foreach ($keptQueueNames as $keptQueueName) {
+            $this->info(sprintf(
+                'Kept in index queue: "%s". Vhost: %s. No counts were read for it.',
+                $keptQueueName,
+                $vhostDto->getName()
+            ));
+        }
+
+        $this->removeOldVhostQueues($vhostDto, $removedQueueNames);
+
+        if (empty($indexedQueueNames) && !empty($keptQueueNames)) {
+            $isVhostIndexed = true;
+
+            $this->info(sprintf('Kept in index vhost: "%s". It has kept queues.', $vhostDto->getName()));
+        } else {
+            $isVhostIndexed = $this->internalStorageManager->indexVhost($vhostDto, $this->groups);
+
+            $this->info(sprintf(
+                'Successfully indexed (%s) vhost: "%s". Messages ready: %d. Messages unacknowledged: %d.',
+                $isVhostIndexed ? 'added' : 'removed',
+                $vhostDto->getName(),
+                $vhostDto->getMessagesReady(),
+                $vhostDto->getMessagesUnacknowledged()
+            ));
+        }
+
+        if ($isVhostIndexed) {
+            $this->refreshWindowCosts($vhostDto->getName());
+            $this->refreshQueueWindowCosts($vhostDto->getName(), array_merge($indexedQueueNames, $keptQueueNames));
+        }
     }
 
     /**
@@ -347,12 +426,11 @@ class ScanVhostsCommand extends Command
     }
 
     /**
-     * @param array $queueApiData
+     * @param QueueApiDto $queueApiDto
      * @return array{0: QueueApiDto, 1: bool}|null the processed queue and whether it was added to the index
      */
-    private function processVhostQueue(array $queueApiData): ?array
+    private function processVhostQueue(QueueApiDto $queueApiDto): ?array
     {
-        $queueApiDto = new QueueApiDto($queueApiData);
         if ('' === $queueApiDto->getName()) {
             return null;
         }
