@@ -41,6 +41,48 @@ class QueueMetricsAggregatorTest extends TestCase
         $this->assertSame(3, $vhosts[0]->getMessagesReady());
     }
 
+    public function test_vhost_carries_queues_with_messages_and_queues_without_counts(): void
+    {
+        $node1 = $this->node('rabbit@n1')
+            ->setQueueCount('org_1', 'q_busy', 'messages', 3)
+            ->setQueueCount('org_1', 'q_busy', 'messages_ready', 1)
+            ->setQueueCount('org_1', 'q_busy', 'messages_unacknowledged', 2)
+            ->setQueueCount('org_1', 'q_idle', 'messages', 0)
+            ->setQueueCount('org_1', 'q_idle', 'messages_ready', 0)
+            ->setQueueCount('org_1', 'q_idle', 'messages_unacknowledged', 0)
+            ->addQueue('org_1', 'q_busy')
+            ->addQueue('org_1', 'q_idle')
+            ->addQueue('org_1', 'q_electing');
+        $node2 = $this->node('rabbit@n2')
+            ->addQueue('org_1', 'q_busy')
+            ->addQueue('org_1', 'q_electing');
+
+        $vhosts = (new QueueMetricsAggregator)->aggregate(['rabbit@n1' => $node1, 'rabbit@n2' => $node2]);
+
+        $this->assertCount(1, $vhosts);
+        $this->assertSame([
+            'q_busy' => ['messages' => 3, 'messages_ready' => 1, 'messages_unacknowledged' => 2],
+            'q_electing' => null,
+        ], $vhosts[0]->toInterimData()['queues']);
+        $this->assertTrue($vhosts[0]->isQueuesComplete());
+    }
+
+    public function test_vhost_with_only_queues_without_counts_has_zero_totals(): void
+    {
+        $vhosts = (new QueueMetricsAggregator)->aggregate([
+            'rabbit@n1' => $this->node('rabbit@n1')->addQueue('org_1', 'q_electing'),
+        ]);
+
+        $this->assertSame([[
+            'name' => 'org_1',
+            'messages' => 0,
+            'messages_ready' => 0,
+            'messages_unacknowledged' => 0,
+            'queues' => ['q_electing' => null],
+            'queues_complete' => true,
+        ]], array_map(fn (VhostApiDto $vhost): array => $vhost->toInterimData(), $vhosts));
+    }
+
     public function test_metrics_from_unexpected_node_throws(): void
     {
         $this->expectException(PrometheusMetricsException::class);

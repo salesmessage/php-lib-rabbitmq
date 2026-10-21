@@ -13,6 +13,8 @@ class QueueMetricsParser
 
     private const METRIC_IDENTITY_INFO = 'rabbitmq_identity_info';
 
+    private const METRIC_QUEUE_INFO = 'rabbitmq_detailed_queue_info';
+
     private const COUNT_FIELDS = [
         'rabbitmq_detailed_queue_messages' => 'messages',
         'rabbitmq_detailed_queue_messages_ready' => 'messages_ready',
@@ -44,13 +46,13 @@ class QueueMetricsParser
 
             $name = substr($line, 0, $labelsStart);
             $field = self::COUNT_FIELDS[$name] ?? null;
-            if (($field === null) && ($name !== self::METRIC_IDENTITY_INFO)) {
+            if (($field === null) && ($name !== self::METRIC_IDENTITY_INFO) && ($name !== self::METRIC_QUEUE_INFO)) {
                 continue;
             }
 
             [$labels, $value] = $this->parseSample($line);
 
-            if ($field === null) {
+            if ($name === self::METRIC_IDENTITY_INFO) {
                 $metrics->setIdentity(
                     $labels['rabbitmq_node'] ?? null,
                     $labels['rabbitmq_cluster_permanent_id'] ?? null
@@ -61,6 +63,13 @@ class QueueMetricsParser
 
             if (! isset($labels['vhost'], $labels['queue'])) {
                 throw new PrometheusMetricsException(sprintf('Metric %s has no vhost or queue label: %s', $name, $line));
+            }
+
+            // queue_info lists every queue the node is a member of, also the ones it reports no counts for
+            if ($field === null) {
+                $metrics->addQueue($labels['vhost'], $labels['queue']);
+
+                continue;
             }
 
             $metrics->setQueueCount($labels['vhost'], $labels['queue'], $field, (int) $value);
