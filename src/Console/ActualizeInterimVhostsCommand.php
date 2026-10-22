@@ -108,6 +108,9 @@ class ActualizeInterimVhostsCommand extends Command
      */
     private function actualizeInterimVhosts(): void
     {
+        // taken before the read, so the scanner never treats counts as newer than they are
+        $actualizedAt = microtime(true);
+
         try {
             $interimVhosts = $this->vhostsSource->getVhosts();
         } catch (Throwable $exception) {
@@ -136,7 +139,7 @@ class ActualizeInterimVhostsCommand extends Command
             : [];
 
         foreach ($interimVhosts->getVhosts() as $vhostDto) {
-            $this->internalStorageManager->addInterimVhost($vhostDto);
+            $this->internalStorageManager->addInterimVhost($vhostDto->setActualizedAt($actualizedAt));
 
             unset($oldInterimVhostNames[$vhostDto->getName()]);
         }

@@ -19,6 +19,8 @@ class ScanVhostsCommand extends Command
     protected const TYPE_API = 'api';
     protected const TYPE_INTERIM = 'interim';
 
+    private const DEFAULT_IMMEDIATE_INDEXATION_GRACE = 10;
+
     protected $signature = 'lib-rabbitmq:scan-vhosts
                             {--connection=rabbitmq_vhosts : The name of the queue connection to work}
                             {--type=api : Scan type}
@@ -34,6 +36,8 @@ class ScanVhostsCommand extends Command
     private array $processingTimeGroups = [];
     private bool $silent = false;
     private ?ProcessingTimeSchedulerOptions $schedulerOptions = null;
+    private float $immediateIndexationGrace = self::DEFAULT_IMMEDIATE_INDEXATION_GRACE;
+    private float $passStartedAt = 0.0;
 
     /**
      * @param GroupsService $groupsService
@@ -77,6 +81,11 @@ class ScanVhostsCommand extends Command
         $this->schedulerOptions = ProcessingTimeSchedulerOptions::fromConfig(
             (array) config('queue.drivers.rabbitmq_vhosts.scheduler.strategies.processing_time', [])
         );
+
+        $this->immediateIndexationGrace = max(0.0, (float) config(
+            'queue.connections.' . $connectionName . '.immediate_indexation_grace',
+            self::DEFAULT_IMMEDIATE_INDEXATION_GRACE
+        ));
 
         $this->vhostsService->setConnection($connectionName);
         $this->queueService->setConnection($connectionName);
@@ -143,11 +152,16 @@ class ScanVhostsCommand extends Command
      */
     private function processVhosts(): void
     {
+        $this->passStartedAt = microtime(true);
+
         $filter = trim($this->option('filter', ''));
         $hasFilter = '' !== $filter;
 
         $shouldRemoveOld = !$hasFilter;
         $oldVhostsMap = $shouldRemoveOld ? array_flip($this->internalStorageManager->getVhosts()) : [];
+
+        // a vhost missing from the counts is judged by the oldest counts of the pass
+        $oldestCountsReadAt = $this->passStartedAt;
 
         foreach ($this->getAllApiVhosts() as $vhostApiData) {
             if (is_string($vhostApiData)) {
@@ -158,6 +172,8 @@ class ScanVhostsCommand extends Command
             if ($hasFilter && (false === str_contains($vhostDto->getName(), $filter))) {
                 continue;
             }
+
+            $oldestCountsReadAt = min($oldestCountsReadAt, $this->getCountsReadAt($vhostDto));
 
             $isProcessed = $this->processVhost($vhostDto);
             if (false === $isProcessed) {
@@ -170,7 +186,7 @@ class ScanVhostsCommand extends Command
         }
 
         if ($shouldRemoveOld) {
-            $this->removeOldVhosts(array_keys($oldVhostsMap));
+            $this->removeOldVhosts(array_keys($oldVhostsMap), $oldestCountsReadAt);
         }
         unset($oldVhostsMap);
     }
@@ -205,6 +221,16 @@ class ScanVhostsCommand extends Command
         // queues read together with the vhost (Prometheus) need no management API call
         if (null !== $vhostDto->getQueues()) {
             $this->processVhostWithQueues($vhostDto);
+
+            return true;
+        }
+
+        $countsReadAt = $this->getCountsReadAt($vhostDto);
+        if (!$vhostDto->hasMessages() && $this->isVhostActivatedAfter($vhostDto->getName(), $countsReadAt)) {
+            $this->info(sprintf(
+                'Kept in index vhost: "%s". A publish indexed it after its counts were read.',
+                $vhostDto->getName()
+            ));
 
             return true;
         }
@@ -264,7 +290,8 @@ class ScanVhostsCommand extends Command
             ));
         }
 
-        $this->removeOldVhostQueues($vhostDto, $oldVhostQueues);
+        $activatedQueueNames = $this->keepActivatedQueues($vhostDto, $oldVhostQueues, $countsReadAt);
+        $this->removeOldVhostQueues($vhostDto, array_diff($oldVhostQueues, $activatedQueueNames));
 
         if ($isAddedToIndex) {
             $this->refreshQueueWindowCosts($vhostDto->getName(), $indexedQueueNames);
@@ -276,9 +303,10 @@ class ScanVhostsCommand extends Command
     /**
      * Index a vhost and its queues from the queues read with it. They are only the ones that may hold
      * messages, so an indexed queue missing from them is idle or gone and is removed. It is kept instead
-     * when it exists without counts (e.g. its quorum queue elects a leader) or when the read was
-     * incomplete (a node was not read). Their messages are not in the vhost totals, so a vhost with no
-     * queue holding messages is kept as it is while it has kept queues.
+     * when it exists without counts (e.g. its quorum queue elects a leader), when the read was
+     * incomplete (a node was not read) or when a publish indexed it after the counts were read. Their
+     * messages are not in the vhost totals, so a vhost with no queue holding messages is kept as it is
+     * while it has kept queues.
      *
      * @param VhostApiDto $vhostDto
      * @return void
@@ -321,7 +349,14 @@ class ScanVhostsCommand extends Command
             ));
         }
 
-        $this->removeOldVhostQueues($vhostDto, $removedQueueNames);
+        $activatedQueueNames = $this->keepActivatedQueues(
+            $vhostDto,
+            $removedQueueNames,
+            $this->getCountsReadAt($vhostDto)
+        );
+        $keptQueueNames = array_merge($keptQueueNames, $activatedQueueNames);
+
+        $this->removeOldVhostQueues($vhostDto, array_diff($removedQueueNames, $activatedQueueNames));
 
         if (empty($indexedQueueNames) && !empty($keptQueueNames)) {
             $isVhostIndexed = true;
@@ -402,16 +437,98 @@ class ScanVhostsCommand extends Command
     }
 
     /**
+     * When the counts of the vhost were read: by the actualizer for an interim vhost that carries the
+     * time, otherwise not before the pass started.
+     *
+     * @param VhostApiDto $vhostDto
+     * @return float
+     */
+    private function getCountsReadAt(VhostApiDto $vhostDto): float
+    {
+        return $vhostDto->getActualizedAt() ?? $this->passStartedAt;
+    }
+
+    /**
+     * Whether a publish indexed the entry too late for the counts read at $countsReadAt to be trusted
+     * about it: RabbitMQ updates queue counts every few seconds, so counts read up to the grace period
+     * after the publish may not show its message yet.
+     *
+     * @param float|null $activatedAt
+     * @param float $countsReadAt
+     * @return bool
+     */
+    private function isActivatedAfter(?float $activatedAt, float $countsReadAt): bool
+    {
+        return (null !== $activatedAt) && ($activatedAt >= $countsReadAt - $this->immediateIndexationGrace);
+    }
+
+    /**
+     * @param string $vhostName
+     * @param float $countsReadAt
+     * @return bool
+     */
+    private function isVhostActivatedAfter(string $vhostName, float $countsReadAt): bool
+    {
+        $activatedAt = $this->internalStorageManager->getVhostActivatedAt(new VhostApiDto([
+            'name' => $vhostName,
+        ]));
+
+        return $this->isActivatedAfter($activatedAt, $countsReadAt);
+    }
+
+    /**
+     * The queues of $queueNames a publish indexed after the counts were read. They stay indexed.
+     *
+     * @param VhostApiDto $vhostDto
+     * @param array $queueNames
+     * @param float $countsReadAt
+     * @return array
+     */
+    private function keepActivatedQueues(VhostApiDto $vhostDto, array $queueNames, float $countsReadAt): array
+    {
+        $activatedQueueNames = [];
+        foreach ($queueNames as $queueName) {
+            $activatedAt = $this->internalStorageManager->getQueueActivatedAt(new QueueApiDto([
+                'name' => $queueName,
+                'vhost' => $vhostDto->getName(),
+            ]));
+            if (!$this->isActivatedAfter($activatedAt, $countsReadAt)) {
+                continue;
+            }
+
+            $activatedQueueNames[] = $queueName;
+
+            $this->info(sprintf(
+                'Kept in index queue: "%s". Vhost: %s. A publish indexed it after the counts were read.',
+                $queueName,
+                $vhostDto->getName()
+            ));
+        }
+
+        return $activatedQueueNames;
+    }
+
+    /**
      * @param array $oldVhosts
+     * @param float $countsReadAt
      * @return void
      */
-    private function removeOldVhosts(array $oldVhosts): void
+    private function removeOldVhosts(array $oldVhosts, float $countsReadAt): void
     {
         if (empty($oldVhosts)) {
             return;
         }
 
         foreach ($oldVhosts as $oldVhostName) {
+            if ($this->isVhostActivatedAfter($oldVhostName, $countsReadAt)) {
+                $this->info(sprintf(
+                    'Kept in index vhost: "%s". A publish indexed it after the counts were read.',
+                    $oldVhostName
+                ));
+
+                continue;
+            }
+
             $vhostDto = new VhostApiDto([
                 'name' => $oldVhostName,
             ]);
