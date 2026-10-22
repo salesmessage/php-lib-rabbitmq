@@ -15,6 +15,11 @@ use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 class InternalStorageManager
 {
     /**
+     * Hash field holding the unix time a publish last indexed the vhost or queue.
+     */
+    private const ACTIVATED_AT_FIELD = 'activated_at';
+
+    /**
      * @var string
      */
     private string $connectionName = 'rabbitmq_vhosts';
@@ -211,7 +216,7 @@ class InternalStorageManager
      */
     public function indexVhost(VhostApiDto $vhostDto, array $groups = []): bool
     {
-        $isAddVhost = ($vhostDto->getMessagesReady() > 0) || ($vhostDto->getMessagesUnacknowledged() > 0);
+        $isAddVhost = $vhostDto->hasMessages();
         if ($isAddVhost) {
             $this->addVhost($vhostDto, $groups);
         } else {
@@ -224,9 +229,10 @@ class InternalStorageManager
     /**
      * @param VhostApiDto $vhostDto
      * @param array $groups
+     * @param array $fields extra hash fields to store with the vhost data
      * @return void
      */
-    private function addVhost(VhostApiDto $vhostDto, array $groups): void
+    private function addVhost(VhostApiDto $vhostDto, array $groups, array $fields = []): void
     {
         $storageKey = $this->getVhostStorageKey($vhostDto);
 
@@ -235,7 +241,7 @@ class InternalStorageManager
             $this->redis->sadd($indexKeyVhosts, $storageKey);
         }
 
-        $this->redis->hmset($storageKey, $vhostDto->toInternalData());
+        $this->redis->hmset($storageKey, $vhostDto->toInternalData() + $fields);
 
         $this->initLastProcessedAtKeys($storageKey, $groups);
     }
@@ -273,9 +279,22 @@ class InternalStorageManager
         $messagesReady = (int) $this->redis->hget($storageKey, 'messages_ready') + 1;
         $vhostDto->setMessagesReady($messagesReady);
 
-        $this->addVhost($vhostDto, $groups);
+        $this->addVhost($vhostDto, $groups, [self::ACTIVATED_AT_FIELD => microtime(true)]);
 
         return true;
+    }
+
+    /**
+     * Unix time a publish last indexed the vhost, or null when it was not indexed by a publish.
+     *
+     * @param VhostApiDto $vhostDto
+     * @return float|null
+     */
+    public function getVhostActivatedAt(VhostApiDto $vhostDto): ?float
+    {
+        $activatedAt = $this->redis->hget($this->getVhostStorageKey($vhostDto), self::ACTIVATED_AT_FIELD);
+
+        return is_numeric($activatedAt) ? (float) $activatedAt : null;
     }
 
     /**
@@ -341,9 +360,10 @@ class InternalStorageManager
     /**
      * @param QueueApiDto $queueDto
      * @param array $groups
+     * @param array $fields extra hash fields to store with the queue data
      * @return void
      */
-    private function addQueue(QueueApiDto $queueDto, array $groups): void
+    private function addQueue(QueueApiDto $queueDto, array $groups, array $fields = []): void
     {
         $storageKey = $this->getQueueStorageKey($queueDto);
         $indexKey = $this->getQueueIndexKey($queueDto->getVhostName());
@@ -352,7 +372,7 @@ class InternalStorageManager
             $this->redis->sadd($indexKey, $storageKey);
         }
 
-        $this->redis->hmset($storageKey, $queueDto->toInternalData());
+        $this->redis->hmset($storageKey, $queueDto->toInternalData() + $fields);
 
         $this->initLastProcessedAtKeys($storageKey, $groups);
     }
@@ -390,9 +410,22 @@ class InternalStorageManager
         $messagesReady = (int) $this->redis->hget($storageKey, 'messages_ready') + 1;
         $queueDto->setMessagesReady($messagesReady);
 
-        $this->addQueue($queueDto, $groups);
+        $this->addQueue($queueDto, $groups, [self::ACTIVATED_AT_FIELD => microtime(true)]);
 
         return true;
+    }
+
+    /**
+     * Unix time a publish last indexed the queue, or null when it was not indexed by a publish.
+     *
+     * @param QueueApiDto $queueDto
+     * @return float|null
+     */
+    public function getQueueActivatedAt(QueueApiDto $queueDto): ?float
+    {
+        $activatedAt = $this->redis->hget($this->getQueueStorageKey($queueDto), self::ACTIVATED_AT_FIELD);
+
+        return is_numeric($activatedAt) ? (float) $activatedAt : null;
     }
 
     /**

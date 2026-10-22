@@ -31,6 +31,11 @@ class VhostApiDto
     private bool $isQueuesComplete = true;
 
     /**
+     * Unix time (seconds) the counts were read at, or null when unknown.
+     */
+    private ?float $actualizedAt = null;
+
+    /**
      * @param array $data
      */
     public function __construct(array $data)
@@ -40,6 +45,10 @@ class VhostApiDto
         $this->messages = (int) ($data['messages'] ?? 0);
         $this->messagesReady = (int) ($data['messages_ready'] ?? 0);
         $this->messagesUnacknowledged = (int) ($data['messages_unacknowledged'] ?? 0);
+
+        if (isset($data['actualized_at']) && is_numeric($data['actualized_at'])) {
+            $this->actualizedAt = (float) $data['actualized_at'];
+        }
 
         if (isset($data['queues']) && is_array($data['queues'])) {
             $queues = [];
@@ -115,6 +124,14 @@ class VhostApiDto
     }
 
     /**
+     * @return bool
+     */
+    public function hasMessages(): bool
+    {
+        return ($this->messagesReady > 0) || ($this->messagesUnacknowledged > 0);
+    }
+
+    /**
      * @return int
      */
     public function getLastProcessedAt(): int
@@ -187,6 +204,24 @@ class VhostApiDto
     }
 
     /**
+     * @return float|null
+     */
+    public function getActualizedAt(): ?float
+    {
+        return $this->actualizedAt;
+    }
+
+    /**
+     * @param float|null $actualizedAt
+     * @return $this
+     */
+    public function setActualizedAt(?float $actualizedAt): self
+    {
+        $this->actualizedAt = $actualizedAt;
+        return $this;
+    }
+
+    /**
      * @return array
      */
     public function toInternalData(): array
@@ -200,13 +235,17 @@ class VhostApiDto
     }
 
     /**
-     * Internal data plus the queues, when they were read. The constructor reads it back.
+     * Internal data plus the read time and the queues, when they are known. The constructor reads it back.
      *
      * @return array
      */
     public function toInterimData(): array
     {
         $data = $this->toInternalData();
+        if (null !== $this->actualizedAt) {
+            $data['actualized_at'] = $this->actualizedAt;
+        }
+
         if (null === $this->queues) {
             return $data;
         }

@@ -971,6 +971,10 @@ It is possible to change te default queue by adding an extra parameter in the co
 
 By default, your connection will be created with a immediate indexation setting of `false`.
 
+When it is `true`, a publish indexes the queue it published to (and its vhost), so workers poll it before
+`lib-rabbitmq:scan-vhosts` sees the message. A delayed message is not indexed at publish: the scanner indexes its
+queue once the delay expires. The scanner does not remove a queue or vhost indexed by a publish while its counts
+were read before that publish or less than `immediate_indexation_grace` seconds after it (default `10`).
 
 ```php
 
@@ -981,6 +985,7 @@ By default, your connection will be created with a immediate indexation setting 
         // ...
 
         'immediate_indexation' => env('RABBITMQ_IMMEDIATE_INDEXATION', false),
+        'immediate_indexation_grace' => env('RABBITMQ_IMMEDIATE_INDEXATION_GRACE', 10),
     ],
 
     // ...    

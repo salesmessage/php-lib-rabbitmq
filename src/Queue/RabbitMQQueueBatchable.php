@@ -62,9 +62,19 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
     {
         $this->probeIdleConnection($payload);
 
-        return parent::pushRaw($payload, $queue, $options);
+        $correlationId = parent::pushRaw($payload, $queue, $options);
+
+        [$destination, $exchange] = $this->publishProperties($queue, $options);
+        $this->addQueueToIndex($destination, $exchange);
+
+        return $correlationId;
     }
 
+    /**
+     * A delayed message reaches its queue only when the delay expires, so the queue is not indexed here:
+     * the scanner indexes it once the message is in it. Without a delay the message goes out through
+     * pushRaw(), which indexes the queue.
+     */
     public function laterRaw(
         $delay,
         string $payload,
@@ -109,6 +119,16 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
                 $this->waitForConfirms($confirmChannel);
             }
         });
+
+        // once per queue, not per message
+        $destinations = [];
+        foreach ($prepared as [, $exchange, $destination]) {
+            $destinations[$destination] = $exchange;
+        }
+
+        foreach ($destinations as $destination => $exchange) {
+            $this->addQueueToIndex((string) $destination, $exchange);
+        }
     }
 
     /**
@@ -225,16 +245,19 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
             function () use ($payload, $message, $exchange, $destination, $exchangeType, $queueType, $correlationId, $confirm) {
                 $this->probeIdleConnection($payload);
 
-                return $this->withConnectionRetry(function () use ($message, $exchange, $destination, $exchangeType, $queueType, $correlationId, $confirm) {
+                $publishResult = $this->withConnectionRetry(function () use ($message, $exchange, $destination, $exchangeType, $queueType, $correlationId, $confirm) {
                     $this->declareDestination($destination, $exchange, $exchangeType, $queueType);
                     parent::publishBasic($message, $exchange, $destination, true, confirm: $confirm);
 
                     return $correlationId;
                 });
+
+                // here and not after enqueueUsing(): a job dispatched after commit is published only then
+                $this->addQueueToIndex($destination, $exchange);
+
+                return $publishResult;
             }
         );
-
-        $this->addQueueToIndex((string) $queue);
 
         return $result;
     }
@@ -305,12 +328,18 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
     }
 
     /**
+     * Index the queue a message was just published to, so workers poll it before the scanner sees it.
+     * The message is already published and the scanner indexes the queue anyway, so a failure here is
+     * logged and not thrown.
+     *
      * @param string $queue
+     * @param string $exchange
      * @return bool
      */
-    private function addQueueToIndex(string $queue): bool
+    private function addQueueToIndex(string $queue, string $exchange = ''): bool
     {
-        if ('' === $queue) {
+        // a message published to an exchange lands in the queues bound to it, which are not known here
+        if (('' === $queue) || ('' !== $exchange)) {
             return false;
         }
 
@@ -322,25 +351,35 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
             return false;
         }
 
-        $this->internalStorageManager->setConnection($dto->getConfigName());
-
         try {
-            $this->groupsService->setConnection($dto->getConfigName());
-            $groups = $this->groupsService->getAllGroupsNames();
-        } catch (RabbitVhostsGroupsException $exception) {
-            $groups = [];
+            $this->internalStorageManager->setConnection($dto->getConfigName());
+
+            try {
+                $this->groupsService->setConnection($dto->getConfigName());
+                $groups = $this->groupsService->getAllGroupsNames();
+            } catch (RabbitVhostsGroupsException $exception) {
+                $groups = [];
+            }
+
+            $queueApiDto = new QueueApiDto([
+                'name' => $queue,
+                'vhost' => $vhostName,
+            ]);
+            $isQueueActivated = $this->internalStorageManager->activateQueue($queueApiDto, $groups);
+
+            $vhostDto = new VhostApiDto([
+                'name' => $vhostName,
+            ]);
+            $isVhostActivated = $this->internalStorageManager->activateVhost($vhostDto, $groups);
+        } catch (\Throwable $exception) {
+            $this->logger->warning('RabbitMQQueueBatchable.addQueueToIndex.exception', [
+                'vhost_name' => $vhostName,
+                'queue' => $queue,
+                'error' => $exception->getMessage(),
+            ]);
+
+            return false;
         }
-
-        $queueApiDto = new QueueApiDto([
-            'name' => $queue,
-            'vhost' => $vhostName,
-        ]);
-        $isQueueActivated = $this->internalStorageManager->activateQueue($queueApiDto, $groups);
-
-        $vhostDto = new VhostApiDto([
-            'name' => $vhostName,
-        ]);
-        $isVhostActivated = $this->internalStorageManager->activateVhost($vhostDto, $groups);
 
         return $isQueueActivated && $isVhostActivated;
     }

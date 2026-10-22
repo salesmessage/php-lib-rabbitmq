@@ -44,7 +44,7 @@ class ActualizeInterimVhostsCommandTest extends RedisBackedTestCase
         $this->assertEqualsCanonicalizing(['org_1', 'org_2'], array_keys($this->redis->hgetall(self::INTERIM_KEY)));
         $this->assertSame(
             ['name' => 'org_1', 'messages' => 3, 'messages_ready' => 3, 'messages_unacknowledged' => 0],
-            json_decode($this->redis->hget(self::INTERIM_KEY, 'org_1'), true)
+            $this->interimVhostWithoutReadTime('org_1')
         );
     }
 
@@ -72,7 +72,7 @@ class ActualizeInterimVhostsCommandTest extends RedisBackedTestCase
                 'q_electing' => null,
             ],
             'queues_complete' => true,
-        ], json_decode($this->redis->hget(self::INTERIM_KEY, 'org_1'), true));
+        ], $this->interimVhostWithoutReadTime('org_1'));
         $this->assertSame(
             ['queues' => [], 'queues_complete' => false],
             array_intersect_key(json_decode($this->redis->hget(self::INTERIM_KEY, 'org_2'), true), ['queues' => 0, 'queues_complete' => 0])
@@ -132,6 +132,39 @@ class ActualizeInterimVhostsCommandTest extends RedisBackedTestCase
         $this->artisan('lib-rabbitmq:actualize-interim-vhosts', ['--sleep' => 0])->assertExitCode(0);
 
         $this->assertSame([], $this->redis->hgetall(self::INTERIM_KEY));
+    }
+
+    public function test_writes_the_time_taken_before_the_read(): void
+    {
+        $readStartedAt = null;
+        $source = Mockery::mock(InterimVhostsSourceInterface::class);
+        $source->shouldReceive('getVhosts')->once()->andReturnUsing(function () use (&$readStartedAt): InterimVhostsDto {
+            $readStartedAt = microtime(true);
+
+            return new InterimVhostsDto([
+                new VhostApiDto(['name' => 'org_1']),
+                (new VhostApiDto(['name' => 'org_2']))->setQueues([]),
+            ]);
+        });
+        $this->bindSource($source);
+
+        $startedAt = microtime(true);
+        $this->artisan('lib-rabbitmq:actualize-interim-vhosts', ['--sleep' => 0])->assertExitCode(0);
+
+        $actualizedAt = json_decode($this->redis->hget(self::INTERIM_KEY, 'org_1'), true)['actualized_at'];
+        $this->assertGreaterThanOrEqual($startedAt, $actualizedAt);
+        $this->assertLessThanOrEqual($readStartedAt, $actualizedAt);
+        $this->assertSame($actualizedAt, json_decode($this->redis->hget(self::INTERIM_KEY, 'org_2'), true)['actualized_at']);
+        $this->assertSame($actualizedAt, (new VhostApiDto(json_decode($this->redis->hget(self::INTERIM_KEY, 'org_1'), true)))->getActualizedAt());
+    }
+
+    private function interimVhostWithoutReadTime(string $vhost): array
+    {
+        $data = json_decode($this->redis->hget(self::INTERIM_KEY, $vhost), true);
+        $this->assertIsFloat($data['actualized_at'] ?? null);
+        unset($data['actualized_at']);
+
+        return $data;
     }
 
     private function bindSource(InterimVhostsSourceInterface $source): void

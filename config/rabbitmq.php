@@ -10,6 +10,11 @@ return [
     'queue' => env('RABBITMQ_QUEUE', 'default'),
     'connection' => 'default',
     'immediate_indexation' => env('RABBITMQ_IMMEDIATE_INDEXATION', false),
+    /**
+     * Seconds after a publish during which lib-rabbitmq:scan-vhosts does not trust queue counts about the queue
+     * indexed by that publish: RabbitMQ updates the counts every few seconds, so they may not show the message yet.
+     */
+    'immediate_indexation_grace' => env('RABBITMQ_IMMEDIATE_INDEXATION_GRACE', 10),
 
     'hosts' => [
         [
