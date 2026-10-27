@@ -31,6 +31,11 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
     private LoggerInterface $logger;
 
     /**
+     * Job of the publish in progress, so a reconnect inside a nested retry (createChannel) still names it.
+     */
+    private ?string $publishingJob = null;
+
+    /**
      * @param QueueConfig $config
      */
     public function __construct(QueueConfig $config)
@@ -54,7 +59,8 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         bool $confirm = false
     ): void {
         $this->withConnectionRetry(
-            fn() => parent::publishBasic($msg, $exchange, $destination, $mandatory, $immediate, $ticket, $confirm)
+            fn() => parent::publishBasic($msg, $exchange, $destination, $mandatory, $immediate, $ticket, $confirm),
+            job: self::jobName($msg->getBody())
         );
     }
 
@@ -118,7 +124,7 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
                 $confirmChannel->publish_batch();
                 $this->waitForConfirms($confirmChannel);
             }
-        });
+        }, job: empty($prepared) ? null : self::jobName($prepared[0][0]->getBody()));
 
         // once per queue, not per message
         $destinations = [];
@@ -201,9 +207,9 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         } catch (AMQPConnectionClosedException|AMQPChannelClosedException $exception) {
             $this->logger->warning('RabbitMQQueueBatchable.reconnect', [
                 'reason' => 'idle_guard',
-                'vhost' => (new ConnectionNameDto($this->getConnectionName()))->getVhostName(),
+                'vhost' => $this->vhostName(),
                 'idle_seconds' => round($idleSeconds, 1),
-                'job' => json_decode($payload, true)['displayName'] ?? null,
+                'job' => self::jobName($payload),
                 'error' => $exception->getMessage(),
             ]);
 
@@ -250,7 +256,7 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
                     parent::publishBasic($message, $exchange, $destination, true, confirm: $confirm);
 
                     return $correlationId;
-                });
+                }, job: self::jobName($payload));
 
                 // here and not after enqueueUsing(): a job dispatched after commit is published only then
                 $this->addQueueToIndex($destination, $exchange);
@@ -421,24 +427,52 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
      *                                    passed through to reconnect() (default 1).
      * @param int      $operationAttempts Number of times to retry the operation after a
      *                                    connection failure (0 = run once, no retry).
+     * @param string|null $job            Job display name for the reconnect log line.
      */
     private function withConnectionRetry(
         callable $operation,
         int $reconnectAttempts = 2,
-        int $operationAttempts = 2
+        int $operationAttempts = 2,
+        ?string $job = null
     ): mixed {
-        for ($attempt = 0; ; $attempt++) {
-            try {
-                return $operation();
-            } catch (AMQPConnectionClosedException|AMQPChannelClosedException $exception) {
-                // No retries left - surface the failure.
-                if ($attempt >= $operationAttempts) {
-                    throw $exception;
-                }
+        $outerJob = $this->publishingJob;
+        $this->publishingJob = $job ?? $outerJob;
 
-                $this->recoverConnection($exception, $reconnectAttempts);
+        try {
+            for ($attempt = 0; ; $attempt++) {
+                try {
+                    return $operation();
+                } catch (AMQPConnectionClosedException|AMQPChannelClosedException $exception) {
+                    // No retries left - surface the failure.
+                    if ($attempt >= $operationAttempts) {
+                        throw $exception;
+                    }
+
+                    // Same line as the idle guard, so one alert covers every reconnect before a publish.
+                    $this->logger->warning('RabbitMQQueueBatchable.reconnect', [
+                        'reason' => 'detected_closed',
+                        'vhost' => $this->vhostName(),
+                        'job' => $this->publishingJob,
+                        'attempt' => $attempt + 1,
+                        'error' => $exception->getMessage(),
+                    ]);
+
+                    $this->recoverConnection($exception, $reconnectAttempts);
+                }
             }
+        } finally {
+            $this->publishingJob = $outerJob;
         }
+    }
+
+    private function vhostName(): ?string
+    {
+        return (new ConnectionNameDto($this->getConnectionName()))->getVhostName();
+    }
+
+    private static function jobName(string $payload): ?string
+    {
+        return json_decode($payload, true)['displayName'] ?? null;
     }
 
     /**

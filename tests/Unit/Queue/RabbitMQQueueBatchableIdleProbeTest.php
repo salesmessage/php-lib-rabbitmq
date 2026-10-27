@@ -176,6 +176,35 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
         $this->assertSame([['delivered', self::LISTENER]], $this->published);
     }
 
+    public static function retriedPublishPaths(): array
+    {
+        return [
+            'push' => [fn (RabbitMQQueueBatchable $queue) => $queue->push(self::listenerJob(), '', self::QUEUE)],
+            'bulk' => [fn (RabbitMQQueueBatchable $queue) => $queue->bulk([self::listenerJob()], '', self::QUEUE)],
+        ];
+    }
+
+    #[DataProvider('retriedPublishPaths')]
+    public function test_reconnect_after_a_detected_closure_is_logged_with_the_job(callable $publish): void
+    {
+        // The connection was used a second ago, so the idle guard does not run; opening the channel finds it closed.
+        $this->connectionDead = true;
+
+        $publish($this->queue);
+
+        $this->assertSame([['delivered', self::LISTENER]], $this->published);
+        $this->assertSame(1, $this->reconnects);
+        $this->logger->shouldHaveReceived('warning')->once()->with(
+            'RabbitMQQueueBatchable.reconnect',
+            Mockery::subset([
+                'reason' => 'detected_closed',
+                'vhost' => self::VHOST,
+                'job' => self::LISTENER,
+                'attempt' => 1,
+            ])
+        );
+    }
+
     private static function listenerJob(): CallQueuedListener
     {
         return new CallQueuedListener(self::LISTENER, 'handle', []);
