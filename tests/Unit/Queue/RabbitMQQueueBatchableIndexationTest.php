@@ -242,6 +242,7 @@ class RabbitMQQueueBatchableIndexationTest extends TestCase
         $connection = Mockery::mock(AbstractConnection::class);
         $connection->shouldReceive('isConnected')->andReturnTrue();
         $connection->shouldReceive('getHeartbeat')->andReturn(0);
+        $connection->shouldReceive('getLastActivity')->andReturn(microtime(true));
         $connection->shouldReceive('channel')->andReturnUsing(function (): AMQPChannel {
             $record = function ($message, string $exchange, string $routingKey): void {
                 $this->published[] = $routingKey;

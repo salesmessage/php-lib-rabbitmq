@@ -31,9 +31,12 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
     private LoggerInterface $logger;
 
     /**
-     * Job of the publish in progress, so a reconnect inside a nested retry (createChannel) still names it.
+     * Payload and idle time of the publish in progress, so a reconnect inside a nested retry (createChannel)
+     * still names its job. The payload is decoded only when a reconnect is logged, not on every publish.
      */
-    private ?string $publishingJob = null;
+    private ?string $publishingPayload = null;
+
+    private ?float $publishingIdleSeconds = null;
 
     /**
      * @param QueueConfig $config
@@ -60,7 +63,7 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
     ): void {
         $this->withConnectionRetry(
             fn() => parent::publishBasic($msg, $exchange, $destination, $mandatory, $immediate, $ticket, $confirm),
-            job: self::jobName($msg->getBody())
+            payload: $msg->getBody()
         );
     }
 
@@ -124,7 +127,7 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
                 $confirmChannel->publish_batch();
                 $this->waitForConfirms($confirmChannel);
             }
-        }, job: empty($prepared) ? null : self::jobName($prepared[0][0]->getBody()));
+        }, payload: empty($prepared) ? null : $prepared[0][0]->getBody());
 
         // once per queue, not per message
         $destinations = [];
@@ -256,7 +259,7 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
                     parent::publishBasic($message, $exchange, $destination, true, confirm: $confirm);
 
                     return $correlationId;
-                }, job: self::jobName($payload));
+                }, payload: $payload);
 
                 // here and not after enqueueUsing(): a job dispatched after commit is published only then
                 $this->addQueueToIndex($destination, $exchange);
@@ -427,16 +430,19 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
      *                                    passed through to reconnect() (default 1).
      * @param int      $operationAttempts Number of times to retry the operation after a
      *                                    connection failure (0 = run once, no retry).
-     * @param string|null $job            Job display name for the reconnect log line.
+     * @param string|null $payload        Job payload, decoded for the reconnect log line only.
      */
     private function withConnectionRetry(
         callable $operation,
         int $reconnectAttempts = 2,
         int $operationAttempts = 2,
-        ?string $job = null
+        ?string $payload = null
     ): mixed {
-        $outerJob = $this->publishingJob;
-        $this->publishingJob = $job ?? $outerJob;
+        $outerPayload = $this->publishingPayload;
+        $outerIdleSeconds = $this->publishingIdleSeconds;
+        $this->publishingPayload = $payload ?? $outerPayload;
+        // Taken before the operation: a write into a closed socket updates the last activity before it fails.
+        $this->publishingIdleSeconds = $outerIdleSeconds ?? $this->idleSeconds();
 
         try {
             for ($attempt = 0; ; $attempt++) {
@@ -452,7 +458,8 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
                     $this->logger->warning('RabbitMQQueueBatchable.reconnect', [
                         'reason' => 'detected_closed',
                         'vhost' => $this->vhostName(),
-                        'job' => $this->publishingJob,
+                        'idle_seconds' => $this->publishingIdleSeconds,
+                        'job' => null === $this->publishingPayload ? null : self::jobName($this->publishingPayload),
                         'attempt' => $attempt + 1,
                         'error' => $exception->getMessage(),
                     ]);
@@ -461,8 +468,18 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
                 }
             }
         } finally {
-            $this->publishingJob = $outerJob;
+            $this->publishingPayload = $outerPayload;
+            $this->publishingIdleSeconds = $outerIdleSeconds;
         }
+    }
+
+    private function idleSeconds(): ?float
+    {
+        $connection = $this->getConnection();
+
+        return $connection->isConnected()
+            ? round(now()->getPreciseTimestamp() / 1_000_000 - $connection->getLastActivity(), 1)
+            : null;
     }
 
     private function vhostName(): ?string

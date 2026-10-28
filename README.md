@@ -1024,7 +1024,7 @@ connection is alive the round trip resets the proxy's idle timer and nothing els
 the connection is re-established and a `RabbitMQQueueBatchable.reconnect` warning is logged with
 `reason: idle_guard`, the vhost, the idle seconds and the job. An alive connection is never reconnected,
 because a vhost consumer may share it. A publish that finds the connection or channel closed reconnects and
-retries; that logs the same warning with `reason: detected_closed`, the vhost, the job and the attempt.
+retries; that logs the same warning with `reason: detected_closed`, the vhost, the idle seconds before the publish, the job and the attempt.
 
 ### SSL Secure
 

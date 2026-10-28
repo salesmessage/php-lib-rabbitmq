@@ -187,7 +187,8 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
     #[DataProvider('retriedPublishPaths')]
     public function test_reconnect_after_a_detected_closure_is_logged_with_the_job(callable $publish): void
     {
-        // The connection was used a second ago, so the idle guard does not run; opening the channel finds it closed.
+        // Idle for less than the heartbeat, so the idle guard does not run; opening the channel finds it closed.
+        $this->lastActivity = $this->secondsAgo(20);
         $this->connectionDead = true;
 
         $publish($this->queue);
@@ -202,6 +203,10 @@ class RabbitMQQueueBatchableIdleProbeTest extends TestCase
                 'job' => self::LISTENER,
                 'attempt' => 1,
             ])
+        );
+        $this->logger->shouldHaveReceived('warning')->with(
+            'RabbitMQQueueBatchable.reconnect',
+            Mockery::on(fn (array $context): bool => abs($context['idle_seconds'] - 20.0) < 1.0)
         );
     }
 
