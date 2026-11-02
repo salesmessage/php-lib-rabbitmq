@@ -59,6 +59,32 @@ class AbstractVhostsConsumerInitConnectionTest extends TestCase
         $this->assertNull($consumer->initConnectionPublic());
     }
 
+    public function test_consumer_waits_for_an_unreachable_broker_without_giving_up_or_dropping_vhosts(): void
+    {
+        $storage = Mockery::mock(InternalStorageManager::class);
+        $storage->shouldNotReceive('removeVhost');
+        $failures = 15;
+        $queue = Mockery::mock(RabbitMQQueue::class);
+        $queue->shouldReceive('getChannel')->with(true)->andReturnUsing(function () use (&$failures) {
+            if ($failures-- > 0) {
+                throw new AMQPConnectionClosedException('UPSTREAM_ERROR - Connection refused(0, 0)', 503);
+            }
+
+            return Mockery::mock(AMQPChannel::class)->shouldIgnoreMissing();
+        });
+        $queue->shouldReceive('getConnectionName')->andReturn('rabbitmq_vhosts:organization_1');
+        $manager = Mockery::mock(QueueManager::class);
+        $manager->shouldReceive('connection')->andReturn($queue);
+        $scheduler = Mockery::mock(VhostSchedulerInterface::class);
+        $scheduler->shouldReceive('getOrderedVhosts')->andReturn(['organization_1']);
+        $scheduler->shouldReceive('getOrderedQueues')->andReturn(['q']);
+
+        $consumer = $this->makeWaitingConsumer($storage, $manager, $scheduler);
+
+        $this->assertSame($queue, $consumer->initConnectionPublic());
+        $this->assertSame(-1, $failures);
+    }
+
     public function test_vhost_that_stays_down_does_not_block_the_next_one(): void
     {
         // Ordered by last processed: organization_1 never gets processed, so it would stay first for every consumer.
@@ -101,6 +127,16 @@ class AbstractVhostsConsumerInitConnectionTest extends TestCase
             return $vhost === 'organization_1' ? $bad : $good;
         });
 
+        $consumer = $this->makeWaitingConsumer($storage, $manager, $scheduler);
+
+        $this->assertSame($good, $consumer->initConnectionPublic());
+        $this->assertSame('organization_2', $consumer->current());
+        $this->assertSame(1, $attempts['organization_1']);
+    }
+
+    /** A consumer that runs its real vhost iteration, without stopping or sleeping. */
+    private function makeWaitingConsumer(InternalStorageManager $storage, QueueManager $manager, VhostSchedulerInterface $scheduler)
+    {
         $consumer = new class($storage, Mockery::spy(LoggerInterface::class), $manager, Mockery::mock(Dispatcher::class), Mockery::mock(ExceptionHandler::class), fn () => false, Mockery::mock(DeduplicationService::class), Mockery::mock(DeliveryLimitService::class), Mockery::mock(FailedJobWriter::class)) extends AbstractVhostsConsumer
         {
             protected function vhostDaemon($connectionName, WorkerOptions $options) {}
@@ -139,9 +175,7 @@ class AbstractVhostsConsumerInitConnectionTest extends TestCase
         (new ReflectionProperty(AbstractVhostsConsumer::class, 'connectionMutex'))->setValue($consumer, new Mutex(false));
         (new ReflectionProperty(AbstractVhostsConsumer::class, 'workerOptions'))->setValue($consumer, new WorkerOptions(sleep: 0));
 
-        $this->assertSame($good, $consumer->initConnectionPublic());
-        $this->assertSame('organization_2', $consumer->current());
-        $this->assertSame(1, $attempts['organization_1']);
+        return $consumer;
     }
 
     private function makeConsumer(InternalStorageManager $storage, QueueManager $manager)

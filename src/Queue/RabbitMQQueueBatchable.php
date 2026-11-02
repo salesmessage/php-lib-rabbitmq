@@ -3,6 +3,11 @@
 namespace Salesmessage\LibRabbitMQ\Queue;
 
 use Illuminate\Events\CallQueuedListener;
+use PhpAmqpLib\Channel\AMQPChannel;
+use PhpAmqpLib\Exception\AMQPChannelClosedException;
+use PhpAmqpLib\Exception\AMQPConnectionBlockedException;
+use PhpAmqpLib\Exception\AMQPConnectionClosedException;
+use PhpAmqpLib\Exception\AMQPTimeoutException;
 use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
@@ -10,9 +15,6 @@ use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Exceptions\RabbitVhostsGroupsException;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue as BaseRabbitMQQueue;
-use PhpAmqpLib\Exception\AMQPChannelClosedException;
-use PhpAmqpLib\Exception\AMQPConnectionClosedException;
-use PhpAmqpLib\Channel\AMQPChannel;
 use Salesmessage\LibRabbitMQ\Services\GroupsService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Salesmessage\LibRabbitMQ\Services\Lock\LockService;
@@ -44,6 +46,9 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
      * whole unit again, declarations included.
      */
     private int $runningUnits = 0;
+
+    /** A write timed out and may have left part of a frame in the stream: reconnect before the next unit. */
+    private bool $replaceConnection = false;
 
     /** Recoveries of a publish unit: one per step it has (open a channel, declare, publish) and one more. */
     private const PUBLISH_RECOVERIES = 4;
@@ -139,20 +144,14 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
 
             // Every channel the batch needs is opened before anything is buffered: a failure then leaves no
             // message buffered on a channel, where the next batch on it would publish it again.
-            // Opening the second channel can make php-amqplib reconnect on its own, which leaves the first one
-            // stale: they are fetched again (getChannel() replaces a stale one), and only if that doesn't settle
-            // it does the unit recover and run again.
-            for ($fetch = 1; ; $fetch++) {
-                $plainChannel = empty($plain) ? null : $this->getChannel(false, false);
-                $confirmChannel = empty($confirmed) ? null : $this->getChannel(false, true);
-                $stale = ($plainChannel !== null && $this->isStale($plainChannel))
-                    || ($confirmChannel !== null && $this->isStale($confirmChannel));
-                if (! $stale) {
-                    break;
-                }
-                if ($fetch >= 2) {
-                    throw new AMQPChannelClosedException('Channel connection is closed.');
-                }
+            $plainChannel = empty($plain) ? null : $this->getChannel(false, false);
+            $confirmChannel = empty($confirmed) ? null : $this->getChannel(false, true);
+            // A channel that went stale meanwhile means the connection changed under the declarations made above:
+            // the unit recovers and runs again, declarations included.
+            if (($plainChannel !== null && $this->isStale($plainChannel))
+                || ($confirmChannel !== null && $this->isStale($confirmChannel))
+            ) {
+                throw new AMQPChannelClosedException('Channel connection is closed.');
             }
 
             if ($plainChannel !== null) {
@@ -176,10 +175,13 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
     }
 
     /**
-     * php-amqplib empties a channel's batch only after a successful write: when the write fails, the messages
-     * are discarded from the channel, so the next batch on it doesn't send them again. The channel is not
-     * closed: a vhost consumer may be reading from it (basic_get on the queue's channel). A channel whose
-     * connection is down is only no longer used.
+     * php-amqplib empties a channel's batch only after a successful write, so a failed write leaves the
+     * messages buffered on the channel, where the next batch would send them again: they are discarded.
+     *
+     * A blocked connection (a broker alarm) fails before anything is written or awaited, and the channel stays:
+     * a vhost consumer may be reading from it. After any other failure the channel is not published on again
+     * (confirms recorded for this batch would never resolve), and after a write timeout, which can leave part
+     * of a frame in the stream, the connection is replaced before the next unit.
      */
     private function publishBuffered(AMQPChannel $channel, array $prepared): void
     {
@@ -189,16 +191,19 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
             }
             $channel->publish_batch();
         } catch (\Throwable $exception) {
-            if ($channel->getConnection()?->isConnected() && $channel->is_open() !== false) {
-                (function (): void {
-                    $this->batch_messages = [];
-                })->call($channel);
-            } else {
+            (function (): void {
+                $this->batch_messages = [];
+            })->call($channel);
+
+            if (! $exception instanceof AMQPConnectionBlockedException) {
                 if ($this->channel === $channel) {
                     $this->channel = null;
                 }
                 if ($this->confirmChannel === $channel) {
                     $this->confirmChannel = null;
+                }
+                if ($exception instanceof AMQPTimeoutException) {
+                    $this->replaceConnection = true;
                 }
             }
 
@@ -245,7 +250,16 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
 
     protected function createChannel(): AMQPChannel
     {
-        return $this->withConnectionRetry(fn() => parent::createChannel(), inner: true);
+        return $this->withConnectionRetry(function (): AMQPChannel {
+            // A closed connection is not reopened quietly by php-amqplib under a retried unit: the unit's recovery
+            // reconnects and runs the whole unit again, declarations included, so nothing is published into a
+            // vhost that was recreated empty meanwhile on the strength of declarations made before.
+            if (! $this->getConnection()->isConnected()) {
+                throw new AMQPConnectionClosedException('Connection is closed.');
+            }
+
+            return parent::createChannel();
+        }, inner: true);
     }
 
     /**
@@ -503,6 +517,10 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         $this->runningUnits++;
         try {
             $this->forgetStaleChannels();
+            if ($this->replaceConnection) {
+                $this->recoverConnection(new AMQPConnectionClosedException('Connection is closed.'), $reconnectAttempts);
+                $this->replaceConnection = false;
+            }
             $vhostRecreated = false;
             for ($attempt = 0; ; $attempt++) {
                 try {

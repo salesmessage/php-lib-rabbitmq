@@ -1164,7 +1164,14 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
 
     protected function createChannel(): AMQPChannel
     {
-        return $this->getConnection()->channel();
+        $connection = $this->getConnection();
+        if (! $connection->isConnected()) {
+            // php-amqplib connects again on its own here, possibly into a vhost recreated empty meanwhile: the
+            // declarations made before are forgotten, so they are made again.
+            $this->forgetDeclarations();
+        }
+
+        return $connection->channel();
     }
 
     /**

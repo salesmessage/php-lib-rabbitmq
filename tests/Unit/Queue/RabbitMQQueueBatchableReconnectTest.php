@@ -12,6 +12,7 @@ use Mockery\Adapter\Phpunit\MockeryPHPUnitIntegration;
 use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Connection\AbstractConnection;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
+use PhpAmqpLib\Exception\AMQPConnectionBlockedException;
 use PhpAmqpLib\Exception\AMQPConnectionClosedException;
 use PhpAmqpLib\Exception\AMQPProtocolChannelException;
 use PhpAmqpLib\Exception\AMQPRuntimeException;
@@ -65,6 +66,9 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
     private bool $vhostMissing = false;
 
     private bool $publishBatchTimesOut = false;
+
+    /** Thrown by the next publish_batch instead of writing (blocked connection: checked before anything else). */
+    private ?\Throwable $publishBatchFailure = null;
 
     /** @var array<int, true> channels the broker closed (a channel-level error): detached, not open */
     private array $closedByBroker = [];
@@ -520,15 +524,16 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         $this->assertSame([['delivered', ReconnectTestConfirmedJob::class], ['delivered', self::LISTENER]], $this->published);
     }
 
-    public function test_consumer_channel_is_kept_open_when_a_batch_on_it_fails(): void
+    public function test_consumer_channel_is_kept_open_when_a_batch_on_it_meets_a_blocked_connection(): void
     {
-        // A vhost consumer reads (basic_get) from the queue's channel, which a job's bulk publish uses too.
+        // A vhost consumer reads (basic_get) from the queue's channel, which a job's bulk publish uses too; a
+        // broker alarm fails the batch before anything is written.
         $consumerChannel = $this->queue->getChannel(true);
-        $this->publishBatchTimesOut = true;
+        $this->publishBatchFailure = new AMQPConnectionBlockedException;
         try {
             $this->queue->bulk([self::listenerJob()], '', self::QUEUE);
-            $this->fail('A write timeout must surface.');
-        } catch (AMQPTimeoutException) {
+            $this->fail('A blocked connection must surface.');
+        } catch (AMQPConnectionBlockedException) {
         }
 
         $this->assertSame($consumerChannel, $this->queue->getChannel());
@@ -553,8 +558,6 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
             [['delivered', self::LISTENER], ['delivered', ReconnectTestConfirmedJob::class]],
             $this->published
         );
-        // The stale channel is replaced by fetching it again, without reconnecting the connection.
-        $this->assertSame(0, $this->reconnects);
     }
 
     public function test_channel_the_broker_closed_is_replaced_without_a_reconnect(): void
@@ -585,6 +588,61 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         $publish($this->queue, self::QUEUE);
 
         $this->assertSame([['delivered', self::LISTENER]], $this->published);
+    }
+
+    public function test_connection_is_replaced_before_the_next_publish_after_a_batch_write_timed_out(): void
+    {
+        // A timed-out write can leave part of a frame in the stream: nothing more is written on it.
+        $this->publishBatchTimesOut = true;
+        try {
+            $this->queue->bulk([self::listenerJob()], '', self::QUEUE);
+            $this->fail('A write timeout must surface.');
+        } catch (AMQPTimeoutException) {
+        }
+        $this->published = [];
+        $this->reconnects = 0;
+
+        $this->queue->bulk([self::listenerJob()], '', self::QUEUE);
+
+        $this->assertSame(1, $this->reconnects);
+        $this->assertSame([['delivered', self::LISTENER]], $this->published);
+    }
+
+    #[DataProvider('publishPaths')]
+    public function test_publish_after_a_connection_level_close_into_a_recreated_vhost_declares_its_queue(callable $publish): void
+    {
+        // The broker closed the connection (e.g. read by a vhost consumer): php-amqplib closed every channel, and
+        // the vhost was recreated empty before the next publish.
+        $this->publishesOnce($publish);
+        foreach (array_keys($this->connection->channels) as $id) {
+            $this->closedByBroker[$id] = true;
+        }
+        $this->connected = false;
+        $this->brokerQueues = [];
+        $this->brokerExchanges = [];
+
+        $publish($this->queue, self::QUEUE);
+
+        $this->assertSame([['delivered', self::LISTENER]], $this->published);
+    }
+
+    public function test_mixed_batch_whose_confirm_channel_open_reconnects_into_a_recreated_vhost_declares_again(): void
+    {
+        $this->queue->bulk([self::listenerJob()], '', self::QUEUE);
+        $this->published = [];
+        foreach (array_keys($this->connection->channels) as $id) {
+            $this->staleWritable[$id] = true;
+        }
+        $this->connected = false;
+        $this->brokerQueues = [];
+        $this->brokerExchanges = [];
+
+        $this->queue->bulk([self::listenerJob(), new ReconnectTestConfirmedJob], '', self::QUEUE);
+
+        $this->assertEqualsCanonicalizing(
+            [['delivered', self::LISTENER], ['delivered', ReconnectTestConfirmedJob::class]],
+            $this->published
+        );
     }
 
     public function test_confirm_channel_is_kept_only_in_confirm_mode(): void
@@ -817,7 +875,12 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
             if ($this->publishBatchTimesOut) {
                 $this->publishBatchTimesOut = false;
 
-                throw new AMQPTimeoutException('The connection timed out after 3 sec while sending data');
+                throw new AMQPTimeoutException('Error sending data. Connection timed out.');
+            }
+            if ($failure = $this->publishBatchFailure) {
+                $this->publishBatchFailure = null;
+
+                throw $failure;
             }
             $messages = $buffer();
             $setBuffer([]);
