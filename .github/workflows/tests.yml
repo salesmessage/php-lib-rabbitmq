@@ -37,6 +37,8 @@ jobs:
         run: docker compose up -d rabbitmq amqproxy-upstream-down
 
       - name: Install dependencies
+        env:
+          COMPOSER_POLICY_ADVISORIES_BLOCK: '0'
         run: composer update --with='laravel/framework:${{matrix.laravel}}' --${{ matrix.stability }} --prefer-dist --no-interaction --no-progress
 
       - name: Run Laravel Pint
