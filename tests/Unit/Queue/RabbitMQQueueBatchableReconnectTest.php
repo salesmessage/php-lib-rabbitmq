@@ -66,6 +66,9 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
 
     private bool $publishBatchTimesOut = false;
 
+    /** @var array<int, true> channels the broker closed (a channel-level error): detached, not open */
+    private array $closedByBroker = [];
+
     private AbstractConnection&Mockery\MockInterface $connection;
 
     private int $nextChannelId = 0;
@@ -492,6 +495,67 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         $this->assertSame([['delivered', ReconnectTestConfirmedJob::class], ['delivered', self::LISTENER]], $this->published);
     }
 
+    public function test_channel_of_a_failed_batch_write_is_closed_not_left_open(): void
+    {
+        $this->publishBatchTimesOut = true;
+        try {
+            $this->queue->bulk([self::listenerJob()], '', self::QUEUE);
+            $this->fail('A write timeout must surface.');
+        } catch (AMQPTimeoutException) {
+        }
+
+        $this->assertSame([], $this->connection->channels);
+    }
+
+    public function test_mixed_batch_whose_confirm_channel_open_reconnects_runs_again_on_new_channels(): void
+    {
+        // A failed write left the connection marked closed without detaching its channels; opening the confirm
+        // channel makes php-amqplib connect again, which leaves the plain channel stale.
+        $this->queue->bulk([self::listenerJob()], '', self::QUEUE);
+        $this->published = [];
+        foreach (array_keys($this->connection->channels) as $id) {
+            $this->staleWritable[$id] = true;
+        }
+        $this->connected = false;
+
+        $this->queue->bulk([self::listenerJob(), new ReconnectTestConfirmedJob], '', self::QUEUE);
+
+        $this->assertEqualsCanonicalizing(
+            [['delivered', self::LISTENER], ['delivered', ReconnectTestConfirmedJob::class]],
+            $this->published
+        );
+    }
+
+    public function test_channel_the_broker_closed_is_replaced_without_a_reconnect(): void
+    {
+        // A channel-level error closed the cached channel; reconnecting would also close a vhost consumer's
+        // channel on the same connection.
+        $publish = self::publishPaths()['pushRaw'][0];
+        $this->publishesOnce($publish);
+        foreach (array_keys($this->connection->channels) as $id) {
+            $this->closedByBroker[$id] = true;
+        }
+
+        $publish($this->queue, self::QUEUE);
+
+        $this->assertSame([['delivered', self::LISTENER]], $this->published);
+        $this->assertSame(0, $this->reconnects);
+    }
+
+    public function test_publish_after_an_implicit_reconnect_into_a_recreated_vhost_declares_its_queue(): void
+    {
+        $publish = self::publishPaths()['pushRaw'][0];
+        $this->publishesOnce($publish);
+        $this->reconnectOnItsOwnAfterAMissedHeartbeat();
+        // The vhost was deleted and recreated empty meanwhile.
+        $this->brokerQueues = [];
+        $this->brokerExchanges = [];
+
+        $publish($this->queue, self::QUEUE);
+
+        $this->assertSame([['delivered', self::LISTENER]], $this->published);
+    }
+
     public function test_confirm_channel_is_kept_only_in_confirm_mode(): void
     {
         $this->confirmSelectTimesOut = true;
@@ -638,7 +702,8 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
 
         $generation = $this->generation;
         $id = ++$this->nextChannelId;
-        $alive = fn (): bool => $this->connected && ($generation === $this->generation || isset($this->staleWritable[$id]));
+        $alive = fn (): bool => $this->connected && ! isset($this->closedByBroker[$id])
+            && ($generation === $this->generation || isset($this->staleWritable[$id]));
         $deliver = function (AMQPMessage $message, string $exchange = '', string $routingKey = '') use ($alive, $id): void {
             if (! $alive()) {
                 // php-amqplib checks the connection before every publish (AMQPChannel::checkConnection).
@@ -684,13 +749,18 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
             }
             $this->confirmSelected[] = $generation;
         });
-        $channel->shouldReceive('close')->andReturnUsing(function (): void {
+        $channel->shouldReceive('close')->andReturnUsing(function () use ($id): void {
             $this->channelsClosed++;
+            // php-amqplib's do_close() takes the channel off its connection.
+            unset($this->connection->channels[$id]);
         });
         // Detached when its connection closed or reconnected; still attached after it reconnected on its own.
         $channel->shouldReceive('getConnection')->andReturnUsing(
-            fn () => ($generation === $this->generation || isset($this->staleWritable[$id])) ? $this->connection : null
+            fn () => ! isset($this->closedByBroker[$id]) && ($generation === $this->generation || isset($this->staleWritable[$id]))
+                ? $this->connection
+                : null
         );
+        $channel->shouldReceive('is_open')->andReturnUsing(fn (): bool => ! isset($this->closedByBroker[$id]));
         $channel->shouldReceive('getChannelId')->andReturn($id);
         $channel->shouldReceive('basic_get')->andReturnUsing(function (string $queue) {
             if ($this->queueMissingOnGet) {

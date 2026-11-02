@@ -10,8 +10,8 @@ use Illuminate\Contracts\Queue\Job as JobContract;
 use Illuminate\Queue\Jobs\Job;
 use Illuminate\Queue\ManuallyFailedException;
 use Illuminate\Support\Arr;
+use PhpAmqpLib\Exception\AMQPExceptionInterface;
 use PhpAmqpLib\Exception\AMQPProtocolChannelException;
-use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Wire\AMQPTable;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
@@ -144,17 +144,32 @@ class RabbitMQJob extends Job implements JobContract
     }
 
     /**
-     * The message is settled (acked or rejected) on the channel that delivered it. When that channel is gone
-     * (e.g. a reconnect while the job ran, or a write into a socket that is gone), the broker has requeued the
-     * message with it, and the redelivery is deduplicated: the failure is reported, not thrown, so a job that
-     * succeeded doesn't fail, a release keeps its own exception, and the timeout handler still kills the worker.
+     * The message is settled (acked or rejected) on the channel that delivered it. When that fails (the channel
+     * is gone, a write into a socket that is gone or timed out), the broker requeues the message with its
+     * channel, and the redelivery is deduplicated: the failure is reported, not thrown, so a job that succeeded
+     * doesn't fail and a release keeps its own exception.
+     *
+     * With $whenConnected, it is thrown again when the connection itself is down, so Laravel's worker restarts
+     * on the lost connection; the timeout handler (fail()) always gets past it to kill the worker.
      */
-    private function settleReportingFailure(callable $settle): void
+    private function settleReportingFailure(callable $settle, bool $whenConnected = false): void
     {
         try {
             $settle();
-        } catch (AMQPRuntimeException $exception) {
+        } catch (AMQPExceptionInterface $exception) {
+            if ($whenConnected && ! $this->connectionIsUp()) {
+                throw $exception;
+            }
             $this->container->make(ExceptionHandler::class)->report($exception);
+        }
+    }
+
+    private function connectionIsUp(): bool
+    {
+        try {
+            return $this->rabbitmq->getConnection()->isConnected();
+        } catch (Throwable) {
+            return false;
         }
     }
 
@@ -181,7 +196,7 @@ class RabbitMQJob extends Job implements JobContract
         // This is because this is a controlled call by a developer. So the message was handled correct.
         try {
             if (! $this->failed) {
-                $this->settleReportingFailure(fn () => $this->rabbitmq->ack($this));
+                $this->settleReportingFailure(fn () => $this->rabbitmq->ack($this), whenConnected: true);
             }
         } finally {
             // required for Laravel Horizon; also when the ack fails, the job is no longer reserved
@@ -222,7 +237,7 @@ class RabbitMQJob extends Job implements JobContract
         // Releasing a Job means the message was failed to process.
         // Because this Job message is always recreated and pushed as new message, this Job message is correctly handled.
         // We must tell rabbitMQ this job message can be removed by acknowledging the message.
-        $this->settleReportingFailure(fn () => $this->rabbitmq->ack($this));
+        $this->settleReportingFailure(fn () => $this->rabbitmq->ack($this), whenConnected: true);
     }
 
     /**

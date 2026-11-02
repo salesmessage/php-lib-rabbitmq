@@ -15,8 +15,10 @@ use Illuminate\Queue\TimeoutExceededException;
 use Mockery;
 use Mockery\Adapter\Phpunit\MockeryPHPUnitIntegration;
 use Mockery\MockInterface;
+use PhpAmqpLib\Connection\AbstractConnection;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
 use PhpAmqpLib\Exception\AMQPRuntimeException;
+use PhpAmqpLib\Exception\AMQPTimeoutException;
 use PhpAmqpLib\Message\AMQPMessage;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
@@ -235,7 +237,7 @@ class RabbitMQJobFailTest extends TestCase
     public function test_horizon_job_is_no_longer_reserved_when_its_ack_fails(): void
     {
         $closed = new AMQPChannelClosedException('Channel connection is closed.');
-        $rabbitmq = Mockery::mock(HorizonRabbitMQQueue::class);
+        $rabbitmq = $this->withConnection(Mockery::mock(HorizonRabbitMQQueue::class), connected: true);
         $rabbitmq->shouldReceive('ack')->once()->andThrow($closed);
         $rabbitmq->shouldReceive('deleteReserved')->once();
         $this->exceptionHandler->shouldReceive('report')->once()->with($closed);
@@ -248,7 +250,7 @@ class RabbitMQJobFailTest extends TestCase
         // A reconnect while the job ran (e.g. its own publish) closed the channel that delivered it: the broker
         // requeued the message, and the job, which succeeded, must not fail or stop the worker.
         $closed = new AMQPChannelClosedException('Channel connection is closed.');
-        $rabbitmq = Mockery::mock(RabbitMQQueue::class);
+        $rabbitmq = $this->withConnection(Mockery::mock(RabbitMQQueue::class), connected: true);
         $rabbitmq->shouldReceive('ack')->once()->andThrow($closed);
         $this->exceptionHandler->shouldReceive('report')->once()->with($closed);
         $job = $this->makeJob($rabbitmq);
@@ -258,10 +260,36 @@ class RabbitMQJobFailTest extends TestCase
         $this->assertTrue($job->isDeleted());
     }
 
+    public function test_finished_job_on_a_lost_connection_lets_the_worker_restart(): void
+    {
+        // The connection itself is down (no reconnect happened): the error reaches Laravel's worker, which
+        // restarts on a lost connection.
+        $closed = new AMQPChannelClosedException('Channel connection is closed.');
+        $rabbitmq = $this->withConnection(Mockery::mock(RabbitMQQueue::class), connected: false);
+        $rabbitmq->shouldReceive('ack')->once()->andThrow($closed);
+        $this->exceptionHandler->shouldNotReceive('report');
+
+        $this->expectExceptionObject($closed);
+        $this->makeJob($rabbitmq)->delete();
+    }
+
+    public function test_write_timeout_of_the_reject_is_reported_instead_of_thrown(): void
+    {
+        $this->events->listen(JobFailed::class, function (JobFailed $event) {
+            $event->job->markFailedJobLogged();
+        });
+        $timeout = new AMQPTimeoutException('The connection timed out after 3 sec while sending data');
+        $rabbitmq = Mockery::mock(RabbitMQQueue::class);
+        $rabbitmq->shouldReceive('reject')->once()->andThrow($timeout);
+        $this->exceptionHandler->shouldReceive('report')->once()->with($timeout);
+
+        $this->makeJob($rabbitmq)->fail(new RuntimeException('job timed out'));
+    }
+
     public function test_released_job_whose_delivery_channel_is_gone_is_republished_and_reported(): void
     {
         $closed = new AMQPChannelClosedException('Channel connection is closed.');
-        $rabbitmq = Mockery::mock(RabbitMQQueue::class);
+        $rabbitmq = $this->withConnection(Mockery::mock(RabbitMQQueue::class), connected: true);
         $rabbitmq->shouldReceive('laterRaw')->once()->andReturn('id');
         $rabbitmq->shouldReceive('ack')->once()->andThrow($closed);
         $this->exceptionHandler->shouldReceive('report')->once()->with($closed);
@@ -276,6 +304,15 @@ class RabbitMQJobFailTest extends TestCase
         $job->release(10);
 
         $this->assertTrue($job->isReleased());
+    }
+
+    private function withConnection(RabbitMQQueue&MockInterface $rabbitmq, bool $connected): RabbitMQQueue&MockInterface
+    {
+        $connection = Mockery::mock(AbstractConnection::class);
+        $connection->shouldReceive('isConnected')->andReturn($connected);
+        $rabbitmq->shouldReceive('getConnection')->andReturn($connection);
+
+        return $rabbitmq;
     }
 
     private function expectReject(bool $requeue): RabbitMQQueue

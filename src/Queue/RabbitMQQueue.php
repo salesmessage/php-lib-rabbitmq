@@ -693,11 +693,51 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
      * on the new connection with a channel id it doesn't own, and the broker drops the frame or closes the
      * connection. A channel closed the normal way has no connection and fails by itself when used.
      */
-    private function isStale(AMQPChannel $channel): bool
+    protected function isStale(AMQPChannel $channel): bool
     {
         $connection = $channel->getConnection();
 
         return $connection !== null && ($connection->channels[$channel->getChannelId()] ?? null) !== $channel;
+    }
+
+    /**
+     * A cached channel is used again unless it is gone: missing, closed by the broker (a channel-level error),
+     * or stale. A stale channel means the connection reconnected underneath, possibly into a vhost recreated
+     * empty, so the declarations made before are forgotten too.
+     */
+    private function isUsable(?AMQPChannel $channel): bool
+    {
+        if ($channel === null || $channel->is_open() === false) {
+            return false;
+        }
+        if ($this->isStale($channel)) {
+            $this->forgetDeclarations();
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Drop the cached channels a connection that reconnected on its own left behind, with the declarations
+     * made on them, before a retried unit declares and publishes.
+     */
+    protected function forgetStaleChannels(): void
+    {
+        foreach (['channel', 'confirmChannel'] as $property) {
+            if ($this->{$property} !== null && $this->isStale($this->{$property})) {
+                $this->{$property} = null;
+                $this->forgetDeclarations();
+            }
+        }
+    }
+
+    protected function forgetDeclarations(): void
+    {
+        $this->queues = [];
+        $this->exchanges = [];
+        $this->boundQueues = [];
     }
 
     /**
@@ -1041,7 +1081,7 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     public function getChannel($forceNew = false, bool $confirm = false): AMQPChannel
     {
         if ($confirm) {
-            if (! $this->confirmChannel || $forceNew || $this->isStale($this->confirmChannel)) {
+            if ($forceNew || ! $this->isUsable($this->confirmChannel)) {
                 // Kept only once in confirm mode: after a failed confirm_select a publish on it would
                 // never be confirmed.
                 $confirmChannel = $this->createChannel();
@@ -1058,7 +1098,7 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
             return $this->confirmChannel;
         }
 
-        if (! $this->channel || $forceNew || $this->isStale($this->channel)) {
+        if ($forceNew || ! $this->isUsable($this->channel)) {
             $this->channel = $this->createChannel();
         }
 
@@ -1154,14 +1194,12 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         }
     }
 
-    private function closeQuietly(?AMQPChannel ...$channels): void
+    protected function closeQuietly(AMQPChannel $channel): void
     {
-        foreach ($channels as $channel) {
-            try {
-                $channel?->close();
-            } catch (Throwable) {
-                // The channel is dropped either way.
-            }
+        try {
+            $channel->close();
+        } catch (Throwable) {
+            // The channel is dropped either way.
         }
     }
 }

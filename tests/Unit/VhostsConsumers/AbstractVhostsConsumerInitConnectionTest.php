@@ -34,6 +34,8 @@ class AbstractVhostsConsumerInitConnectionTest extends TestCase
         return [
             'broker down behind the proxy' => [new AMQPConnectionClosedException('UPSTREAM_ERROR(0, 0)', 500), false],
             'connection lost' => [new AMQPConnectionClosedException('Broken pipe or closed connection'), false],
+            'vhost down while its node restarts' => [new AMQPConnectionClosedException("NOT_ALLOWED - access to vhost 'organization_1' refused for user 'u': vhost 'organization_1' is down", 530), false],
+            'vhost connection limit' => [new AMQPConnectionClosedException("NOT_ALLOWED - access to vhost 'organization_1' refused for user 'u': connection limit (100) is reached", 530), false],
             'vhost not found' => [new AMQPConnectionClosedException('NOT_ALLOWED - vhost organization_1 not found(0, 0)', 403), true],
             'vhost deleted' => [new AMQPConnectionClosedException("CONNECTION_FORCED - vhost 'organization_1' is deleted", 320), true],
         ];

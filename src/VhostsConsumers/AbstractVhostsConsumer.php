@@ -27,6 +27,7 @@ use Salesmessage\LibRabbitMQ\Interfaces\RabbitMQBatchable;
 use Salesmessage\LibRabbitMQ\Mutex;
 use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
+use Salesmessage\LibRabbitMQ\Queue\VhostFailure;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\AppDeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationService as TransportDeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
@@ -985,9 +986,9 @@ abstract class AbstractVhostsConsumer extends Consumer
                 'trace' => $exception->getTraceAsString(),
             ]);
 
-            // Only a failure about the vhost (not found, deleted, access refused) takes it out of the index.
-            // During an outage (e.g. AMQProxy up, broker down) the vhosts stay indexed for when it is back.
-            if (str_contains(strtolower($exception->getMessage()), 'vhost')) {
+            // Only a vhost that is gone (not found, deleted) is taken out of the index. During an outage (e.g.
+            // AMQProxy up, broker down) or while a vhost is refused or overloaded, it stays indexed.
+            if (VhostFailure::isMissing($exception, $this->currentVhostName)) {
                 $vhostDto = new VhostApiDto([
                     'name' => $this->currentVhostName,
                 ]);
