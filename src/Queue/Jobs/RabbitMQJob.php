@@ -10,6 +10,8 @@ use Illuminate\Contracts\Queue\Job as JobContract;
 use Illuminate\Queue\Jobs\Job;
 use Illuminate\Queue\ManuallyFailedException;
 use Illuminate\Support\Arr;
+use PhpAmqpLib\Exception\AMQPChannelClosedException;
+use PhpAmqpLib\Exception\AMQPConnectionClosedException;
 use PhpAmqpLib\Exception\AMQPProtocolChannelException;
 use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Wire\AMQPTable;
@@ -130,14 +132,28 @@ class RabbitMQJob extends Job implements JobContract
             }
 
             $this->requeuedAfterFail = ! $this->failedJobLogged;
-            $this->rabbitmq->reject($this, $this->requeuedAfterFail);
+            $this->rejectReportingClosedChannel($this->requeuedAfterFail);
             $this->container->make(ExceptionHandler::class)->report($failException);
 
             return;
         }
 
         if (! $wasDeleted) {
-            $this->rabbitmq->reject($this, false);
+            $this->rejectReportingClosedChannel(false);
+        }
+    }
+
+    /**
+     * The message is rejected on the channel that delivered it. When that channel is already gone, the
+     * broker has requeued the message with it: the failure is reported, so the timeout handler still
+     * kills the worker.
+     */
+    private function rejectReportingClosedChannel(bool $requeue): void
+    {
+        try {
+            $this->rabbitmq->reject($this, $requeue);
+        } catch (AMQPChannelClosedException|AMQPConnectionClosedException $exception) {
+            $this->container->make(ExceptionHandler::class)->report($exception);
         }
     }
 

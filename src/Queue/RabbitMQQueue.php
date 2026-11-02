@@ -338,25 +338,36 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
             if ($exception->amqp_reply_code === 404) {
                 // Because of the channel exception the channel was closed and removed.
                 // We have to open a new channel. Because else the worker(s) are stuck in a loop, without processing.
-                $this->getChannel(true);
+                try {
+                    $this->getChannel(true);
+                } catch (AMQPChannelClosedException|AMQPConnectionClosedException $closed) {
+                    throw $this->lostConnection($closed);
+                }
 
                 return null;
             }
 
             throw $exception;
         } catch (AMQPChannelClosedException|AMQPConnectionClosedException $exception) {
-            // Queue::pop used by worker to receive new job
-            // Thrown exception is checked by Illuminate\Database\DetectsLostConnections::causedByLostConnection
-            // Is has to contain one of the several phrases in exception message in order to restart worker
-            // Otherwise worker continues to work with broken connection
-            throw new AMQPRuntimeException(
-                'Lost connection: '.$exception->getMessage(),
-                $exception->getCode(),
-                $exception
-            );
+            throw $this->lostConnection($exception);
         }
 
         return null;
+    }
+
+    /**
+     * Queue::pop is used by the worker to receive a new job. The thrown exception is checked by
+     * Illuminate\Database\DetectsLostConnections::causedByLostConnection: it has to contain one of
+     * several phrases in its message for the worker to restart, otherwise the worker keeps working
+     * with a broken connection.
+     */
+    private function lostConnection(AMQPChannelClosedException|AMQPConnectionClosedException $exception): AMQPRuntimeException
+    {
+        return new AMQPRuntimeException(
+            'Lost connection: '.$exception->getMessage(),
+            $exception->getCode(),
+            $exception
+        );
     }
 
     /**
@@ -631,7 +642,8 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
      */
     public function ack(RabbitMQJob $job): void
     {
-        $this->getChannel()->basic_ack($job->getRabbitMQMessage()->getDeliveryTag());
+        $message = $job->getRabbitMQMessage();
+        $this->deliveryChannel($message)->basic_ack($message->getDeliveryTag());
     }
 
     /**
@@ -639,7 +651,17 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
      */
     public function reject(RabbitMQJob $job, bool $requeue = false): void
     {
-        $this->getChannel()->basic_reject($job->getRabbitMQMessage()->getDeliveryTag(), $requeue);
+        $message = $job->getRabbitMQMessage();
+        $this->deliveryChannel($message)->basic_reject($message->getDeliveryTag(), $requeue);
+    }
+
+    /**
+     * A delivery tag is valid only on the channel that delivered the message: after a reconnect the
+     * queue's channel is another one, and the broker closes it on an unknown delivery tag.
+     */
+    private function deliveryChannel(AMQPMessage $message): AMQPChannel
+    {
+        return $message->getChannel() ?? $this->getChannel();
     }
 
     /**
@@ -1077,6 +1099,8 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
 
         $attempt = 1;
         while (true) {
+            $channel = null;
+            $confirmChannel = null;
             try {
                 $connection = $this->getConnection();
                 // Reconnects using the original connection settings.
@@ -1084,7 +1108,6 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
                 // Create a new main channel because all old channels are removed.
                 $channel = $connection->channel();
                 // Recreate the confirm channel too, but only if it was already in use.
-                $confirmChannel = null;
                 if ($confirmChannelInUse) {
                     $confirmChannel = $connection->channel();
                     $this->enablePublisherConfirms($confirmChannel);
@@ -1093,11 +1116,29 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
                 $this->confirmChannel = $confirmChannel;
 
                 return;
-            } catch (AMQPConnectionClosedException|AMQPChannelClosedException $exception) {
+            } catch (Throwable $exception) {
+                // The channels of a failed attempt are not kept: close them, so they don't stay open on a
+                // connection that is still alive (e.g. after a confirm_select timeout).
+                $this->closeQuietly($channel, $confirmChannel);
+
+                if (! $exception instanceof AMQPConnectionClosedException && ! $exception instanceof AMQPChannelClosedException) {
+                    throw $exception;
+                }
                 if ($attempt >= $attempts) {
                     throw $exception;
                 }
                 $attempt++;
+            }
+        }
+    }
+
+    private function closeQuietly(?AMQPChannel ...$channels): void
+    {
+        foreach ($channels as $channel) {
+            try {
+                $channel?->close();
+            } catch (Throwable) {
+                // The channel is dropped either way.
             }
         }
     }

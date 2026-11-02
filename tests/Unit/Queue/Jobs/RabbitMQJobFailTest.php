@@ -15,6 +15,7 @@ use Illuminate\Queue\TimeoutExceededException;
 use Mockery;
 use Mockery\Adapter\Phpunit\MockeryPHPUnitIntegration;
 use Mockery\MockInterface;
+use PhpAmqpLib\Exception\AMQPChannelClosedException;
 use PhpAmqpLib\Message\AMQPMessage;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
@@ -183,6 +184,37 @@ class RabbitMQJobFailTest extends TestCase
         $this->makeJob($this->expectReject(false))->fail(new TimeoutExceededException('job timed out'));
 
         $this->assertSame(['rolled back', 'logged', 'rejected'], $this->calls);
+    }
+
+    public function test_closed_delivery_channel_on_the_reject_is_reported_instead_of_thrown(): void
+    {
+        // The reject goes to the channel that delivered the message; when it is gone, the timeout handler must
+        // still get to kill the worker. The broker requeued the message when the channel closed.
+        $this->events->listen(JobFailed::class, function (JobFailed $event) {
+            $event->job->markFailedJobLogged();
+        });
+        $closed = new AMQPChannelClosedException('Channel connection is closed.');
+        $rabbitmq = Mockery::mock(RabbitMQQueue::class);
+        $rabbitmq->shouldReceive('reject')->once()->andThrow($closed);
+        $this->exceptionHandler->shouldReceive('report')->once()->with($closed);
+
+        $this->makeJob($rabbitmq)->fail(new RuntimeException('job timed out'));
+    }
+
+    public function test_closed_delivery_channel_on_the_requeue_is_reported_with_the_listener_exception(): void
+    {
+        $listenerException = new RuntimeException('listener broke');
+        $this->events->listen(JobFailed::class, function () use ($listenerException) {
+            throw $listenerException;
+        });
+        $this->failer->shouldReceive('log')->andThrow(new RuntimeException('database down'));
+        $closed = new AMQPChannelClosedException('Channel connection is closed.');
+        $rabbitmq = Mockery::mock(RabbitMQQueue::class);
+        $rabbitmq->shouldReceive('reject')->once()->andThrow($closed);
+        $this->exceptionHandler->shouldReceive('report')->once()->with($closed);
+        $this->exceptionHandler->shouldReceive('report')->once()->with($listenerException);
+
+        $this->makeJob($rabbitmq)->fail(new RuntimeException('job failed'));
     }
 
     private function expectReject(bool $requeue): RabbitMQQueue

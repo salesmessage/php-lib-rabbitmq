@@ -14,6 +14,7 @@ use PhpAmqpLib\Connection\AbstractConnection;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
 use PhpAmqpLib\Exception\AMQPConnectionClosedException;
 use PhpAmqpLib\Exception\AMQPProtocolChannelException;
+use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Exception\AMQPTimeoutException;
 use PhpAmqpLib\Message\AMQPMessage;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -21,6 +22,7 @@ use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 use ReflectionMethod;
 use ReflectionProperty;
+use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
 use Salesmessage\LibRabbitMQ\Queue\QueueConfigFactory;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueueBatchable;
 use Salesmessage\LibRabbitMQ\Services\GroupsService;
@@ -56,6 +58,10 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
 
     /** @var list<int> numbers of the channel opens (counted from the test's start) that fail as with the broker down */
     private array $failingOpens = [];
+
+    private bool $queueMissingOnGet = false;
+
+    private int $channelsClosed = 0;
 
     private int $generation = 1;
 
@@ -255,6 +261,72 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         $this->assertNull($this->confirmSelectedChannel());
     }
 
+    public static function settlements(): array
+    {
+        return [
+            'ack' => ['basic_ack', [7], fn (RabbitMQQueueBatchable $queue, RabbitMQJob $job) => $queue->ack($job)],
+            'reject' => ['basic_reject', [7, true], fn (RabbitMQQueueBatchable $queue, RabbitMQJob $job) => $queue->reject($job, true)],
+        ];
+    }
+
+    #[DataProvider('settlements')]
+    public function test_job_is_settled_on_the_channel_it_was_delivered_on(string $method, array $arguments, callable $settle): void
+    {
+        // A failed reconnect while the job ran leaves the queue without channels; the delivery tag belongs to
+        // the channel that delivered the message, so it must not be sent on a new one.
+        $publish = self::publishPaths()['pushRaw'][0];
+        $this->publishesOnce($publish);
+        $this->brokerGoesDown();
+        $this->publishFailure($publish, self::QUEUE);
+        $this->upstreamDown = false;
+        $this->channelOpens = 0;
+
+        $deliveryChannel = Mockery::mock(AMQPChannel::class);
+        $deliveryChannel->shouldReceive($method)->once()->with(...$arguments);
+        $message = new AMQPMessage('{}');
+        $message->setChannel($deliveryChannel);
+        $message->setDeliveryInfo(7, false, '', self::QUEUE);
+        $job = Mockery::mock(RabbitMQJob::class);
+        $job->shouldReceive('getRabbitMQMessage')->andReturn($message);
+
+        $settle($this->queue, $job);
+
+        $this->assertSame(0, $this->channelOpens);
+    }
+
+    public function test_pop_reports_a_lost_connection_when_the_channel_cannot_be_reopened_after_a_missing_queue(): void
+    {
+        // pop() reopens the channel the 404 closed; with the broker down that fails, and the worker must see a
+        // lost connection so that it restarts.
+        $this->queue->getChannel();
+        $this->queueMissingOnGet = true;
+        $this->upstreamDown = true;
+
+        try {
+            $this->queue->pop(self::QUEUE);
+            $this->fail('pop() must throw when the channel cannot be reopened.');
+        } catch (AMQPRuntimeException $exception) {
+            $this->assertStringStartsWith('Lost connection: ', $exception->getMessage());
+        }
+    }
+
+    public function test_failed_reconnect_attempt_closes_the_channels_it_opened(): void
+    {
+        $this->queue->getChannel(false, true);
+        $this->connected = false;
+        $this->confirmSelectTimesOut = true;
+        $this->channelsClosed = 0;
+
+        try {
+            $this->reconnect();
+            $this->fail('A confirm_select timeout must surface.');
+        } catch (AMQPTimeoutException) {
+        }
+
+        // The main and the confirm channel of the failed attempt.
+        $this->assertSame(2, $this->channelsClosed);
+    }
+
     private function publishesOnce(callable $publish): void
     {
         $publish($this->queue, self::QUEUE);
@@ -373,6 +445,18 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
                 throw new AMQPTimeoutException('The connection timed out after 3 sec while awaiting incoming data');
             }
             $this->confirmSelected[] = $generation;
+        });
+        $channel->shouldReceive('close')->andReturnUsing(function (): void {
+            $this->channelsClosed++;
+        });
+        $channel->shouldReceive('basic_get')->andReturnUsing(function (string $queue) {
+            if ($this->queueMissingOnGet) {
+                $this->queueMissingOnGet = false;
+
+                throw new AMQPProtocolChannelException(404, "NOT_FOUND - no queue '$queue'", [60, 70]);
+            }
+
+            return null;
         });
         $channel->shouldReceive('basic_publish')->andReturnUsing($deliver);
         // A batch is only buffered on the channel; publish_batch writes it.
