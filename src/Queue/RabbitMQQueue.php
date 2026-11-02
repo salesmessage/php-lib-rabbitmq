@@ -680,14 +680,24 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
             return $this->getChannel();
         }
 
-        // A reconnect after a missed heartbeat empties the connection's channels without closing the old
-        // channel objects: one of them would write on the new connection with an id it doesn't own.
-        $connection = $channel->getConnection();
-        if ($connection !== null && ($connection->channels[$channel->getChannelId()] ?? null) !== $channel) {
+        if ($this->isStale($channel)) {
             throw new AMQPChannelClosedException('Channel connection is closed.');
         }
 
         return $channel;
+    }
+
+    /**
+     * A connection that reconnects on its own (php-amqplib does when it is used after a missed heartbeat or a
+     * failed write) empties its channel list without closing the old channel objects: one of them would write
+     * on the new connection with a channel id it doesn't own, and the broker drops the frame or closes the
+     * connection. A channel closed the normal way has no connection and fails by itself when used.
+     */
+    private function isStale(AMQPChannel $channel): bool
+    {
+        $connection = $channel->getConnection();
+
+        return $connection !== null && ($connection->channels[$channel->getChannelId()] ?? null) !== $channel;
     }
 
     /**
@@ -1031,7 +1041,7 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     public function getChannel($forceNew = false, bool $confirm = false): AMQPChannel
     {
         if ($confirm) {
-            if (! $this->confirmChannel || $forceNew) {
+            if (! $this->confirmChannel || $forceNew || $this->isStale($this->confirmChannel)) {
                 // Kept only once in confirm mode: after a failed confirm_select a publish on it would
                 // never be confirmed.
                 $confirmChannel = $this->createChannel();
@@ -1048,7 +1058,7 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
             return $this->confirmChannel;
         }
 
-        if (! $this->channel || $forceNew) {
+        if (! $this->channel || $forceNew || $this->isStale($this->channel)) {
             $this->channel = $this->createChannel();
         }
 
@@ -1113,11 +1123,11 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
      * Reconnect using the original connection settings, retrying up to $attempts
      * times when the reconnect itself fails with a connection/channel error.
      *
-     * The new channels are opened straight from the connection, not through createChannel():
-     * a subclass may wrap createChannel() in a retry that reconnects, and calling it from here
-     * would recurse without bound when the reconnect succeeds but opening a channel keeps
-     * failing (e.g. a proxy such as AMQProxy accepting the connection while the broker behind
-     * it is down).
+     * No channel is opened here: the old ones are dropped, and the next use opens new ones through
+     * getChannel(), inside the caller's own retry. Opening them here would go through createChannel(),
+     * which a subclass may wrap in a retry that reconnects: that recursed without bound when the reconnect
+     * succeeded but opening a channel kept failing (a proxy such as AMQProxy accepting the connection while
+     * the broker behind it is down). A channel opened here would also leak when the caller opens its own.
      *
      * @param int $attempts Total reconnect attempts before giving up (default 1).
      *
@@ -1125,40 +1135,17 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
      */
     protected function reconnect(int $attempts = 1): void
     {
-        // The channels of the old connection are gone: drop them, and keep new ones only once the
-        // whole attempt succeeded, so that a failed reconnect leaves no dead (or unconfirmed) channel
-        // behind and the next use opens new channels.
-        $confirmChannelInUse = $this->confirmChannel !== null;
         $this->channel = null;
         $this->confirmChannel = null;
 
         $attempt = 1;
         while (true) {
-            $channel = null;
-            $confirmChannel = null;
             try {
-                $connection = $this->getConnection();
                 // Reconnects using the original connection settings.
-                $connection->reconnect();
-                // Create a new main channel because all old channels are removed.
-                $channel = $connection->channel();
-                // Recreate the confirm channel too, but only if it was already in use.
-                if ($confirmChannelInUse) {
-                    $confirmChannel = $connection->channel();
-                    $this->enablePublisherConfirms($confirmChannel);
-                }
-                $this->channel = $channel;
-                $this->confirmChannel = $confirmChannel;
+                $this->getConnection()->reconnect();
 
                 return;
-            } catch (Throwable $exception) {
-                // The channels of a failed attempt are not kept: close them, so they don't stay open on a
-                // connection that is still alive (e.g. after a confirm_select timeout).
-                $this->closeQuietly($channel, $confirmChannel);
-
-                if (! $exception instanceof AMQPConnectionClosedException && ! $exception instanceof AMQPChannelClosedException) {
-                    throw $exception;
-                }
+            } catch (AMQPConnectionClosedException|AMQPChannelClosedException $exception) {
                 if ($attempt >= $attempts) {
                     throw $exception;
                 }

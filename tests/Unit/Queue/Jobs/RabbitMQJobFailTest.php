@@ -21,6 +21,7 @@ use PhpAmqpLib\Message\AMQPMessage;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
 use RuntimeException;
+use Salesmessage\LibRabbitMQ\Horizon\RabbitMQQueue as HorizonRabbitMQQueue;
 use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
 use Salesmessage\LibRabbitMQ\Services\FailedJobWriter;
@@ -229,6 +230,52 @@ class RabbitMQJobFailTest extends TestCase
         $this->exceptionHandler->shouldReceive('report')->once()->with($listenerException);
 
         $this->makeJob($rabbitmq)->fail(new RuntimeException('job failed'));
+    }
+
+    public function test_horizon_job_is_no_longer_reserved_when_its_ack_fails(): void
+    {
+        $closed = new AMQPChannelClosedException('Channel connection is closed.');
+        $rabbitmq = Mockery::mock(HorizonRabbitMQQueue::class);
+        $rabbitmq->shouldReceive('ack')->once()->andThrow($closed);
+        $rabbitmq->shouldReceive('deleteReserved')->once();
+        $this->exceptionHandler->shouldReceive('report')->once()->with($closed);
+
+        $this->makeJob($rabbitmq)->delete();
+    }
+
+    public function test_finished_job_whose_delivery_channel_is_gone_is_reported_not_failed(): void
+    {
+        // A reconnect while the job ran (e.g. its own publish) closed the channel that delivered it: the broker
+        // requeued the message, and the job, which succeeded, must not fail or stop the worker.
+        $closed = new AMQPChannelClosedException('Channel connection is closed.');
+        $rabbitmq = Mockery::mock(RabbitMQQueue::class);
+        $rabbitmq->shouldReceive('ack')->once()->andThrow($closed);
+        $this->exceptionHandler->shouldReceive('report')->once()->with($closed);
+        $job = $this->makeJob($rabbitmq);
+
+        $job->delete();
+
+        $this->assertTrue($job->isDeleted());
+    }
+
+    public function test_released_job_whose_delivery_channel_is_gone_is_republished_and_reported(): void
+    {
+        $closed = new AMQPChannelClosedException('Channel connection is closed.');
+        $rabbitmq = Mockery::mock(RabbitMQQueue::class);
+        $rabbitmq->shouldReceive('laterRaw')->once()->andReturn('id');
+        $rabbitmq->shouldReceive('ack')->once()->andThrow($closed);
+        $this->exceptionHandler->shouldReceive('report')->once()->with($closed);
+        $message = new AMQPMessage(json_encode([
+            'uuid' => '0b6a0d5c-2a8e-4f6e-9a39-3f8d1f7b9a10',
+            'job' => 'stdClass@call',
+            'data' => ['commandName' => 'stdClass', 'command' => serialize(new \stdClass)],
+        ]));
+        $message->setDeliveryInfo(5, false, '', 'default-quorum');
+        $job = new RabbitMQJob($this->container, $rabbitmq, $message, 'rabbitmq_vhosts', 'default-quorum');
+
+        $job->release(10);
+
+        $this->assertTrue($job->isReleased());
     }
 
     private function expectReject(bool $requeue): RabbitMQQueue

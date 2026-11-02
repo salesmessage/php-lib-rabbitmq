@@ -131,28 +131,29 @@ class RabbitMQJob extends Job implements JobContract
             }
 
             $this->requeuedAfterFail = ! $this->failedJobLogged;
-            $this->rejectReportingClosedChannel($this->requeuedAfterFail);
+            $requeue = $this->requeuedAfterFail;
+            $this->settleReportingFailure(fn () => $this->rabbitmq->reject($this, $requeue));
             $this->container->make(ExceptionHandler::class)->report($failException);
 
             return;
         }
 
         if (! $wasDeleted) {
-            $this->rejectReportingClosedChannel(false);
+            $this->settleReportingFailure(fn () => $this->rabbitmq->reject($this, false));
         }
     }
 
     /**
-     * The message is rejected on the channel that delivered it. When that channel is already gone, the
-     * broker has requeued the message with it: the failure is reported, so the timeout handler still
-     * kills the worker.
+     * The message is settled (acked or rejected) on the channel that delivered it. When that channel is gone
+     * (e.g. a reconnect while the job ran, or a write into a socket that is gone), the broker has requeued the
+     * message with it, and the redelivery is deduplicated: the failure is reported, not thrown, so a job that
+     * succeeded doesn't fail, a release keeps its own exception, and the timeout handler still kills the worker.
      */
-    private function rejectReportingClosedChannel(bool $requeue): void
+    private function settleReportingFailure(callable $settle): void
     {
         try {
-            $this->rabbitmq->reject($this, $requeue);
+            $settle();
         } catch (AMQPRuntimeException $exception) {
-            // Also a write into a socket that is gone ("Error sending data"), not only a closed channel.
             $this->container->make(ExceptionHandler::class)->report($exception);
         }
     }
@@ -178,13 +179,15 @@ class RabbitMQJob extends Job implements JobContract
 
         // When delete is called and the Job was not failed, the message must be acknowledged.
         // This is because this is a controlled call by a developer. So the message was handled correct.
-        if (! $this->failed) {
-            $this->rabbitmq->ack($this);
-        }
-
-        // required for Laravel Horizon
-        if ($this->rabbitmq instanceof HorizonRabbitMQQueue) {
-            $this->rabbitmq->deleteReserved($this->queue, $this);
+        try {
+            if (! $this->failed) {
+                $this->settleReportingFailure(fn () => $this->rabbitmq->ack($this));
+            }
+        } finally {
+            // required for Laravel Horizon; also when the ack fails, the job is no longer reserved
+            if ($this->rabbitmq instanceof HorizonRabbitMQQueue) {
+                $this->rabbitmq->deleteReserved($this->queue, $this);
+            }
         }
     }
 
@@ -219,7 +222,7 @@ class RabbitMQJob extends Job implements JobContract
         // Releasing a Job means the message was failed to process.
         // Because this Job message is always recreated and pushed as new message, this Job message is correctly handled.
         // We must tell rabbitMQ this job message can be removed by acknowledging the message.
-        $this->rabbitmq->ack($this);
+        $this->settleReportingFailure(fn () => $this->rabbitmq->ack($this));
     }
 
     /**

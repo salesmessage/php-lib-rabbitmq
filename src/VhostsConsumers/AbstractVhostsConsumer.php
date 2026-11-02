@@ -985,11 +985,15 @@ abstract class AbstractVhostsConsumer extends Consumer
                 'trace' => $exception->getTraceAsString(),
             ]);
 
-            $vhostDto = new VhostApiDto([
-                'name' => $this->currentVhostName,
-            ]);
+            // Only a failure about the vhost (not found, deleted, access refused) takes it out of the index.
+            // During an outage (e.g. AMQProxy up, broker down) the vhosts stay indexed for when it is back.
+            if (str_contains(strtolower($exception->getMessage()), 'vhost')) {
+                $vhostDto = new VhostApiDto([
+                    'name' => $this->currentVhostName,
+                ]);
 
-            $this->internalStorageManager->removeVhost($vhostDto);
+                $this->internalStorageManager->removeVhost($vhostDto);
+            }
             $this->loadVhosts();
             $goAhead = $this->goAheadOrWait($this->workerOptions?->sleep ?? 1);
             if ($goAhead === false) {
