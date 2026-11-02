@@ -598,22 +598,26 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         $this->assertSame([['delivered', self::LISTENER]], $this->published);
     }
 
-    public function test_connection_is_replaced_before_the_next_publish_after_a_batch_write_timed_out(): void
+    public function test_batch_whose_write_timed_out_is_not_sent_again_and_its_confirm_channel_not_reused(): void
     {
-        // A timed-out write can leave part of a frame in the stream: nothing more is written on it.
+        // The connection is not replaced after a write timeout (as on 1.83); the failed batch's messages are
+        // discarded, and a confirm channel with confirms that will never resolve is not used again.
+        $confirmChannel = $this->queue->getChannel(false, true);
         $this->publishBatchTimesOut = true;
         try {
-            $this->queue->bulk([self::listenerJob()], '', self::QUEUE);
+            $this->queue->bulk([new ReconnectTestConfirmedJob], '', self::QUEUE);
             $this->fail('A write timeout must surface.');
         } catch (AMQPTimeoutException) {
         }
         $this->published = [];
-        $this->reconnects = 0;
 
-        $this->queue->bulk([self::listenerJob()], '', self::QUEUE);
+        $this->queue->bulk([new ReconnectTestConfirmedJob], '', self::QUEUE);
 
-        $this->assertSame(1, $this->reconnects);
-        $this->assertSame([['delivered', self::LISTENER]], $this->published);
+        $this->assertSame(0, $this->reconnects);
+        $this->assertSame([['delivered', ReconnectTestConfirmedJob::class]], $this->published);
+        $this->assertNotSame($confirmChannel, $this->queue->getChannel(false, true));
+        // Not closed (that would wait on the stalled socket): still registered on its connection.
+        $this->assertContains($confirmChannel, $this->connection->channels);
     }
 
     public function test_timed_out_batch_leaves_nothing_buffered_on_its_channel(): void
@@ -689,26 +693,26 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         $this->logger->shouldNotHaveReceived('warning');
     }
 
-    public function test_connection_is_replaced_before_the_next_publish_after_a_publish_write_timed_out(): void
+    public function test_publish_whose_write_timed_out_surfaces_the_timeout_without_a_reconnect(): void
     {
+        // As on 1.83: a write timeout is not a closed connection, so it is neither retried nor recovered, and the
+        // next publish goes out on the same channel without a reconnect.
         $publish = self::publishPaths()['pushRaw'][0];
         $this->publishesOnce($publish);
+        $channel = $this->queue->getChannel();
         $this->basicPublishTimesOut = true;
         try {
             $publish($this->queue, self::QUEUE);
             $this->fail('A write timeout must surface.');
         } catch (AMQPTimeoutException) {
         }
-        $this->published = [];
-        // Idle for longer than the heartbeat: the idle check must not open a channel on that stream first.
-        $this->lastActivity = $this->secondsAgo(45);
 
         $publish($this->queue, self::QUEUE);
 
-        $this->assertSame(1, $this->reconnects);
+        $this->assertSame(0, $this->reconnects);
         $this->assertSame([['delivered', self::LISTENER]], $this->published);
-        $this->logger->shouldHaveReceived('warning')->with('RabbitMQQueueBatchable.reconnect', Mockery::subset(['reason' => 'write_timeout']));
-        $this->logger->shouldNotHaveReceived('warning', ['RabbitMQQueueBatchable.reconnect', Mockery::subset(['reason' => 'idle_guard'])]);
+        $this->assertSame($channel, $this->queue->getChannel());
+        $this->logger->shouldNotHaveReceived('warning');
     }
 
     public function test_failed_batch_on_a_live_connection_keeps_the_plain_channel_and_closes_the_confirm_channel(): void

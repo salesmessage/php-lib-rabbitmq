@@ -47,9 +47,6 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
      */
     private int $runningUnits = 0;
 
-    /** A write timed out and may have left part of a frame in the stream: reconnect before the next unit. */
-    private bool $replaceConnection = false;
-
     /** Recoveries of a publish unit: one per step it has (open a channel, declare, publish) and one more. */
     private const PUBLISH_RECOVERIES = 4;
 
@@ -179,10 +176,10 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
      * messages buffered on the channel, where the next batch would send them again: they are discarded.
      *
      * A blocked connection (a broker alarm) fails before anything is written or awaited, and the channel stays:
-     * a vhost consumer may be reading from it. A write timeout is handled by the unit (the connection is
-     * replaced). After another failure on a live connection, a confirm channel is closed (confirms recorded for
-     * this batch would never resolve) while a plain channel stays; on a connection that is down, the channel is
-     * just no longer used.
+     * a vhost consumer may be reading from it. After another failure a confirm channel is not used again
+     * (confirms recorded for this batch would never resolve): it is closed on a live connection, except after
+     * a write timeout, where closing would wait on the stalled socket. A plain channel stays while its
+     * connection is up; on a connection that is down it is just no longer used.
      */
     private function publishBuffered(AMQPChannel $channel, array $prepared): void
     {
@@ -196,11 +193,11 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
                 $this->batch_messages = [];
             })->call($channel);
 
-            if (! $exception instanceof AMQPConnectionBlockedException && ! self::isWriteTimeout($exception)) {
+            if (! $exception instanceof AMQPConnectionBlockedException) {
                 $connected = (bool) $channel->getConnection()?->isConnected();
                 if ($this->confirmChannel === $channel) {
                     $this->confirmChannel = null;
-                    if ($connected) {
+                    if ($connected && ! $exception instanceof AMQPTimeoutException) {
                         $this->closeQuietly($channel);
                     }
                 } elseif (! $connected && $this->channel === $channel) {
@@ -210,16 +207,6 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
 
             throw $exception;
         }
-    }
-
-    /**
-     * php-amqplib's own write timeout (AMQPTimeoutException::writeTimeout()): part of a frame may be in the
-     * stream, so nothing more can be written on that connection. A read timeout leaves the stream intact.
-     */
-    private static function isWriteTimeout(\Throwable $exception): bool
-    {
-        return $exception instanceof AMQPTimeoutException
-            && str_starts_with($exception->getMessage(), 'Error sending data.');
     }
 
     /**
@@ -289,10 +276,6 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
      */
     private function probeIdleConnection(string $payload): void
     {
-        if ($this->replaceConnection) {
-            return;
-        }
-
         $connection = $this->getConnection();
         if (! $connection->isConnected() || $connection->getHeartbeat() <= 0) {
             return;
@@ -536,29 +519,9 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         try {
             $this->forgetStaleChannels();
             $vhostRecreated = false;
-            if ($this->replaceConnection) {
-                $this->logger->warning('RabbitMQQueueBatchable.reconnect', [
-                    'reason' => 'write_timeout',
-                    'vhost' => $this->vhostName(),
-                    'idle_seconds' => $this->publishingIdleSeconds,
-                    'job' => $this->publishingPayload === null ? null : self::jobName($this->publishingPayload),
-                ]);
-                $vhostRecreated = $this->recoverConnection(new AMQPConnectionClosedException('Connection is closed.'), $reconnectAttempts);
-                $this->replaceConnection = false;
-            }
             for ($attempt = 0; ; $attempt++) {
                 try {
                     return $operation();
-                } catch (AMQPTimeoutException $exception) {
-                    // A write that timed out may have left part of a frame in the stream: nothing more is written
-                    // on this connection, it is replaced before the next unit.
-                    if (self::isWriteTimeout($exception)) {
-                        $this->channel = null;
-                        $this->confirmChannel = null;
-                        $this->replaceConnection = true;
-                    }
-
-                    throw $exception;
                 } catch (AMQPConnectionClosedException|AMQPChannelClosedException $exception) {
                     // No retries left - surface the failure.
                     if ($attempt >= $operationAttempts) {
