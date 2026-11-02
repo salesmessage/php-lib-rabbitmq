@@ -139,14 +139,20 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
 
             // Every channel the batch needs is opened before anything is buffered: a failure then leaves no
             // message buffered on a channel, where the next batch on it would publish it again.
-            $plainChannel = empty($plain) ? null : $this->getChannel(false, false);
-            $confirmChannel = empty($confirmed) ? null : $this->getChannel(false, true);
             // Opening the second channel can make php-amqplib reconnect on its own, which leaves the first one
-            // stale: run the unit again rather than write on it.
-            if (($plainChannel !== null && $this->isStale($plainChannel))
-                || ($confirmChannel !== null && $this->isStale($confirmChannel))
-            ) {
-                throw new AMQPChannelClosedException('Channel connection is closed.');
+            // stale: they are fetched again (getChannel() replaces a stale one), and only if that doesn't settle
+            // it does the unit recover and run again.
+            for ($fetch = 1; ; $fetch++) {
+                $plainChannel = empty($plain) ? null : $this->getChannel(false, false);
+                $confirmChannel = empty($confirmed) ? null : $this->getChannel(false, true);
+                $stale = ($plainChannel !== null && $this->isStale($plainChannel))
+                    || ($confirmChannel !== null && $this->isStale($confirmChannel));
+                if (! $stale) {
+                    break;
+                }
+                if ($fetch >= 2) {
+                    throw new AMQPChannelClosedException('Channel connection is closed.');
+                }
             }
 
             if ($plainChannel !== null) {
@@ -170,9 +176,10 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
     }
 
     /**
-     * php-amqplib empties a channel's batch only after a successful write: when the write fails, the channel is
-     * no longer used for publishing, so the next batch doesn't send these messages again, and it is closed
-     * unless a vhost consumer is consuming on it.
+     * php-amqplib empties a channel's batch only after a successful write: when the write fails, the messages
+     * are discarded from the channel, so the next batch on it doesn't send them again. The channel is not
+     * closed: a vhost consumer may be reading from it (basic_get on the queue's channel). A channel whose
+     * connection is down is only no longer used.
      */
     private function publishBuffered(AMQPChannel $channel, array $prepared): void
     {
@@ -182,14 +189,17 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
             }
             $channel->publish_batch();
         } catch (\Throwable $exception) {
-            if ($this->channel === $channel) {
-                $this->channel = null;
-            }
-            if ($this->confirmChannel === $channel) {
-                $this->confirmChannel = null;
-            }
-            if (! $channel->is_consuming()) {
-                $this->closeQuietly($channel);
+            if ($channel->getConnection()?->isConnected() && $channel->is_open() !== false) {
+                (function (): void {
+                    $this->batch_messages = [];
+                })->call($channel);
+            } else {
+                if ($this->channel === $channel) {
+                    $this->channel = null;
+                }
+                if ($this->confirmChannel === $channel) {
+                    $this->confirmChannel = null;
+                }
             }
 
             throw $exception;

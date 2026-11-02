@@ -986,9 +986,10 @@ abstract class AbstractVhostsConsumer extends Consumer
                 'trace' => $exception->getTraceAsString(),
             ]);
 
-            // Only a vhost that is gone (not found, deleted) is taken out of the index. During an outage (e.g.
-            // AMQProxy up, broker down) or while a vhost is refused or overloaded, it stays indexed.
-            if (VhostFailure::isMissing($exception, $this->currentVhostName)) {
+            // A vhost that fails is taken out of the index, so the consumers go on with the next vhost instead of
+            // all retrying this one (the scanner indexes it again). When the whole broker is out of reach
+            // (AMQProxy up, broker down) every vhost fails: they stay indexed for when it is back.
+            if (! VhostFailure::isBrokerUnreachable($exception)) {
                 $vhostDto = new VhostApiDto([
                     'name' => $this->currentVhostName,
                 ]);

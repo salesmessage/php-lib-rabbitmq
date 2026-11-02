@@ -164,9 +164,18 @@ class RabbitMQJob extends Job implements JobContract
         }
     }
 
+    /**
+     * The connection the message was delivered on (a consumer may hold another queue object's connection),
+     * else the queue's own.
+     */
     private function connectionIsUp(): bool
     {
         try {
+            $channel = $this->message->getChannel();
+            if ($channel !== null) {
+                return (bool) $channel->getConnection()?->isConnected();
+            }
+
             return $this->rabbitmq->getConnection()->isConnected();
         } catch (Throwable) {
             return false;

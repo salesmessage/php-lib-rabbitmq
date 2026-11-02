@@ -681,7 +681,15 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         }
 
         if ($this->isStale($channel)) {
-            throw new AMQPChannelClosedException('Channel connection is closed.');
+            // Frames go out by channel id: a live channel under the same id on the reconnected connection is
+            // where this delivery tag goes (and where a vhost consumer that kept the old object received it).
+            // Without one, writing the id would make the broker close the whole connection.
+            $live = $channel->getConnection()->channels[$channel->getChannelId()] ?? null;
+            if (! $live instanceof AMQPChannel) {
+                throw new AMQPChannelClosedException('Channel connection is closed.');
+            }
+
+            return $live;
         }
 
         return $channel;

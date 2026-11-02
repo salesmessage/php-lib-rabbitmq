@@ -8,22 +8,25 @@ use Illuminate\Queue\QueueManager;
 use Illuminate\Queue\WorkerOptions;
 use Mockery;
 use Mockery\Adapter\Phpunit\MockeryPHPUnitIntegration;
+use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Exception\AMQPConnectionClosedException;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 use ReflectionProperty;
+use Salesmessage\LibRabbitMQ\Dto\ConsumeVhostsFiltersDto;
 use Salesmessage\LibRabbitMQ\Mutex;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\DeliveryLimitService;
 use Salesmessage\LibRabbitMQ\Services\FailedJobWriter;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
+use Salesmessage\LibRabbitMQ\Services\Scheduler\VhostSchedulerInterface;
 use Salesmessage\LibRabbitMQ\VhostsConsumers\AbstractVhostsConsumer;
 
 /**
- * A vhost whose connection cannot be opened is removed from the index only when the failure is about the
- * vhost: during an outage (e.g. AMQProxy up, broker down) the vhosts must stay indexed for when it is back.
+ * A vhost whose connection cannot be opened is taken out of the index, so the consumers go on with the next
+ * vhost; only when the whole broker is out of reach (AMQProxy up, broker down) do the vhosts stay indexed.
  */
 class AbstractVhostsConsumerInitConnectionTest extends TestCase
 {
@@ -32,17 +35,17 @@ class AbstractVhostsConsumerInitConnectionTest extends TestCase
     public static function failures(): array
     {
         return [
-            'broker down behind the proxy' => [new AMQPConnectionClosedException('UPSTREAM_ERROR(0, 0)', 500), false],
-            'connection lost' => [new AMQPConnectionClosedException('Broken pipe or closed connection'), false],
-            'vhost down while its node restarts' => [new AMQPConnectionClosedException("NOT_ALLOWED - access to vhost 'organization_1' refused for user 'u': vhost 'organization_1' is down", 530), false],
-            'vhost connection limit' => [new AMQPConnectionClosedException("NOT_ALLOWED - access to vhost 'organization_1' refused for user 'u': connection limit (100) is reached", 530), false],
+            'broker down behind the proxy' => [new AMQPConnectionClosedException('UPSTREAM_ERROR - Connection refused(0, 0)', 503), false],
+            'connection lost' => [new AMQPConnectionClosedException('Broken pipe or closed connection'), true],
+            'vhost down while its node restarts' => [new AMQPConnectionClosedException("NOT_ALLOWED - access to vhost 'organization_1' refused for user 'u': vhost 'organization_1' is down", 530), true],
+            'vhost connection limit' => [new AMQPConnectionClosedException("NOT_ALLOWED - access to vhost 'organization_1' refused for user 'u': connection limit (100) is reached", 530), true],
             'vhost not found' => [new AMQPConnectionClosedException('NOT_ALLOWED - vhost organization_1 not found(0, 0)', 403), true],
             'vhost deleted' => [new AMQPConnectionClosedException("CONNECTION_FORCED - vhost 'organization_1' is deleted", 320), true],
         ];
     }
 
     #[DataProvider('failures')]
-    public function test_vhost_is_removed_from_the_index_only_when_the_failure_is_about_the_vhost(AMQPConnectionClosedException $failure, bool $removed): void
+    public function test_failing_vhost_is_removed_from_the_index_unless_the_whole_broker_is_unreachable(AMQPConnectionClosedException $failure, bool $removed): void
     {
         $storage = Mockery::mock(InternalStorageManager::class);
         $storage->shouldReceive('removeVhost')->times($removed ? 1 : 0);
@@ -54,6 +57,91 @@ class AbstractVhostsConsumerInitConnectionTest extends TestCase
         $consumer = $this->makeConsumer($storage, $manager);
 
         $this->assertNull($consumer->initConnectionPublic());
+    }
+
+    public function test_vhost_that_stays_down_does_not_block_the_next_one(): void
+    {
+        // Ordered by last processed: organization_1 never gets processed, so it would stay first for every consumer.
+        $scheduler = new class implements VhostSchedulerInterface
+        {
+            public array $vhosts = ['organization_1', 'organization_2'];
+
+            public function getOrderedVhosts(string $group): array
+            {
+                return $this->vhosts;
+            }
+
+            public function getOrderedQueues(string $group, string $vhost): array
+            {
+                return ['q'];
+            }
+
+            public function reserve(string $group, string $vhost, string $queue): void {}
+
+            public function record(string $group, string $vhost, string $queue, int $milliseconds): void {}
+
+            public function accrue(string $group, string $vhost, int $elapsedMs): void {}
+        };
+        $storage = Mockery::mock(InternalStorageManager::class);
+        $storage->shouldReceive('removeVhost')->andReturnUsing(function ($dto) use ($scheduler): void {
+            $scheduler->vhosts = array_values(array_diff($scheduler->vhosts, [$dto->getName()]));
+        });
+        $down = new AMQPConnectionClosedException("NOT_ALLOWED - access to vhost 'organization_1' refused for user 'u': vhost 'organization_1' is down(0, 0)", 403);
+        $bad = Mockery::mock(RabbitMQQueue::class);
+        $bad->shouldReceive('getChannel')->with(true)->andThrow($down);
+        $good = Mockery::mock(RabbitMQQueue::class);
+        $good->shouldReceive('getChannel')->with(true)->andReturn(Mockery::mock(AMQPChannel::class)->shouldIgnoreMissing());
+        $good->shouldReceive('getConnectionName')->andReturn('rabbitmq_vhosts:organization_2');
+        $attempts = ['organization_1' => 0, 'organization_2' => 0];
+        $manager = Mockery::mock(QueueManager::class);
+        $manager->shouldReceive('connection')->andReturnUsing(function (string $name) use ($bad, $good, &$attempts) {
+            $vhost = str_contains($name, 'organization_1') ? 'organization_1' : 'organization_2';
+            $attempts[$vhost]++;
+
+            return $vhost === 'organization_1' ? $bad : $good;
+        });
+
+        $consumer = new class($storage, Mockery::spy(LoggerInterface::class), $manager, Mockery::mock(Dispatcher::class), Mockery::mock(ExceptionHandler::class), fn () => false, Mockery::mock(DeduplicationService::class), Mockery::mock(DeliveryLimitService::class), Mockery::mock(FailedJobWriter::class)) extends AbstractVhostsConsumer
+        {
+            protected function vhostDaemon($connectionName, WorkerOptions $options) {}
+
+            protected function startConsuming(): ?RabbitMQQueue
+            {
+                return null;
+            }
+
+            protected function stopConsuming(): void {}
+
+            protected function log(string $message, array $data = [], string $logType = 'info'): void {}
+
+            protected function stopIfNecessary(WorkerOptions $options, $lastRestart, $startTime = 0, $jobsProcessed = 0, $job = null, $lastJobProcessedAt = null)
+            {
+                return null;
+            }
+
+            public function sleep($seconds) {}
+
+            public function initConnectionPublic(): ?RabbitMQQueue
+            {
+                return $this->initConnection();
+            }
+
+            public function current(): ?string
+            {
+                return $this->currentVhostName;
+            }
+        };
+        $consumer->setScheduler($scheduler);
+        $consumer->setFiltersDto(new ConsumeVhostsFiltersDto('g', [], '', [], ''));
+        (new ReflectionProperty(AbstractVhostsConsumer::class, 'currentVhostName'))->setValue($consumer, 'organization_1');
+        (new ReflectionProperty(AbstractVhostsConsumer::class, 'currentQueueName'))->setValue($consumer, 'q');
+        (new ReflectionProperty(AbstractVhostsConsumer::class, 'configConnectionName'))->setValue($consumer, 'rabbitmq_vhosts');
+        (new ReflectionProperty(AbstractVhostsConsumer::class, 'connectionMutex'))->setValue($consumer, new Mutex(false));
+        (new ReflectionProperty(AbstractVhostsConsumer::class, 'workerOptions'))->setValue($consumer, new WorkerOptions(sleep: 0));
+
+        $this->assertSame($good, $consumer->initConnectionPublic());
+        $this->assertSame('organization_2', $consumer->current());
+        $this->assertSame(1, $attempts['organization_1']);
     }
 
     private function makeConsumer(InternalStorageManager $storage, QueueManager $manager)

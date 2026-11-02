@@ -371,20 +371,45 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         }
     }
 
-    public function test_stale_delivery_channel_left_by_a_reconnect_is_not_used_to_settle_the_job(): void
+    public function test_stale_delivery_channel_settles_through_the_live_channel_with_its_id(): void
     {
-        // After a missed heartbeat php-amqplib reconnects without closing the old channel objects: an ack on one
-        // would go out on the new connection with a channel id it doesn't own.
-        $deliveryChannel = $this->deliveryChannel(registered: false);
-        $deliveryChannel->shouldNotReceive('basic_ack');
+        // After a missed heartbeat php-amqplib reconnects without closing the old channel objects; frames go out
+        // by channel id, so the live channel under the same id is where the delivery tag goes.
+        $stale = Mockery::mock(AMQPChannel::class);
+        $stale->shouldNotReceive('basic_ack');
+        $live = Mockery::mock(AMQPChannel::class);
+        $live->shouldReceive('basic_ack')->once()->with(7);
+        $connection = Mockery::mock(AbstractConnection::class);
+        $connection->channels = [3 => $live];
+        $stale->shouldReceive('getConnection')->andReturn($connection);
+        $stale->shouldReceive('getChannelId')->andReturn(3);
+
+        $this->queue->ack($this->jobDeliveredOn($stale));
+    }
+
+    public function test_stale_delivery_channel_without_a_live_channel_with_its_id_fails_the_settle(): void
+    {
+        // Writing an id the new connection doesn't have would make the broker close the whole connection.
+        $stale = Mockery::mock(AMQPChannel::class);
+        $stale->shouldNotReceive('basic_ack');
+        $connection = Mockery::mock(AbstractConnection::class);
+        $connection->channels = [];
+        $stale->shouldReceive('getConnection')->andReturn($connection);
+        $stale->shouldReceive('getChannelId')->andReturn(3);
+
+        $this->expectException(AMQPChannelClosedException::class);
+        $this->queue->ack($this->jobDeliveredOn($stale));
+    }
+
+    private function jobDeliveredOn(AMQPChannel $channel): RabbitMQJob
+    {
         $message = new AMQPMessage('{}');
-        $message->setChannel($deliveryChannel);
+        $message->setChannel($channel);
         $message->setDeliveryInfo(7, false, '', self::QUEUE);
         $job = Mockery::mock(RabbitMQJob::class);
         $job->shouldReceive('getRabbitMQMessage')->andReturn($message);
 
-        $this->expectException(AMQPChannelClosedException::class);
-        $this->queue->ack($job);
+        return $job;
     }
 
     public static function vhostScenarios(): array
@@ -495,8 +520,10 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         $this->assertSame([['delivered', ReconnectTestConfirmedJob::class], ['delivered', self::LISTENER]], $this->published);
     }
 
-    public function test_channel_of_a_failed_batch_write_is_closed_not_left_open(): void
+    public function test_consumer_channel_is_kept_open_when_a_batch_on_it_fails(): void
     {
+        // A vhost consumer reads (basic_get) from the queue's channel, which a job's bulk publish uses too.
+        $consumerChannel = $this->queue->getChannel(true);
         $this->publishBatchTimesOut = true;
         try {
             $this->queue->bulk([self::listenerJob()], '', self::QUEUE);
@@ -504,7 +531,9 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         } catch (AMQPTimeoutException) {
         }
 
-        $this->assertSame([], $this->connection->channels);
+        $this->assertSame($consumerChannel, $this->queue->getChannel());
+        $this->assertContains($consumerChannel, $this->connection->channels);
+        $this->assertSame([], (fn () => $this->batch_messages)->call($consumerChannel));
     }
 
     public function test_mixed_batch_whose_confirm_channel_open_reconnects_runs_again_on_new_channels(): void
@@ -524,6 +553,8 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
             [['delivered', self::LISTENER], ['delivered', ReconnectTestConfirmedJob::class]],
             $this->published
         );
+        // The stale channel is replaced by fetching it again, without reconnecting the connection.
+        $this->assertSame(0, $this->reconnects);
     }
 
     public function test_channel_the_broker_closed_is_replaced_without_a_reconnect(): void
@@ -723,7 +754,6 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
                 && ($exchange === '' || (in_array($exchange, $this->brokerExchanges, true) && in_array($exchange, $this->brokerQueues, true)));
             $this->published[] = [$routed ? 'delivered' : 'lost', json_decode($message->getBody(), true)['displayName'] ?? null];
         };
-        $batch = [];
 
         $channel = Mockery::mock(AMQPChannel::class)->shouldIgnoreMissing();
         $channel->shouldReceive('queue_declare')->andReturnUsing(function (string $name, bool $passive) use ($alive): array {
@@ -773,18 +803,24 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         });
         $channel->shouldReceive('basic_publish')->andReturnUsing($deliver);
         // A batch is only buffered on the channel; publish_batch writes it.
-        $channel->shouldReceive('batch_basic_publish')->andReturnUsing(function (AMQPMessage $message, string $exchange = '', string $routingKey = '') use (&$batch): void {
-            $batch[] = [$message, $exchange, $routingKey];
+        // The batch lives in php-amqplib's own buffer, which publish_batch empties only after a successful write.
+        $buffer = fn () => (fn () => $this->batch_messages)->call($channel);
+        $setBuffer = function (array $messages) use ($channel): void {
+            (function () use ($messages): void {
+                $this->batch_messages = $messages;
+            })->call($channel);
+        };
+        $channel->shouldReceive('batch_basic_publish')->andReturnUsing(function (AMQPMessage $message, string $exchange = '', string $routingKey = '') use ($buffer, $setBuffer): void {
+            $setBuffer([...$buffer(), [$message, $exchange, $routingKey]]);
         });
-        $channel->shouldReceive('publish_batch')->andReturnUsing(function () use (&$batch, $deliver): void {
+        $channel->shouldReceive('publish_batch')->andReturnUsing(function () use ($buffer, $setBuffer, $deliver): void {
             if ($this->publishBatchTimesOut) {
-                // php-amqplib empties the batch only after a successful write.
                 $this->publishBatchTimesOut = false;
 
                 throw new AMQPTimeoutException('The connection timed out after 3 sec while sending data');
             }
-            $messages = $batch;
-            $batch = [];
+            $messages = $buffer();
+            $setBuffer([]);
             foreach ($messages as [$message, $exchange, $routingKey]) {
                 $deliver($message, $exchange, $routingKey);
             }

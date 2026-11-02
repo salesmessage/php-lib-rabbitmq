@@ -15,6 +15,7 @@ use Illuminate\Queue\TimeoutExceededException;
 use Mockery;
 use Mockery\Adapter\Phpunit\MockeryPHPUnitIntegration;
 use Mockery\MockInterface;
+use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Connection\AbstractConnection;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
 use PhpAmqpLib\Exception\AMQPRuntimeException;
@@ -271,6 +272,24 @@ class RabbitMQJobFailTest extends TestCase
 
         $this->expectExceptionObject($closed);
         $this->makeJob($rabbitmq)->delete();
+    }
+
+    public function test_finished_job_is_reported_when_its_delivery_connection_is_up_whatever_the_queue_connection(): void
+    {
+        // A consumer may deliver through another queue object's connection: the delivery channel's decides.
+        $closed = new AMQPChannelClosedException('Channel connection is closed.');
+        $rabbitmq = $this->withConnection(Mockery::mock(RabbitMQQueue::class), connected: false);
+        $rabbitmq->shouldReceive('ack')->once()->andThrow($closed);
+        $this->exceptionHandler->shouldReceive('report')->once()->with($closed);
+        $deliveryConnection = Mockery::mock(AbstractConnection::class);
+        $deliveryConnection->shouldReceive('isConnected')->andReturnTrue();
+        $deliveryChannel = Mockery::mock(AMQPChannel::class);
+        $deliveryChannel->shouldReceive('getConnection')->andReturn($deliveryConnection);
+        $message = new AMQPMessage($this->payload());
+        $message->setChannel($deliveryChannel);
+        $message->setDeliveryInfo(5, false, '', 'default-quorum');
+
+        (new RabbitMQJob($this->container, $rabbitmq, $message, 'rabbitmq_vhosts', 'default-quorum'))->delete();
     }
 
     public function test_write_timeout_of_the_reject_is_reported_instead_of_thrown(): void

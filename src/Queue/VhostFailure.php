@@ -6,8 +6,8 @@ use Throwable;
 
 /**
  * Whether a connection or channel failure means the vhost itself is gone, as opposed to an outage, a refused or
- * overloaded vhost that is healthy again a moment later. The publisher recreates such a vhost and the vhost
- * consumers take it out of their index; both use this one definition.
+ * overloaded vhost that is healthy again a moment later. The publisher recreates a missing vhost; the vhost
+ * consumers use the same checks to decide what to do with a vhost they cannot connect to.
  */
 final class VhostFailure
 {
@@ -24,5 +24,14 @@ final class VhostFailure
         }
 
         return str_contains($exception->getMessage(), sprintf("CONNECTION_FORCED - vhost '%s' is deleted", $vhostName));
+    }
+
+    /**
+     * The whole broker is out of reach (AMQProxy answers UPSTREAM_ERROR when it cannot reach it): every vhost
+     * fails the same way, so the failure says nothing about this vhost.
+     */
+    public static function isBrokerUnreachable(Throwable $exception): bool
+    {
+        return str_contains($exception->getMessage(), 'UPSTREAM_ERROR');
     }
 }
