@@ -83,6 +83,13 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
     /** Runs once, inside the next queue_declare: something that re-enters the queue meanwhile (a signal handler). */
     private ?\Closure $onQueueDeclare = null;
 
+    /** False for a lazy connection that has never connected (php-amqplib: no server properties yet). */
+    private bool $everConnected = true;
+
+    private bool $basicPublishTimesOut = false;
+
+    private LoggerInterface&Mockery\MockInterface $logger;
+
     /** @var list<string> */
     private array $brokerExchanges = [];
 
@@ -124,7 +131,8 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         $this->lockService = Mockery::mock(LockService::class);
         $container->instance(VhostsService::class, $this->vhostsService);
         $container->instance(LockService::class, $this->lockService);
-        $container->instance(LoggerInterface::class, Mockery::spy(LoggerInterface::class));
+        $this->logger = Mockery::spy(LoggerInterface::class);
+        $container->instance(LoggerInterface::class, $this->logger);
         Container::setInstance($container);
 
         $this->queue = new RabbitMQQueueBatchable(QueueConfigFactory::make([]));
@@ -608,6 +616,19 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         $this->assertSame([['delivered', self::LISTENER]], $this->published);
     }
 
+    public function test_timed_out_batch_leaves_nothing_buffered_on_its_channel(): void
+    {
+        $channel = $this->queue->getChannel();
+        $this->publishBatchTimesOut = true;
+        try {
+            $this->queue->bulk([self::listenerJob()], '', self::QUEUE);
+            $this->fail('A write timeout must surface.');
+        } catch (AMQPTimeoutException) {
+        }
+
+        $this->assertSame([], (fn () => $this->batch_messages)->call($channel));
+    }
+
     #[DataProvider('publishPaths')]
     public function test_publish_after_a_connection_level_close_into_a_recreated_vhost_declares_its_queue(callable $publish): void
     {
@@ -643,6 +664,73 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
             [['delivered', self::LISTENER], ['delivered', ReconnectTestConfirmedJob::class]],
             $this->published
         );
+    }
+
+    public static function firstUses(): array
+    {
+        return [
+            'push' => [fn (RabbitMQQueueBatchable $queue) => $queue->push(self::listenerJob(), '', self::QUEUE)],
+            'pushRaw' => [fn (RabbitMQQueueBatchable $queue) => $queue->pushRaw(json_encode(['displayName' => self::LISTENER, 'id' => 'job-id']), self::QUEUE)],
+            'a consumer opening its channel' => [fn (RabbitMQQueueBatchable $queue) => $queue->getChannel(true)],
+            'size' => [fn (RabbitMQQueueBatchable $queue) => $queue->size(self::QUEUE)],
+        ];
+    }
+
+    #[DataProvider('firstUses')]
+    public function test_first_use_of_a_lazy_connection_is_not_taken_for_a_lost_connection(callable $use): void
+    {
+        // A lazy connection (the default) is not connected until its first channel.
+        $this->connected = false;
+        $this->everConnected = false;
+
+        $use($this->queue);
+
+        $this->assertSame(0, $this->reconnects);
+        $this->logger->shouldNotHaveReceived('warning');
+    }
+
+    public function test_connection_is_replaced_before_the_next_publish_after_a_publish_write_timed_out(): void
+    {
+        $publish = self::publishPaths()['pushRaw'][0];
+        $this->publishesOnce($publish);
+        $this->basicPublishTimesOut = true;
+        try {
+            $publish($this->queue, self::QUEUE);
+            $this->fail('A write timeout must surface.');
+        } catch (AMQPTimeoutException) {
+        }
+        $this->published = [];
+        // Idle for longer than the heartbeat: the idle check must not open a channel on that stream first.
+        $this->lastActivity = $this->secondsAgo(45);
+
+        $publish($this->queue, self::QUEUE);
+
+        $this->assertSame(1, $this->reconnects);
+        $this->assertSame([['delivered', self::LISTENER]], $this->published);
+        $this->logger->shouldHaveReceived('warning')->with('RabbitMQQueueBatchable.reconnect', Mockery::subset(['reason' => 'write_timeout']));
+        $this->logger->shouldNotHaveReceived('warning', ['RabbitMQQueueBatchable.reconnect', Mockery::subset(['reason' => 'idle_guard'])]);
+    }
+
+    public function test_failed_batch_on_a_live_connection_keeps_the_plain_channel_and_closes_the_confirm_channel(): void
+    {
+        $plainChannel = $this->queue->getChannel();
+        $this->publishBatchFailure = new \InvalidArgumentException('Invalid message property');
+        try {
+            $this->queue->bulk([self::listenerJob()], '', self::QUEUE);
+            $this->fail('The failure must surface.');
+        } catch (\InvalidArgumentException) {
+        }
+        $confirmChannel = $this->queue->getChannel(false, true);
+        $this->publishBatchFailure = new \InvalidArgumentException('Invalid message property');
+        try {
+            $this->queue->bulk([new ReconnectTestConfirmedJob], '', self::QUEUE);
+            $this->fail('The failure must surface.');
+        } catch (\InvalidArgumentException) {
+        }
+
+        $this->assertSame($plainChannel, $this->queue->getChannel());
+        $this->assertNotContains($confirmChannel, $this->connection->channels);
+        $this->assertNull($this->confirmSelectedChannel());
     }
 
     public function test_confirm_channel_is_kept_only_in_confirm_mode(): void
@@ -747,11 +835,13 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         $connection->channels = [];
         $this->connection = $connection;
         $connection->shouldReceive('isConnected')->andReturnUsing(fn () => $this->connected);
+        $connection->shouldReceive('getServerProperties')->andReturnUsing(fn () => $this->everConnected ? ['product' => 'RabbitMQ'] : null);
         $connection->shouldReceive('getHeartbeat')->andReturn(30);
         $connection->shouldReceive('getLastActivity')->andReturnUsing(fn () => $this->lastActivity);
         // The proxy answers the handshake itself, whether or not the broker behind it is up.
         $connection->shouldReceive('reconnect')->andReturnUsing(function (): void {
             $this->connected = true;
+            $this->everConnected = true;
             $this->connection->channels = [];
             $this->generation++;
             $this->reconnects++;
@@ -771,6 +861,7 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         if (! $this->connected) {
             // php-amqplib connects again before opening a channel on a closed connection; the proxy accepts it.
             $this->connected = true;
+            $this->everConnected = true;
             $this->connection->channels = [];
             $this->generation++;
         }
@@ -859,7 +950,14 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
 
             return null;
         });
-        $channel->shouldReceive('basic_publish')->andReturnUsing($deliver);
+        $channel->shouldReceive('basic_publish')->andReturnUsing(function (AMQPMessage $message, string $exchange = '', string $routingKey = '') use ($deliver): void {
+            if ($this->basicPublishTimesOut) {
+                $this->basicPublishTimesOut = false;
+
+                throw AMQPTimeoutException::writeTimeout(3);
+            }
+            $deliver($message, $exchange, $routingKey);
+        });
         // A batch is only buffered on the channel; publish_batch writes it.
         // The batch lives in php-amqplib's own buffer, which publish_batch empties only after a successful write.
         $buffer = fn () => (fn () => $this->batch_messages)->call($channel);
