@@ -143,11 +143,22 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
 
         [$message, $exchange, $destination, $exchangeType, $queueType, $correlationId] = $this->buildMessage($payload, $queue, $options);
 
-        $this->declareDestination($destination, $exchange, $exchangeType, $queueType);
+        return $this->publishTransport(function () use ($message, $exchange, $destination, $exchangeType, $queueType, $correlationId, $confirm) {
+            $this->declareDestination($destination, $exchange, $exchangeType, $queueType);
+            $this->publishBasic($message, $exchange, $destination, true, confirm: $confirm);
 
-        $this->publishBasic($message, $exchange, $destination, true, confirm: $confirm);
+            return $correlationId;
+        }, $payload);
+    }
 
-        return $correlationId;
+    /**
+     * Run the network part of a publish: the declarations and the publish itself. The message is built
+     * before, so a subclass that retries this part after a reconnect publishes the same message, and
+     * declares its queues again (e.g. in a vhost recreated by the recovery).
+     */
+    protected function publishTransport(callable $transport, string $payload): mixed
+    {
+        return $transport();
     }
 
     /**
@@ -211,30 +222,33 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
             return $this->pushRaw($payload, $queue, $options);
         }
 
-        // Create a main queue to handle delayed messages
         [$mainDestination, $exchange, $exchangeType, $attempts] = $this->publishProperties($queue, $options);
-        $this->declareDestination($mainDestination, $exchange, $exchangeType, $queueType);
 
         // One shared delay queue per TTL in the vhost, for every destination queue.
         $delayName = DelayQueue::name($ttl);
 
-        $this->declareDelayQueue($delayName, $this->getDelayQueueArguments($ttl));
-
         [$message, $correlationId] = $this->createMessage($payload, $attempts);
+        $routingKey = $this->getRoutingKey($this->getQueue($queue));
 
-        // Publish through the delay exchange with the destination routing key: the delay queue has no
-        // x-dead-letter-routing-key, so the message is dead-lettered to the destination it was published for.
-        $this->publishBasic(
-            $message,
-            $delayName,
-            $this->getRoutingKey($this->getQueue($queue)),
-            true,
-            // Always confirm a delayed publish: it is mandatory, and without confirm mode the plain
-            // channel has no return listener, so an unroutable message would be dropped silently.
-            confirm: true
-        );
+        return $this->publishTransport(function () use ($mainDestination, $exchange, $exchangeType, $queueType, $delayName, $ttl, $message, $routingKey, $correlationId) {
+            // Create a main queue to handle delayed messages
+            $this->declareDestination($mainDestination, $exchange, $exchangeType, $queueType);
+            $this->declareDelayQueue($delayName, $this->getDelayQueueArguments($ttl));
 
-        return $correlationId;
+            // Publish through the delay exchange with the destination routing key: the delay queue has no
+            // x-dead-letter-routing-key, so the message is dead-lettered to the destination it was published for.
+            $this->publishBasic(
+                $message,
+                $delayName,
+                $routingKey,
+                true,
+                // Always confirm a delayed publish: it is mandatory, and without confirm mode the plain
+                // channel has no return listener, so an unroutable message would be dropped silently.
+                confirm: true
+            );
+
+            return $correlationId;
+        }, $payload);
     }
 
     /**
@@ -661,7 +675,19 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
      */
     private function deliveryChannel(AMQPMessage $message): AMQPChannel
     {
-        return $message->getChannel() ?? $this->getChannel();
+        $channel = $message->getChannel();
+        if ($channel === null) {
+            return $this->getChannel();
+        }
+
+        // A reconnect after a missed heartbeat empties the connection's channels without closing the old
+        // channel objects: one of them would write on the new connection with an id it doesn't own.
+        $connection = $channel->getConnection();
+        if ($connection !== null && ($connection->channels[$channel->getChannelId()] ?? null) !== $channel) {
+            throw new AMQPChannelClosedException('Channel connection is closed.');
+        }
+
+        return $channel;
     }
 
     /**
@@ -1006,8 +1032,17 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     {
         if ($confirm) {
             if (! $this->confirmChannel || $forceNew) {
-                $this->confirmChannel = $this->createChannel();
-                $this->enablePublisherConfirms($this->confirmChannel);
+                // Kept only once in confirm mode: after a failed confirm_select a publish on it would
+                // never be confirmed.
+                $confirmChannel = $this->createChannel();
+                try {
+                    $this->enablePublisherConfirms($confirmChannel);
+                } catch (Throwable $exception) {
+                    $this->closeQuietly($confirmChannel);
+
+                    throw $exception;
+                }
+                $this->confirmChannel = $confirmChannel;
             }
 
             return $this->confirmChannel;

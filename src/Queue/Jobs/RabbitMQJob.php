@@ -10,9 +10,8 @@ use Illuminate\Contracts\Queue\Job as JobContract;
 use Illuminate\Queue\Jobs\Job;
 use Illuminate\Queue\ManuallyFailedException;
 use Illuminate\Support\Arr;
-use PhpAmqpLib\Exception\AMQPChannelClosedException;
-use PhpAmqpLib\Exception\AMQPConnectionClosedException;
 use PhpAmqpLib\Exception\AMQPProtocolChannelException;
+use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Wire\AMQPTable;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
@@ -152,7 +151,8 @@ class RabbitMQJob extends Job implements JobContract
     {
         try {
             $this->rabbitmq->reject($this, $requeue);
-        } catch (AMQPChannelClosedException|AMQPConnectionClosedException $exception) {
+        } catch (AMQPRuntimeException $exception) {
+            // Also a write into a socket that is gone ("Error sending data"), not only a closed channel.
             $this->container->make(ExceptionHandler::class)->report($exception);
         }
     }

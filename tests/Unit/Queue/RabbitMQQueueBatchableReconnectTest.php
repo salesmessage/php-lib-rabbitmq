@@ -22,6 +22,7 @@ use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 use ReflectionMethod;
 use ReflectionProperty;
+use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
 use Salesmessage\LibRabbitMQ\Queue\QueueConfigFactory;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueueBatchable;
@@ -61,6 +62,15 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
 
     private bool $queueMissingOnGet = false;
 
+    private bool $vhostMissing = false;
+
+    /** @var list<string> */
+    private array $brokerExchanges = [];
+
+    private VhostsService&Mockery\MockInterface $vhostsService;
+
+    private LockService&Mockery\MockInterface $lockService;
+
     private int $channelsClosed = 0;
 
     private int $generation = 1;
@@ -91,8 +101,10 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         $container->instance('config', new Repository([]));
         $container->instance(InternalStorageManager::class, Mockery::mock(InternalStorageManager::class)->shouldIgnoreMissing());
         $container->instance(GroupsService::class, Mockery::mock(GroupsService::class));
-        $container->instance(VhostsService::class, Mockery::mock(VhostsService::class));
-        $container->instance(LockService::class, Mockery::mock(LockService::class));
+        $this->vhostsService = Mockery::mock(VhostsService::class);
+        $this->lockService = Mockery::mock(LockService::class);
+        $container->instance(VhostsService::class, $this->vhostsService);
+        $container->instance(LockService::class, $this->lockService);
         $container->instance(LoggerInterface::class, Mockery::spy(LoggerInterface::class));
         Container::setInstance($container);
 
@@ -281,7 +293,7 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         $this->upstreamDown = false;
         $this->channelOpens = 0;
 
-        $deliveryChannel = Mockery::mock(AMQPChannel::class);
+        $deliveryChannel = $this->deliveryChannel(registered: true);
         $deliveryChannel->shouldReceive($method)->once()->with(...$arguments);
         $message = new AMQPMessage('{}');
         $message->setChannel($deliveryChannel);
@@ -325,6 +337,158 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
 
         // The main and the confirm channel of the failed attempt.
         $this->assertSame(2, $this->channelsClosed);
+    }
+
+    public function test_stale_delivery_channel_left_by_a_reconnect_is_not_used_to_settle_the_job(): void
+    {
+        // After a missed heartbeat php-amqplib reconnects without closing the old channel objects: an ack on one
+        // would go out on the new connection with a channel id it doesn't own.
+        $deliveryChannel = $this->deliveryChannel(registered: false);
+        $deliveryChannel->shouldNotReceive('basic_ack');
+        $message = new AMQPMessage('{}');
+        $message->setChannel($deliveryChannel);
+        $message->setDeliveryInfo(7, false, '', self::QUEUE);
+        $job = Mockery::mock(RabbitMQJob::class);
+        $job->shouldReceive('getRabbitMQMessage')->andReturn($message);
+
+        $this->expectException(AMQPChannelClosedException::class);
+        $this->queue->ack($job);
+    }
+
+    public static function vhostScenarios(): array
+    {
+        $scenarios = [];
+        foreach (self::publishPaths() as $path => [$publish]) {
+            // The publish finds its connection closed; only the reconnect's channel open reports the vhost.
+            $scenarios["$path, vhost reported by the reconnect"] = [$publish, false];
+            // A reconnect failed while the broker was down; it is back without the vhost, and the next
+            // publish's channel open reports it.
+            $scenarios["$path, vhost reported after a failed reconnect"] = [$publish, true];
+        }
+
+        return $scenarios;
+    }
+
+    #[DataProvider('vhostScenarios')]
+    public function test_publish_after_the_vhost_is_recreated_declares_its_queue_and_is_delivered(callable $publish, bool $afterFailedReconnect): void
+    {
+        $this->publishesOnce($publish);
+        if ($afterFailedReconnect) {
+            $this->brokerGoesDown();
+            $this->publishFailure($publish, self::QUEUE);
+            $this->upstreamDown = false;
+        } else {
+            // The first failure is of another kind (the closed connection, or the first channel open failing
+            // upstream); only the reconnect's channel open then reports the missing vhost.
+            $this->connected = false;
+            $this->channelOpens = 0;
+            $this->failingOpens = [1];
+        }
+        $this->vhostMissing = true;
+        $this->published = [];
+        $this->expectVhostRecreation();
+
+        $publish($this->queue, self::QUEUE);
+
+        $this->assertSame([['delivered', self::LISTENER]], $this->published);
+    }
+
+    public function test_vhost_still_missing_after_its_recreation_fails_the_publish_without_looping(): void
+    {
+        $publish = self::publishPaths()['push'][0];
+        $this->publishesOnce($publish);
+        $this->connected = false;
+        $this->vhostMissing = true;
+        $this->lockService->shouldReceive('lock')->andReturnUsing(function (string $key, \Closure $handler): bool {
+            $handler();
+
+            return true;
+        });
+        $this->vhostsService->shouldReceive('setConnection')->andReturnSelf();
+        // The management API reports the vhost created, but the broker still doesn't have it.
+        $this->vhostsService->shouldReceive('createVhost')->once()->andReturnTrue();
+
+        $exception = $this->publishFailure($publish, self::QUEUE);
+
+        $this->assertInstanceOf(AMQPConnectionClosedException::class, $exception);
+        $this->assertStringContainsString('vhost '.self::VHOST.' not found', $exception->getMessage());
+    }
+
+    #[DataProvider('publishPaths')]
+    public function test_publish_after_another_process_recreated_the_vhost_declares_its_queue_and_is_delivered(callable $publish): void
+    {
+        // Another process saw the vhost missing and recreated it empty; this one sees only a closed connection.
+        $this->publishesOnce($publish);
+        $this->connected = false;
+        $this->brokerQueues = [];
+        $this->brokerExchanges = [];
+
+        $publish($this->queue, self::QUEUE);
+
+        $this->assertSame([['delivered', self::LISTENER]], $this->published);
+    }
+
+    public function test_batch_is_published_whole_when_a_channel_open_inside_it_fails(): void
+    {
+        // The confirmed job needs the confirm channel, opened while the plain message is already buffered on the
+        // main channel: the whole batch is built again on the new channels, not only the rest of it.
+        $bulk = fn (array $jobs) => $this->queue->bulk($jobs, '', self::QUEUE);
+        $bulk([self::listenerJob()]);
+        $this->published = [];
+        $this->channelOpens = 0;
+        $this->failingOpens = [1];
+
+        $bulk([self::listenerJob(), new ReconnectTestConfirmedJob]);
+
+        $this->assertEqualsCanonicalizing(
+            [['delivered', self::LISTENER], ['delivered', ReconnectTestConfirmedJob::class]],
+            $this->published
+        );
+    }
+
+    public function test_confirm_channel_is_kept_only_in_confirm_mode(): void
+    {
+        $this->confirmSelectTimesOut = true;
+
+        try {
+            $this->queue->getChannel(false, true);
+            $this->fail('A confirm_select timeout must surface.');
+        } catch (AMQPTimeoutException) {
+        }
+
+        $this->assertNull($this->confirmSelectedChannel());
+        // Not left open on the connection either.
+        $this->assertSame(1, $this->channelsClosed);
+    }
+
+    private function expectVhostRecreation(): void
+    {
+        $this->lockService->shouldReceive('lock')->andReturnUsing(function (string $key, \Closure $handler): bool {
+            $handler();
+
+            return true;
+        });
+        $this->vhostsService->shouldReceive('setConnection')->andReturnSelf();
+        $this->vhostsService->shouldReceive('createVhost')->once()->with(self::VHOST, Mockery::any())
+            ->andReturnUsing(function (): bool {
+                $this->vhostMissing = false;
+                // The recreated vhost is empty.
+                $this->brokerQueues = [];
+                $this->brokerExchanges = [];
+
+                return true;
+            });
+    }
+
+    private function deliveryChannel(bool $registered): AMQPChannel&Mockery\MockInterface
+    {
+        $channel = Mockery::mock(AMQPChannel::class);
+        $connection = Mockery::mock(AbstractConnection::class);
+        $connection->channels = $registered ? [3 => $channel] : [3 => Mockery::mock(AMQPChannel::class)];
+        $channel->shouldReceive('getConnection')->andReturn($connection);
+        $channel->shouldReceive('getChannelId')->andReturn(3);
+
+        return $channel;
     }
 
     private function publishesOnce(callable $publish): void
@@ -415,14 +579,25 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
             throw new AMQPConnectionClosedException('UPSTREAM_ERROR(0, 0)', 500);
         }
 
+        if ($this->vhostMissing) {
+            // Behind AMQProxy a missing vhost shows up only when the proxy opens the channel upstream.
+            $this->connected = false;
+
+            throw new AMQPConnectionClosedException('NOT_ALLOWED - vhost '.self::VHOST.' not found(0, 0)', 403);
+        }
+
         $generation = $this->generation;
         $alive = fn (): bool => $this->connected && $generation === $this->generation;
-        $deliver = function (AMQPMessage $message) use ($alive): void {
+        $deliver = function (AMQPMessage $message, string $exchange = '', string $routingKey = '') use ($alive): void {
             if (! $alive()) {
                 // php-amqplib checks the connection before every publish (AMQPChannel::checkConnection).
                 throw new AMQPChannelClosedException('Channel connection is closed.');
             }
-            $this->published[] = ['delivered', json_decode($message->getBody(), true)['displayName'] ?? null];
+            // A message reaches only a queue the broker has: an unroutable one on a channel without a return
+            // listener is dropped. A delayed message goes through the delay exchange and its queue.
+            $routed = in_array($routingKey, $this->brokerQueues, true)
+                && ($exchange === '' || (in_array($exchange, $this->brokerExchanges, true) && in_array($exchange, $this->brokerQueues, true)));
+            $this->published[] = [$routed ? 'delivered' : 'lost', json_decode($message->getBody(), true)['displayName'] ?? null];
         };
         $batch = [];
 
@@ -460,15 +635,48 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         });
         $channel->shouldReceive('basic_publish')->andReturnUsing($deliver);
         // A batch is only buffered on the channel; publish_batch writes it.
-        $channel->shouldReceive('batch_basic_publish')->andReturnUsing(function (AMQPMessage $message) use (&$batch): void {
-            $batch[] = $message;
+        $channel->shouldReceive('batch_basic_publish')->andReturnUsing(function (AMQPMessage $message, string $exchange = '', string $routingKey = '') use (&$batch): void {
+            $batch[] = [$message, $exchange, $routingKey];
         });
         $channel->shouldReceive('publish_batch')->andReturnUsing(function () use (&$batch, $deliver): void {
             $messages = $batch;
             $batch = [];
-            array_map($deliver, $messages);
+            foreach ($messages as [$message, $exchange, $routingKey]) {
+                $deliver($message, $exchange, $routingKey);
+            }
+        });
+        $channel->shouldReceive('exchange_declare')->andReturnUsing(function (string $name, string $type, bool $passive = false) use ($alive) {
+            if (! $alive()) {
+                throw new AMQPChannelClosedException('Channel connection is closed.');
+            }
+            if (! in_array($name, $this->brokerExchanges, true)) {
+                if ($passive) {
+                    throw new AMQPProtocolChannelException(404, "NOT_FOUND - no exchange '$name'", [40, 10]);
+                }
+                $this->brokerExchanges[] = $name;
+            }
+
+            return null;
         });
 
         return $channel;
+    }
+}
+
+class ReconnectTestConfirmedJob implements RabbitMQConsumable
+{
+    public function isDuplicated(): bool
+    {
+        return false;
+    }
+
+    public function getQueueType(): string
+    {
+        return RabbitMQConsumable::MQ_TYPE_QUORUM;
+    }
+
+    public function shouldConfirmOnPublish(): bool
+    {
+        return true;
     }
 }

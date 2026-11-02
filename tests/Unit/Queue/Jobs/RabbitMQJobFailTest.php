@@ -16,6 +16,7 @@ use Mockery;
 use Mockery\Adapter\Phpunit\MockeryPHPUnitIntegration;
 use Mockery\MockInterface;
 use PhpAmqpLib\Exception\AMQPChannelClosedException;
+use PhpAmqpLib\Exception\AMQPRuntimeException;
 use PhpAmqpLib\Message\AMQPMessage;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
@@ -184,6 +185,19 @@ class RabbitMQJobFailTest extends TestCase
         $this->makeJob($this->expectReject(false))->fail(new TimeoutExceededException('job timed out'));
 
         $this->assertSame(['rolled back', 'logged', 'rejected'], $this->calls);
+    }
+
+    public function test_failed_write_of_the_reject_is_reported_instead_of_thrown(): void
+    {
+        $this->events->listen(JobFailed::class, function (JobFailed $event) {
+            $event->job->markFailedJobLogged();
+        });
+        $writeError = new AMQPRuntimeException('Error sending data');
+        $rabbitmq = Mockery::mock(RabbitMQQueue::class);
+        $rabbitmq->shouldReceive('reject')->once()->andThrow($writeError);
+        $this->exceptionHandler->shouldReceive('report')->once()->with($writeError);
+
+        $this->makeJob($rabbitmq)->fail(new RuntimeException('job timed out'));
     }
 
     public function test_closed_delivery_channel_on_the_reject_is_reported_instead_of_thrown(): void

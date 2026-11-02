@@ -31,12 +31,18 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
     private LoggerInterface $logger;
 
     /**
-     * Payload and idle time of the publish in progress, so a reconnect inside a nested retry (createChannel)
-     * still names its job. The payload is decoded only when a reconnect is logged, not on every publish.
+     * Payload and idle time of the publish in progress, so a reconnect logged for it names its job. The
+     * payload is decoded only when a reconnect is logged, not on every publish.
      */
     private ?string $publishingPayload = null;
 
     private ?float $publishingIdleSeconds = null;
+
+    /**
+     * True while a retried unit runs: a retry inside it (e.g. createChannel()) only runs its operation, and
+     * the outermost one recovers and runs its whole unit again, declarations included.
+     */
+    private bool $retrying = false;
 
     /**
      * @param QueueConfig $config
@@ -65,6 +71,15 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
             fn() => parent::publishBasic($msg, $exchange, $destination, $mandatory, $immediate, $ticket, $confirm),
             payload: $msg->getBody()
         );
+    }
+
+    /**
+     * pushRaw() and laterRaw() declare and publish as one retried unit, as push() and publishBatch() do:
+     * after a reconnect the queues are declared again, which an empty recreated vhost needs.
+     */
+    protected function publishTransport(callable $transport, string $payload): mixed
+    {
+        return $this->withConnectionRetry($transport, payload: $payload);
     }
 
     public function pushRaw($payload, $queue = null, array $options = []): int|string|null
@@ -427,7 +442,7 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
      *
      * @param callable $operation         Transport-only operation to run.
      * @param int      $reconnectAttempts Total reconnect attempts before giving up,
-     *                                    passed through to reconnect() (default 1).
+     *                                    passed through to reconnect() (default 2).
      * @param int      $operationAttempts Number of times to retry the operation after a
      *                                    connection failure (0 = run once, no retry).
      * @param string|null $payload        Job payload, decoded for the reconnect log line only.
@@ -438,13 +453,19 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         int $operationAttempts = 2,
         ?string $payload = null
     ): mixed {
-        $outerPayload = $this->publishingPayload;
-        $outerIdleSeconds = $this->publishingIdleSeconds;
-        $this->publishingPayload = $payload ?? $outerPayload;
+        // Inside a retried unit only the outermost retry recovers: a recovery here would reconnect under
+        // the unit, which would then go on without declaring its queues again, or with a batch buffered
+        // on a channel the reconnect dropped.
+        if ($this->retrying) {
+            return $operation();
+        }
+
+        $this->publishingPayload = $payload;
         // Taken before the operation: a write into a closed socket updates the last activity before it fails.
-        $this->publishingIdleSeconds = $outerIdleSeconds ?? $this->idleSeconds();
+        $this->publishingIdleSeconds = $this->idleSeconds();
 
         try {
+            $this->retrying = true;
             for ($attempt = 0; ; $attempt++) {
                 try {
                     return $operation();
@@ -468,8 +489,9 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
                 }
             }
         } finally {
-            $this->publishingPayload = $outerPayload;
-            $this->publishingIdleSeconds = $outerIdleSeconds;
+            $this->retrying = false;
+            $this->publishingPayload = null;
+            $this->publishingIdleSeconds = null;
         }
     }
 
@@ -495,23 +517,42 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
     /**
      * Recover after a connection/channel failure: recreate a missing vhost, then reconnect.
      *
-     * @throws AMQPConnectionClosedException|AMQPChannelClosedException The original failure when the vhost cannot be recreated.
+     * Behind a proxy such as AMQProxy a missing vhost may show up only when the reconnect opens a channel,
+     * after a first failure of another kind: the vhost is then recreated once and the reconnect repeated.
+     * The retried unit runs again after the recovery and declares its queues again.
+     *
+     * @throws AMQPConnectionClosedException|AMQPChannelClosedException The failure when the vhost cannot be recreated or the reconnect fails.
      */
     private function recoverConnection(
         AMQPConnectionClosedException|AMQPChannelClosedException $exception,
         int $reconnectAttempts
     ): void {
-        if ($this->isVhostFailedException($exception)) {
-            if (false === $this->createNotExistsVhost()) {
-                throw $exception;
+        // Declare everything again after any reconnect: the vhost may have been deleted and recreated empty,
+        // also by another process while this one saw only a closed connection, and a publish to a remembered
+        // queue that is gone is unroutable and lost. The cost is one passive declare per queue per reconnect.
+        $this->queues = [];
+        $this->exchanges = [];
+        $this->boundQueues = [];
+
+        $vhostRecreated = false;
+        while (true) {
+            if (! $vhostRecreated && $this->isVhostFailedException($exception)) {
+                if (false === $this->createNotExistsVhost()) {
+                    throw $exception;
+                }
+                $vhostRecreated = true;
             }
 
-            // The recreated vhost is empty: without this, publishes to the remembered queues are unroutable and lost.
-            $this->queues = [];
-            $this->exchanges = [];
-            $this->boundQueues = [];
-        }
+            try {
+                $this->reconnect($reconnectAttempts);
 
-        $this->reconnect($reconnectAttempts);
+                return;
+            } catch (AMQPConnectionClosedException|AMQPChannelClosedException $reconnectException) {
+                if ($vhostRecreated || ! $this->isVhostFailedException($reconnectException)) {
+                    throw $reconnectException;
+                }
+                $exception = $reconnectException;
+            }
+        }
     }
 }
