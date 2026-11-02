@@ -1056,23 +1056,42 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
      * Reconnect using the original connection settings, retrying up to $attempts
      * times when the reconnect itself fails with a connection/channel error.
      *
+     * The new channels are opened straight from the connection, not through createChannel():
+     * a subclass may wrap createChannel() in a retry that reconnects, and calling it from here
+     * would recurse without bound when the reconnect succeeds but opening a channel keeps
+     * failing (e.g. a proxy such as AMQProxy accepting the connection while the broker behind
+     * it is down).
+     *
      * @param int $attempts Total reconnect attempts before giving up (default 1).
      *
      * @throws Exception
      */
     protected function reconnect(int $attempts = 1): void
     {
+        // The channels of the old connection are gone: drop them, and keep new ones only once the
+        // whole attempt succeeded, so that a failed reconnect leaves no dead (or unconfirmed) channel
+        // behind and the next use opens new channels.
+        $confirmChannelInUse = $this->confirmChannel !== null;
+        $this->channel = null;
+        $this->confirmChannel = null;
+
         $attempt = 1;
         while (true) {
             try {
+                $connection = $this->getConnection();
                 // Reconnects using the original connection settings.
-                $this->getConnection()->reconnect();
+                $connection->reconnect();
                 // Create a new main channel because all old channels are removed.
-                $this->getChannel(true);
+                $channel = $connection->channel();
                 // Recreate the confirm channel too, but only if it was already in use.
-                if ($this->confirmChannel !== null) {
-                    $this->getChannel(true, true);
+                $confirmChannel = null;
+                if ($confirmChannelInUse) {
+                    $confirmChannel = $connection->channel();
+                    $this->enablePublisherConfirms($confirmChannel);
                 }
+                $this->channel = $channel;
+                $this->confirmChannel = $confirmChannel;
+
                 return;
             } catch (AMQPConnectionClosedException|AMQPChannelClosedException $exception) {
                 if ($attempt >= $attempts) {

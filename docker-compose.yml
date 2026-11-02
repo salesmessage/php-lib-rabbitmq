@@ -22,6 +22,15 @@ services:
       - "5671:5671"
       - "5672:5672"
 
+  # AMQProxy with an unreachable upstream: it accepts the client connection and fails every channel.open
+  # with UPSTREAM_ERROR, as in production while the broker behind the proxy is down or restarting.
+  amqproxy-upstream-down:
+    image: cloudamqp/amqproxy:3.2.2
+    # Not AMQProxy's default port 5673, so the tests never reach a real proxy someone runs locally.
+    command: ["--listen=0.0.0.0", "--port=5679", "amqp://127.0.0.1:1"]
+    ports:
+      - "5679:5679"
+
   rabbitmq-management:
     image: rabbitmq:management
     environment:

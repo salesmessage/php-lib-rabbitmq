@@ -41,7 +41,7 @@ jobs:
           sudo mv docker-compose /usr/local/bin
 
       - name: Start Docker container
-        run: docker-compose up -d rabbitmq
+        run: docker-compose up -d rabbitmq amqproxy-upstream-down
 
       - name: Install dependencies
         run: composer update --with='laravel/framework:${{matrix.laravel}}' --${{ matrix.stability }} --prefer-dist --no-interaction --no-progress
