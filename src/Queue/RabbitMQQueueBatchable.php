@@ -3,6 +3,9 @@
 namespace Salesmessage\LibRabbitMQ\Queue;
 
 use Illuminate\Events\CallQueuedListener;
+use PhpAmqpLib\Channel\AMQPChannel;
+use PhpAmqpLib\Exception\AMQPChannelClosedException;
+use PhpAmqpLib\Exception\AMQPConnectionClosedException;
 use Psr\Log\LoggerInterface;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Dto\ConnectionNameDto;
@@ -10,9 +13,6 @@ use Salesmessage\LibRabbitMQ\Dto\QueueApiDto;
 use Salesmessage\LibRabbitMQ\Dto\VhostApiDto;
 use Salesmessage\LibRabbitMQ\Exceptions\RabbitVhostsGroupsException;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue as BaseRabbitMQQueue;
-use PhpAmqpLib\Exception\AMQPChannelClosedException;
-use PhpAmqpLib\Exception\AMQPConnectionClosedException;
-use PhpAmqpLib\Channel\AMQPChannel;
 use Salesmessage\LibRabbitMQ\Services\GroupsService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Salesmessage\LibRabbitMQ\Services\Lock\LockService;
@@ -31,12 +31,37 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
     private LoggerInterface $logger;
 
     /**
-     * Payload and idle time of the publish in progress, so a reconnect inside a nested retry (createChannel)
-     * still names its job. The payload is decoded only when a reconnect is logged, not on every publish.
+     * Payload and idle time of the publish in progress, so a reconnect logged for it names its job. The
+     * payload is decoded only when a reconnect is logged, not on every publish.
      */
     private ?string $publishingPayload = null;
 
     private ?float $publishingIdleSeconds = null;
+
+    /**
+     * Retried units running (a depth, so units that interleave can't leave it set): an inner retry (opening a
+     * channel, a publish) inside a unit only runs its operation, and the unit's retry recovers and runs the
+     * whole unit again, declarations included.
+     */
+    private int $runningUnits = 0;
+
+    /** Recoveries of a publish unit: one per step it has (open a channel, declare, publish) and one more. */
+    private const PUBLISH_RECOVERIES = 4;
+
+    /** Runs again after a run that got as far as writing its messages: each may publish them once more (as on 1.83). */
+    private const PUBLISH_RESENDS = 2;
+
+    /**
+     * Pause before the n-th recovery of a unit when the broker behind a proxy is unreachable (AMQProxy answers
+     * every channel open with UPSTREAM_ERROR, e.g. while the broker restarts): about 1.4 s in all, so a short
+     * restart is ridden through instead of failing the publish within milliseconds. The first recovery doesn't
+     * wait: a single UPSTREAM_ERROR (AMQProxy lost its upstream connection) reconnects at once, as on 1.83. Other
+     * failures (a connection found closed) recover at once.
+     */
+    private const BROKER_UNREACHABLE_PAUSES = [0.0, 0.2, 0.4, 0.8];
+
+    /** Whether the current run of the running unit got as far as writing its messages. */
+    private bool $unitWriting = false;
 
     /**
      * @param QueueConfig $config
@@ -62,9 +87,24 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
         bool $confirm = false
     ): void {
         $this->withConnectionRetry(
-            fn() => parent::publishBasic($msg, $exchange, $destination, $mandatory, $immediate, $ticket, $confirm),
-            payload: $msg->getBody()
+            function () use ($msg, $exchange, $destination, $mandatory, $immediate, $ticket, $confirm): void {
+                // The channel is opened before the write is counted (see withConnectionRetry()).
+                $this->getChannel(false, $confirm);
+                $this->unitWriting = true;
+                parent::publishBasic($msg, $exchange, $destination, $mandatory, $immediate, $ticket, $confirm);
+            },
+            payload: $msg->getBody(),
+            inner: true
         );
+    }
+
+    /**
+     * pushRaw() and laterRaw() declare and publish as one retried unit, as push() and publishBatch() do:
+     * after a reconnect the queues are declared again, which an empty recreated vhost needs.
+     */
+    protected function publishTransport(callable $transport, string $payload): mixed
+    {
+        return $this->withConnectionRetry($transport, operationAttempts: self::PUBLISH_RECOVERIES, payload: $payload);
     }
 
     public function pushRaw($payload, $queue = null, array $options = []): int|string|null
@@ -119,15 +159,15 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
                 $confirm ? $hasConfirm = true : $hasPlain = true;
             }
 
-            if ($hasPlain) {
-                $this->getChannel(false, false)->publish_batch();
-            }
-            if ($hasConfirm) {
-                $confirmChannel = $this->getChannel(false, true);
+            $plainChannel = $hasPlain ? $this->getChannel(false, false) : null;
+            $confirmChannel = $hasConfirm ? $this->getChannel(false, true) : null;
+            $this->unitWriting = true;
+            $plainChannel?->publish_batch();
+            if ($confirmChannel !== null) {
                 $confirmChannel->publish_batch();
                 $this->waitForConfirms($confirmChannel);
             }
-        }, payload: empty($prepared) ? null : $prepared[0][0]->getBody());
+        }, operationAttempts: self::PUBLISH_RECOVERIES, payload: empty($prepared) ? null : $prepared[0][0]->getBody());
 
         // once per queue, not per message
         $destinations = [];
@@ -179,7 +219,21 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
 
     protected function createChannel(): AMQPChannel
     {
-        return $this->withConnectionRetry(fn() => parent::createChannel());
+        return $this->withConnectionRetry(function (): AMQPChannel {
+            // A closed connection is not reopened quietly by php-amqplib here: the recovery reconnects (closing the
+            // channels left on it, see reconnect()) and forgets the declarations, and a unit runs again whole, so
+            // nothing is published into a vhost that was recreated empty meanwhile on the strength of declarations
+            // made before. php-amqplib noticed the close earlier (a missed heartbeat, a failed write, the peer's
+            // Connection.Close), so the original error is not known here.
+            // A lazy connection (the default) is not connected until its first channel: that first connect is
+            // php-amqplib's own, not a lost connection.
+            $connection = $this->getConnection();
+            if (! $connection->isConnected() && $connection->getServerProperties() !== null) {
+                throw new AMQPConnectionClosedException('Connection was found closed when opening a channel.');
+            }
+
+            return parent::createChannel();
+        }, inner: true);
     }
 
     /**
@@ -233,12 +287,9 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
                 : RabbitMQConsumable::MQ_TYPE_QUORUM,
         ];
 
-        // Same publish path as RabbitMQQueue::push (postfix + enqueueUsing + pushRaw),
-        // but the AMQPMessage is built ONCE up front so the initial attempt and every
-        // reconnect retry publish the same message_id - necessary for transport-level
-        // deduplication. Declaration + publish are the only retried steps (reusing the
-        // pre-built message); parent::publishBasic is called directly to avoid the
-        // extra retry layer in the overridden publishBasic.
+        // Same publish path as RabbitMQQueue::push (postfix + enqueueUsing + pushRaw), but the AMQPMessage is
+        // built ONCE up front, so the initial attempt and every reconnect retry publish the same message_id
+        // (transport-level deduplication). Declaration + publish are the retried unit (publishTransport()).
         $confirm = $this->jobRequestsConfirm($job);
 
         $publishQueue = $this->addQueuePostfix($job, $queue);
@@ -254,12 +305,12 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
             function () use ($payload, $message, $exchange, $destination, $exchangeType, $queueType, $correlationId, $confirm) {
                 $this->probeIdleConnection($payload);
 
-                $publishResult = $this->withConnectionRetry(function () use ($message, $exchange, $destination, $exchangeType, $queueType, $correlationId, $confirm) {
+                $publishResult = $this->publishTransport(function () use ($message, $exchange, $destination, $exchangeType, $queueType, $correlationId, $confirm) {
                     $this->declareDestination($destination, $exchange, $exchangeType, $queueType);
-                    parent::publishBasic($message, $exchange, $destination, true, confirm: $confirm);
+                    $this->publishBasic($message, $exchange, $destination, true, confirm: $confirm);
 
                     return $correlationId;
-                }, payload: $payload);
+                }, $payload);
 
                 // here and not after enqueueUsing(): a job dispatched after commit is published only then
                 $this->addQueueToIndex($destination, $exchange);
@@ -399,24 +450,7 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
      */
     private function isVhostFailedException(AMQPConnectionClosedException|AMQPChannelClosedException $exception): bool
     {
-        $dto = new ConnectionNameDto($this->getConnectionName());
-        $vhostName = (string) $dto->getVhostName();
-
-        $notFoundErrorMessage = sprintf('NOT_ALLOWED - vhost %s not found', $vhostName);
-        // 530 = connection-level NOT_ALLOWED (vhost missing at connection.open),
-        // 403 = channel-level ACCESS_REFUSED for the same missing vhost.
-        if (in_array($exception->getCode(), [403, 530], true)
-            && str_contains($exception->getMessage(), $notFoundErrorMessage)
-        ) {
-            return true;
-        }
-
-        $deletedErrorMessage = sprintf('CONNECTION_FORCED - vhost \'%s\' is deleted', $vhostName);
-        if (str_contains($exception->getMessage(), $deletedErrorMessage)) {
-            return true;
-        }
-
-        return false;
+        return VhostFailure::isMissing($exception, (new ConnectionNameDto($this->getConnectionName()))->getVhostName());
     }
 
     /**
@@ -425,32 +459,53 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
      * The callable must contain only network I/O - message building must happen
      * before this call so the same payload (and UUID) is reused on every attempt.
      *
+     * When the proxy reports the broker unreachable, the recoveries after the first wait a little first
+     * (BROKER_UNREACHABLE_PAUSES), so a call blocks up to about 1.4 s during an outage before it throws.
+     *
+     * A publish unit always retries on its own, also when it starts while another unit runs (e.g. a job
+     * dispatched from a timeout signal handler). An inner retry ($inner: opening a channel, or a publish that is
+     * part of a unit) only runs its operation while any unit runs on this queue object: the unit's retry recovers
+     * and runs the whole unit again. Opening a channel outside a unit retries on its own; one opened from a signal
+     * handler while a unit runs (e.g. size()) cannot be told apart from the unit's own and gets no retry.
+     *
      * @param callable $operation         Transport-only operation to run.
      * @param int      $reconnectAttempts Total reconnect attempts before giving up,
-     *                                    passed through to reconnect() (default 1).
-     * @param int      $operationAttempts Number of times to retry the operation after a
-     *                                    connection failure (0 = run once, no retry).
+     *                                    passed through to reconnect() (default 2).
+     * @param int      $operationAttempts At most this many retries after a connection failure (0 = run once,
+     *                                    no retry); runs after one that wrote are capped by PUBLISH_RESENDS.
      * @param string|null $payload        Job payload, decoded for the reconnect log line only.
      */
     private function withConnectionRetry(
         callable $operation,
         int $reconnectAttempts = 2,
         int $operationAttempts = 2,
-        ?string $payload = null
+        ?string $payload = null,
+        bool $inner = false
     ): mixed {
+        if ($inner && $this->runningUnits > 0) {
+            return $operation();
+        }
+
         $outerPayload = $this->publishingPayload;
         $outerIdleSeconds = $this->publishingIdleSeconds;
-        $this->publishingPayload = $payload ?? $outerPayload;
+        $outerWriting = $this->unitWriting;
+        $this->publishingPayload = $payload;
         // Taken before the operation: a write into a closed socket updates the last activity before it fails.
-        $this->publishingIdleSeconds = $outerIdleSeconds ?? $this->idleSeconds();
+        $this->publishingIdleSeconds = $this->idleSeconds();
 
+        $this->runningUnits++;
         try {
+            $resends = 0;
             for ($attempt = 0; ; $attempt++) {
+                $this->unitWriting = false;
                 try {
                     return $operation();
                 } catch (AMQPConnectionClosedException|AMQPChannelClosedException $exception) {
-                    // No retries left - surface the failure.
-                    if ($attempt >= $operationAttempts) {
+                    // No retries left - surface the failure. A run that got as far as writing may have published
+                    // its messages, so runs after one are bounded as on 1.83 and a message is not sent more often.
+                    // Failures before that (opening a channel, declaring) get all the attempts; php-amqplib's
+                    // connection check right before the write counts as a write.
+                    if ($attempt >= $operationAttempts || ($this->unitWriting && ++$resends > self::PUBLISH_RESENDS)) {
                         throw $exception;
                     }
 
@@ -464,13 +519,25 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
                         'error' => $exception->getMessage(),
                     ]);
 
+                    $pause = self::BROKER_UNREACHABLE_PAUSES[min($attempt, count(self::BROKER_UNREACHABLE_PAUSES) - 1)];
+                    if ($pause > 0 && VhostFailure::isBrokerUnreachable($exception)) {
+                        $this->pauseBeforeReconnect($pause);
+                    }
+
                     $this->recoverConnection($exception, $reconnectAttempts);
                 }
             }
         } finally {
+            $this->runningUnits--;
             $this->publishingPayload = $outerPayload;
             $this->publishingIdleSeconds = $outerIdleSeconds;
+            $this->unitWriting = $outerWriting;
         }
+    }
+
+    protected function pauseBeforeReconnect(float $seconds): void
+    {
+        usleep((int) round($seconds * 1_000_000));
     }
 
     private function idleSeconds(): ?float
@@ -495,23 +562,43 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
     /**
      * Recover after a connection/channel failure: recreate a missing vhost, then reconnect.
      *
-     * @throws AMQPConnectionClosedException|AMQPChannelClosedException The original failure when the vhost cannot be recreated.
+     * A missing vhost shows up at connection.open on a direct broker, and only when a channel is opened behind
+     * a proxy such as AMQProxy, possibly after a first failure of another kind. It is recreated at most once per
+     * recovery, as on 1.83, so the number of recreations is bounded by the unit's attempts; the retried unit then
+     * runs again and declares its queues again.
+     *
+     * @throws AMQPConnectionClosedException|AMQPChannelClosedException The failure when the vhost cannot be recreated or the reconnect fails.
      */
     private function recoverConnection(
         AMQPConnectionClosedException|AMQPChannelClosedException $exception,
         int $reconnectAttempts
     ): void {
-        if ($this->isVhostFailedException($exception)) {
-            if (false === $this->createNotExistsVhost()) {
-                throw $exception;
+        // Declare everything again after any reconnect: the vhost may have been deleted and recreated empty,
+        // also by another process while this one saw only a closed connection, and a publish to a remembered
+        // queue that is gone is unroutable and lost. The cost is one passive declare per queue per reconnect.
+        $this->queues = [];
+        $this->exchanges = [];
+        $this->boundQueues = [];
+
+        $vhostRecreated = false;
+        while (true) {
+            if (! $vhostRecreated && $this->isVhostFailedException($exception)) {
+                if (false === $this->createNotExistsVhost()) {
+                    throw $exception;
+                }
+                $vhostRecreated = true;
             }
 
-            // The recreated vhost is empty: without this, publishes to the remembered queues are unroutable and lost.
-            $this->queues = [];
-            $this->exchanges = [];
-            $this->boundQueues = [];
-        }
+            try {
+                $this->reconnect($reconnectAttempts);
 
-        $this->reconnect($reconnectAttempts);
+                return;
+            } catch (AMQPConnectionClosedException|AMQPChannelClosedException $reconnectException) {
+                if ($vhostRecreated || ! $this->isVhostFailedException($reconnectException)) {
+                    throw $reconnectException;
+                }
+                $exception = $reconnectException;
+            }
+        }
     }
 }

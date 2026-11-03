@@ -27,6 +27,7 @@ use Salesmessage\LibRabbitMQ\Interfaces\RabbitMQBatchable;
 use Salesmessage\LibRabbitMQ\Mutex;
 use Salesmessage\LibRabbitMQ\Queue\Jobs\RabbitMQJob;
 use Salesmessage\LibRabbitMQ\Queue\RabbitMQQueue;
+use Salesmessage\LibRabbitMQ\Queue\VhostFailure;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\AppDeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\Deduplication\TransportLevel\DeduplicationService as TransportDeduplicationService;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
@@ -951,68 +952,78 @@ abstract class AbstractVhostsConsumer extends Consumer
 
     protected function initConnection(int $attempts = 0): ?RabbitMQQueue
     {
-        if ($this->channel) {
-            try {
-                $this->channel->close();
-            } catch (\Exception $e) {
-                // Ignore close errors
+        while (true) {
+            if ($this->channel) {
+                try {
+                    $this->channel->close();
+                } catch (\Exception $e) {
+                    // Ignore close errors
+                }
+                $this->channel = null;
             }
-            $this->channel = null;
-        }
 
-        $connection = $this->manager->connection(
-            ConnectionNameDto::getVhostConnectionName($this->currentVhostName, $this->configConnectionName)
-        );
-
-        try {
-            /** @var AMQPChannel $channel */
-            $channel = $connection->getChannel(true);
-
-            $this->currentConnectionName = $connection->getConnectionName();
-
-            $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
-            $channel->basic_qos(
-                $this->prefetchSize,
-                $this->prefetchCount,
-                false
+            $connection = $this->manager->connection(
+                ConnectionNameDto::getVhostConnectionName($this->currentVhostName, $this->configConnectionName)
             );
 
-            $this->channel = $channel;
-            $this->connection = $connection;
-        } catch (AMQPConnectionClosedException | AMQPChannelClosedException $exception) {
-            $this->logError('initConnection.exception', [
-                'message' => $exception->getMessage(),
-                'trace' => $exception->getTraceAsString(),
-            ]);
+            try {
+                /** @var AMQPChannel $channel */
+                $channel = $connection->getChannel(true);
 
-            $vhostDto = new VhostApiDto([
-                'name' => $this->currentVhostName,
-            ]);
+                $this->currentConnectionName = $connection->getConnectionName();
 
-            $this->internalStorageManager->removeVhost($vhostDto);
-            $this->loadVhosts();
-            $goAhead = $this->goAheadOrWait($this->workerOptions?->sleep ?? 1);
-            if ($goAhead === false) {
-                return null;
-            }
+                $this->connectionMutex->lock(self::MAIN_HANDLER_LOCK);
+                $channel->basic_qos(
+                    $this->prefetchSize,
+                    $this->prefetchCount,
+                    false
+                );
 
-            if ($attempts > 10) {
-                $this->logError('initConnection.too_many_attempts', [
-                    'attempts' => $attempts,
-                    'original_error' => $exception->getMessage(),
+                $this->channel = $channel;
+                $this->connection = $connection;
+
+                return $connection;
+            } catch (AMQPConnectionClosedException|AMQPChannelClosedException $exception) {
+                $this->logError('initConnection.exception', [
+                    'message' => $exception->getMessage(),
                     'trace' => $exception->getTraceAsString(),
                 ]);
-                throw new \RuntimeException('Too many connection attempts');
+
+                // A vhost that fails is taken out of the index, so the consumers go on with the next vhost instead
+                // of all retrying this one (the scanner indexes it again). When the whole broker is out of reach
+                // (AMQProxy up, broker down) every vhost fails the same way: they stay indexed, and the consumer
+                // waits for the broker without counting toward the attempts limit, as there is nothing else to do.
+                $brokerUnreachable = VhostFailure::isBrokerUnreachable($exception);
+                if (! $brokerUnreachable) {
+                    $vhostDto = new VhostApiDto([
+                        'name' => $this->currentVhostName,
+                    ]);
+
+                    $this->internalStorageManager->removeVhost($vhostDto);
+                }
+                $this->loadVhosts();
+                $goAhead = $this->goAheadOrWait($this->workerOptions?->sleep ?? 1);
+                if ($goAhead === false) {
+                    return null;
+                }
+
+                if (! $brokerUnreachable) {
+                    if ($attempts > 10) {
+                        $this->logError('initConnection.too_many_attempts', [
+                            'attempts' => $attempts,
+                            'original_error' => $exception->getMessage(),
+                            'trace' => $exception->getTraceAsString(),
+                        ]);
+                        throw new \RuntimeException('Too many connection attempts');
+                    }
+                    $attempts++;
+                }
+
+                $this->sleep(1);
+            } finally {
+                $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
             }
-
-            sleep(1);
-
-            return $this->initConnection(++$attempts);
-        } finally {
-            $this->connectionMutex->unlock(self::MAIN_HANDLER_LOCK);
         }
-
-        return $connection;
     }
 
     /**

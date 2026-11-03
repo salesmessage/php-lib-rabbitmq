@@ -1025,9 +1025,11 @@ the connection is re-established and a `RabbitMQQueueBatchable.reconnect` warnin
 `reason: idle_guard`, the vhost, the idle seconds and the job. An alive connection is never reconnected,
 because a vhost consumer may share it. A publish that finds the connection or channel closed reconnects and
 retries; that logs the same warning with `reason: detected_closed`, the vhost, the idle seconds before the publish, the job and the attempt.
-The reconnect opens its new channels straight from the connection, without that retry: when a proxy accepts
-the connection but the broker behind it is down (AMQProxy answers every new channel with `UPSTREAM_ERROR`), the
-publish fails with an `AMQPConnectionClosedException` after a bounded number of attempts.
+The reconnect itself opens no channel: the publish opens its channels again inside its own retry, so when a proxy
+accepts the connection but the broker behind it is down (AMQProxy answers every new channel with `UPSTREAM_ERROR`),
+the publish fails with an `AMQPConnectionClosedException` after a bounded number of attempts. While the proxy
+reports the broker unreachable, the attempts after the first wait 0.2, 0.4 and 0.8 s, so a broker restart of up to
+about 1.4 s is ridden through and a publish during a longer outage throws after about 1.4 s.
 
 ### SSL Secure
 
