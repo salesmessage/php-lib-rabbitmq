@@ -101,7 +101,10 @@ class AmqproxyUpstreamDownTest extends TestCase
             }
             unset($exception);
 
-            $this->assertLessThan(10, microtime(true) - $start);
+            // The attempts after the first wait 0.2 + 0.4 + 0.8 s for the broker to come back.
+            $elapsed = microtime(true) - $start;
+            $this->assertGreaterThan(1.2, $elapsed);
+            $this->assertLessThan(10, $elapsed);
             $this->assertLessThanOrEqual(4, $logger->reconnects);
             $memoryAfterFirst ??= memory_get_usage();
         }

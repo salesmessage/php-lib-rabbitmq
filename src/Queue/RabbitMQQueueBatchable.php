@@ -51,6 +51,15 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
     /** Runs again after a run that got as far as writing its messages: each may publish them once more (as on 1.83). */
     private const PUBLISH_RESENDS = 2;
 
+    /**
+     * Pause before the n-th recovery of a unit when the broker behind a proxy is unreachable (AMQProxy answers
+     * every channel open with UPSTREAM_ERROR, e.g. while the broker restarts): about 1.4 s in all, so a short
+     * restart is ridden through instead of failing the publish within milliseconds. The first recovery doesn't
+     * wait: a single UPSTREAM_ERROR (AMQProxy lost its upstream connection) reconnects at once, as on 1.83. Other
+     * failures (a connection found closed) recover at once.
+     */
+    private const BROKER_UNREACHABLE_PAUSES = [0.0, 0.2, 0.4, 0.8];
+
     /** Whether the current run of the running unit got as far as writing its messages. */
     private bool $unitWriting = false;
 
@@ -450,6 +459,9 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
      * The callable must contain only network I/O - message building must happen
      * before this call so the same payload (and UUID) is reused on every attempt.
      *
+     * When the proxy reports the broker unreachable, the recoveries after the first wait a little first
+     * (BROKER_UNREACHABLE_PAUSES), so a call blocks up to about 1.4 s during an outage before it throws.
+     *
      * A publish unit always retries on its own, also when it starts while another unit runs (e.g. a job
      * dispatched from a timeout signal handler). An inner retry ($inner: opening a channel, or a publish that is
      * part of a unit) only runs its operation while any unit runs on this queue object: the unit's retry recovers
@@ -507,6 +519,11 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
                         'error' => $exception->getMessage(),
                     ]);
 
+                    $pause = self::BROKER_UNREACHABLE_PAUSES[min($attempt, count(self::BROKER_UNREACHABLE_PAUSES) - 1)];
+                    if ($pause > 0 && VhostFailure::isBrokerUnreachable($exception)) {
+                        $this->pauseBeforeReconnect($pause);
+                    }
+
                     $this->recoverConnection($exception, $reconnectAttempts);
                 }
             }
@@ -516,6 +533,11 @@ class RabbitMQQueueBatchable extends BaseRabbitMQQueue
             $this->publishingIdleSeconds = $outerIdleSeconds;
             $this->unitWriting = $outerWriting;
         }
+    }
+
+    protected function pauseBeforeReconnect(float $seconds): void
+    {
+        usleep((int) round($seconds * 1_000_000));
     }
 
     private function idleSeconds(): ?float

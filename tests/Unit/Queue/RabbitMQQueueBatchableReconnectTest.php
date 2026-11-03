@@ -94,6 +94,15 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
     /** The broker takes every message, but the connection closes before its confirm arrives. */
     private bool $confirmWaitFails = false;
 
+    /** @var list<float> pauses before a reconnect, in seconds (not slept in the tests) */
+    private array $pauses = [];
+
+    /** @var list<int> reconnects made before each pause */
+    private array $reconnectsAtPause = [];
+
+    /** Runs after each pause with the seconds paused so far: e.g. the broker comes back meanwhile. */
+    private ?\Closure $whilePaused = null;
+
     /** @var list<array{0: int, 1: int}> basic_ack calls: channel id, delivery tag */
     private array $acked = [];
 
@@ -144,7 +153,17 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         $container->instance(LoggerInterface::class, $this->logger);
         Container::setInstance($container);
 
-        $this->queue = new RabbitMQQueueBatchable(QueueConfigFactory::make([]));
+        $queue = new class(QueueConfigFactory::make([])) extends RabbitMQQueueBatchable
+        {
+            public ?\Closure $onPause = null;
+
+            protected function pauseBeforeReconnect(float $seconds): void
+            {
+                ($this->onPause)($seconds);
+            }
+        };
+        $queue->onPause = $this->paused(...);
+        $this->queue = $queue;
         $this->queue->setContainer($container);
         $this->queue->setConnectionName('rabbitmq_cluster:vhost:'.self::VHOST);
         $this->queue->setConnection($this->fakeConnection());
@@ -512,6 +531,8 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         $publish($this->queue, self::QUEUE);
 
         $this->assertSame([['delivered', self::LISTENER]], $this->published);
+        // Only a connection found closed: recovered at once.
+        $this->assertSame([], $this->pauses);
     }
 
     public function test_batch_is_published_whole_when_a_channel_open_inside_it_fails(): void
@@ -800,6 +821,8 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
         }
 
         $this->assertCount(3, $this->published);
+        // A connection the broker closed (not the proxy's UPSTREAM_ERROR) is recovered at once.
+        $this->assertSame([], $this->pauses);
     }
 
     public function test_confirmed_push_whose_channel_opens_keep_failing_before_the_write_gets_every_recovery(): void
@@ -818,6 +841,72 @@ class RabbitMQQueueBatchableReconnectTest extends TestCase
 
         $this->assertSame([['delivered', ReconnectTestConfirmedJob::class]], $this->published);
         $this->assertSame(4, $this->reconnects);
+    }
+
+    #[DataProvider('publishPaths')]
+    public function test_publish_with_the_broker_down_waits_before_the_recoveries_after_the_first(callable $publish): void
+    {
+        // The first recovery is for the connection found closed (at once); the proxy then reports the broker
+        // unreachable on every channel open, and the next recoveries wait before they reconnect: about 1.4 s in
+        // all, then it throws.
+        $this->publishesOnce($publish);
+        $this->brokerGoesDown();
+
+        $this->publishFailure($publish, self::QUEUE);
+
+        $this->assertSame([0.2, 0.4, 0.8], $this->pauses);
+        $this->assertSame([1, 2, 3], $this->reconnectsAtPause);
+    }
+
+    public function test_channel_open_with_the_broker_down_waits_only_before_its_second_recovery(): void
+    {
+        // A vhost consumer's initConnection: two recoveries, then it throws and the consumer waits on its own. A
+        // single UPSTREAM_ERROR (the proxy lost its upstream connection, the broker is up) reconnects at once.
+        $this->upstreamDown = true;
+
+        try {
+            $this->queue->getChannel(true);
+            $this->fail('Opening a channel with the broker down must throw.');
+        } catch (AMQPConnectionClosedException) {
+        }
+
+        $this->assertSame([0.2], $this->pauses);
+    }
+
+    public function test_single_upstream_error_while_the_broker_is_up_reconnects_at_once(): void
+    {
+        $this->failingOpens = [1];
+
+        $this->queue->getChannel(true);
+
+        $this->assertSame(1, $this->reconnects);
+        $this->assertSame([], $this->pauses);
+    }
+
+    #[DataProvider('publishPaths')]
+    public function test_publish_while_the_broker_restarts_behind_the_proxy_waits_for_it_and_is_delivered(callable $publish): void
+    {
+        // The broker is back about a second after the connection dropped: the pauses ride it through.
+        $this->publishesOnce($publish);
+        $this->brokerGoesDown();
+        $this->whilePaused = function (float $paused): void {
+            if ($paused >= 1.0) {
+                $this->upstreamDown = false;
+            }
+        };
+
+        $publish($this->queue, self::QUEUE);
+
+        $this->assertSame([['delivered', self::LISTENER]], $this->published);
+    }
+
+    private function paused(float $seconds): void
+    {
+        $this->pauses[] = $seconds;
+        $this->reconnectsAtPause[] = $this->reconnects;
+        if ($this->whilePaused !== null) {
+            ($this->whilePaused)(array_sum($this->pauses));
+        }
     }
 
     private function expectVhostRecreation(): void
