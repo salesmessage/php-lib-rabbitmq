@@ -18,9 +18,11 @@ use PhpAmqpLib\Exception\AMQPConnectionBlockedException;
 use PhpAmqpLib\Exception\AMQPConnectionClosedException;
 use PhpAmqpLib\Exception\AMQPProtocolChannelException;
 use PhpAmqpLib\Exception\AMQPRuntimeException;
+use PhpAmqpLib\Exception\AMQPTimeoutException;
 use PhpAmqpLib\Exchange\AMQPExchangeType;
 use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Wire\AMQPTable;
+use Psr\Log\LoggerInterface;
 use Ramsey\Uuid\Uuid;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQConsumable;
 use Salesmessage\LibRabbitMQ\Contracts\RabbitMQQueueContract;
@@ -657,7 +659,7 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     public function ack(RabbitMQJob $job): void
     {
         $message = $job->getRabbitMQMessage();
-        $this->deliveryChannel($message)->basic_ack($message->getDeliveryTag());
+        $this->deliveryChannel($message)?->basic_ack($message->getDeliveryTag());
     }
 
     /**
@@ -666,86 +668,60 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     public function reject(RabbitMQJob $job, bool $requeue = false): void
     {
         $message = $job->getRabbitMQMessage();
-        $this->deliveryChannel($message)->basic_reject($message->getDeliveryTag(), $requeue);
+        $this->deliveryChannel($message)?->basic_reject($message->getDeliveryTag(), $requeue);
     }
 
     /**
-     * A delivery tag is valid only on the channel that delivered the message: after a reconnect the
-     * queue's channel is another one, and the broker closes it on an unknown delivery tag.
+     * A delivery tag is valid only on the channel that delivered the message. A delivery from before a reconnect
+     * has a channel that is gone (closed, or left behind by php-amqplib when the connection was replaced): the
+     * broker requeued the message when that channel went, so there is nothing to settle, and the job, which may
+     * have succeeded, must not fail for it. Settling the tag on another channel would make the broker close that
+     * channel (406 unknown delivery tag).
      */
-    private function deliveryChannel(AMQPMessage $message): AMQPChannel
+    private function deliveryChannel(AMQPMessage $message): ?AMQPChannel
     {
         $channel = $message->getChannel();
         if ($channel === null) {
             return $this->getChannel();
         }
 
-        if ($this->isStale($channel)) {
-            // Frames go out by channel id: a live channel under the same id on the reconnected connection is
-            // where this delivery tag goes (and where a vhost consumer that kept the old object received it).
-            // Without one, writing the id would make the broker close the whole connection.
-            $live = $channel->getConnection()->channels[$channel->getChannelId()] ?? null;
-            if (! $live instanceof AMQPChannel) {
-                throw new AMQPChannelClosedException('Channel connection is closed.');
-            }
+        if ($channel->is_open() === false || $channel->getConnection() === null) {
+            $this->logSkippedSettle($message, 'delivery_channel_closed');
 
-            return $live;
+            return null;
+        }
+        if ($this->isStale($channel)) {
+            $this->logSkippedSettle($message, 'delivery_channel_replaced');
+
+            return null;
         }
 
         return $channel;
     }
 
+    private function logSkippedSettle(AMQPMessage $message, string $reason): void
+    {
+        if (! isset($this->container) || ! $this->container->bound(LoggerInterface::class)) {
+            return;
+        }
+
+        $this->container->make(LoggerInterface::class)->warning('RabbitMQQueue.settle.skipped', [
+            'reason' => $reason,
+            'delivery_tag' => $message->getDeliveryTag(),
+            'routing_key' => $message->getRoutingKey(),
+        ]);
+    }
+
     /**
-     * A connection that reconnects on its own (php-amqplib does when it is used after a missed heartbeat or a
-     * failed write) empties its channel list without closing the old channel objects: one of them would write
-     * on the new connection with a channel id it doesn't own, and the broker drops the frame or closes the
-     * connection. A channel closed the normal way has no connection and fails by itself when used.
+     * A connection replaced while it was marked closed without closing its channels (a missed heartbeat)
+     * empties its channel list but leaves the old channel objects attached: such a channel is not one of the
+     * connection's channels any more.
      */
-    protected function isStale(AMQPChannel $channel): bool
+    private function isStale(AMQPChannel $channel): bool
     {
         $connection = $channel->getConnection();
 
         return $connection !== null && ($connection->channels[$channel->getChannelId()] ?? null) !== $channel;
-    }
-
-    /**
-     * A cached channel is used again unless it is gone: missing, closed by the broker (a channel-level error),
-     * or stale. A stale channel means the connection reconnected underneath, possibly into a vhost recreated
-     * empty, so the declarations made before are forgotten too.
-     */
-    private function isUsable(?AMQPChannel $channel): bool
-    {
-        if ($channel === null || $channel->is_open() === false) {
-            return false;
-        }
-        if ($this->isStale($channel)) {
-            $this->forgetDeclarations();
-
-            return false;
-        }
-
-        return true;
-    }
-
-    /**
-     * Drop the cached channels a connection that reconnected on its own left behind, with the declarations
-     * made on them, before a retried unit declares and publishes.
-     */
-    protected function forgetStaleChannels(): void
-    {
-        foreach (['channel', 'confirmChannel'] as $property) {
-            if ($this->{$property} !== null && $this->isStale($this->{$property})) {
-                $this->{$property} = null;
-                $this->forgetDeclarations();
-            }
-        }
-    }
-
-    protected function forgetDeclarations(): void
-    {
-        $this->queues = [];
-        $this->exchanges = [];
-        $this->boundQueues = [];
     }
 
     /**
@@ -1089,14 +1065,17 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
     public function getChannel($forceNew = false, bool $confirm = false): AMQPChannel
     {
         if ($confirm) {
-            if ($forceNew || ! $this->isUsable($this->confirmChannel)) {
+            if ($forceNew || ! $this->confirmChannel || $this->confirmChannel->is_open() === false) {
                 // Kept only once in confirm mode: after a failed confirm_select a publish on it would
                 // never be confirmed.
                 $confirmChannel = $this->createChannel();
                 try {
                     $this->enablePublisherConfirms($confirmChannel);
                 } catch (Throwable $exception) {
-                    $this->closeQuietly($confirmChannel);
+                    // After a timeout the close would wait on the same stalled socket: the channel is dropped.
+                    if (! $exception instanceof AMQPTimeoutException) {
+                        $this->closeQuietly($confirmChannel);
+                    }
 
                     throw $exception;
                 }
@@ -1106,7 +1085,8 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
             return $this->confirmChannel;
         }
 
-        if ($forceNew || ! $this->isUsable($this->channel)) {
+        // A channel the broker closed (a channel-level error) is replaced, without reconnecting the connection.
+        if ($forceNew || ! $this->channel || $this->channel->is_open() === false) {
             $this->channel = $this->createChannel();
         }
 
@@ -1164,14 +1144,7 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
 
     protected function createChannel(): AMQPChannel
     {
-        $connection = $this->getConnection();
-        if (! $connection->isConnected()) {
-            // php-amqplib connects again on its own here, possibly into a vhost recreated empty meanwhile: the
-            // declarations made before are forgotten, so they are made again.
-            $this->forgetDeclarations();
-        }
-
-        return $connection->channel();
+        return $this->getConnection()->channel();
     }
 
     /**
@@ -1196,8 +1169,19 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         $attempt = 1;
         while (true) {
             try {
+                $connection = $this->getConnection();
+                // php-amqplib reconnects a connection that is only marked closed (a missed heartbeat, a failed
+                // write) without closing its channels: they stay open and attached, and a consumer still holding
+                // one would go on reading and settling on the new connection under an id that now belongs to
+                // another channel. Closed here, without I/O, such a consumer sees its channel gone, as after a
+                // normal close (which php-amqplib's reconnect does itself on a live connection).
+                foreach ($connection->channels as $channel) {
+                    if ($channel instanceof AMQPChannel) {
+                        $channel->closeIfDisconnected();
+                    }
+                }
                 // Reconnects using the original connection settings.
-                $this->getConnection()->reconnect();
+                $connection->reconnect();
 
                 return;
             } catch (AMQPConnectionClosedException|AMQPChannelClosedException $exception) {
@@ -1209,7 +1193,7 @@ class RabbitMQQueue extends Queue implements QueueContract, RabbitMQQueueContrac
         }
     }
 
-    protected function closeQuietly(AMQPChannel $channel): void
+    private function closeQuietly(AMQPChannel $channel): void
     {
         try {
             $channel->close();

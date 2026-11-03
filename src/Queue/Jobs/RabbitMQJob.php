@@ -10,7 +10,6 @@ use Illuminate\Contracts\Queue\Job as JobContract;
 use Illuminate\Queue\Jobs\Job;
 use Illuminate\Queue\ManuallyFailedException;
 use Illuminate\Support\Arr;
-use PhpAmqpLib\Exception\AMQPExceptionInterface;
 use PhpAmqpLib\Exception\AMQPProtocolChannelException;
 use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Wire\AMQPTable;
@@ -131,54 +130,14 @@ class RabbitMQJob extends Job implements JobContract
             }
 
             $this->requeuedAfterFail = ! $this->failedJobLogged;
-            $requeue = $this->requeuedAfterFail;
-            $this->settleReportingFailure(fn () => $this->rabbitmq->reject($this, $requeue));
+            $this->rabbitmq->reject($this, $this->requeuedAfterFail);
             $this->container->make(ExceptionHandler::class)->report($failException);
 
             return;
         }
 
         if (! $wasDeleted) {
-            $this->settleReportingFailure(fn () => $this->rabbitmq->reject($this, false));
-        }
-    }
-
-    /**
-     * The message is settled (acked or rejected) on the channel that delivered it. When that fails (the channel
-     * is gone, a write into a socket that is gone or timed out), the broker requeues the message with its
-     * channel, and the redelivery is deduplicated: the failure is reported, not thrown, so a job that succeeded
-     * doesn't fail and a release keeps its own exception.
-     *
-     * With $whenConnected, it is thrown again when the connection itself is down, so Laravel's worker restarts
-     * on the lost connection; the timeout handler (fail()) always gets past it to kill the worker.
-     */
-    private function settleReportingFailure(callable $settle, bool $whenConnected = false): void
-    {
-        try {
-            $settle();
-        } catch (AMQPExceptionInterface $exception) {
-            if ($whenConnected && ! $this->connectionIsUp()) {
-                throw $exception;
-            }
-            $this->container->make(ExceptionHandler::class)->report($exception);
-        }
-    }
-
-    /**
-     * The connection the message was delivered on (a consumer may hold another queue object's connection),
-     * else the queue's own.
-     */
-    private function connectionIsUp(): bool
-    {
-        try {
-            $channel = $this->message->getChannel();
-            if ($channel !== null) {
-                return (bool) $channel->getConnection()?->isConnected();
-            }
-
-            return $this->rabbitmq->getConnection()->isConnected();
-        } catch (Throwable) {
-            return false;
+            $this->rabbitmq->reject($this, false);
         }
     }
 
@@ -203,15 +162,13 @@ class RabbitMQJob extends Job implements JobContract
 
         // When delete is called and the Job was not failed, the message must be acknowledged.
         // This is because this is a controlled call by a developer. So the message was handled correct.
-        try {
-            if (! $this->failed) {
-                $this->settleReportingFailure(fn () => $this->rabbitmq->ack($this), whenConnected: true);
-            }
-        } finally {
-            // required for Laravel Horizon; also when the ack fails, the job is no longer reserved
-            if ($this->rabbitmq instanceof HorizonRabbitMQQueue) {
-                $this->rabbitmq->deleteReserved($this->queue, $this);
-            }
+        if (! $this->failed) {
+            $this->rabbitmq->ack($this);
+        }
+
+        // required for Laravel Horizon
+        if ($this->rabbitmq instanceof HorizonRabbitMQQueue) {
+            $this->rabbitmq->deleteReserved($this->queue, $this);
         }
     }
 
@@ -246,7 +203,7 @@ class RabbitMQJob extends Job implements JobContract
         // Releasing a Job means the message was failed to process.
         // Because this Job message is always recreated and pushed as new message, this Job message is correctly handled.
         // We must tell rabbitMQ this job message can be removed by acknowledging the message.
-        $this->settleReportingFailure(fn () => $this->rabbitmq->ack($this), whenConnected: true);
+        $this->rabbitmq->ack($this);
     }
 
     /**

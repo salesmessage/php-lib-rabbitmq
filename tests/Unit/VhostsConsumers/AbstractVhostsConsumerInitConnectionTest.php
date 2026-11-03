@@ -85,6 +85,26 @@ class AbstractVhostsConsumerInitConnectionTest extends TestCase
         $this->assertSame(-1, $failures);
     }
 
+    public function test_consumer_gives_up_after_too_many_failed_connection_attempts(): void
+    {
+        // A failure other than an unreachable broker counts toward the limit, as on 1.83.
+        $storage = Mockery::mock(InternalStorageManager::class);
+        $storage->shouldReceive('removeVhost');
+        $queue = Mockery::mock(RabbitMQQueue::class);
+        $queue->shouldReceive('getChannel')->with(true)->andThrow(new AMQPConnectionClosedException('Broken pipe or closed connection'));
+        $manager = Mockery::mock(QueueManager::class);
+        $manager->shouldReceive('connection')->andReturn($queue);
+        $scheduler = Mockery::mock(VhostSchedulerInterface::class);
+        $scheduler->shouldReceive('getOrderedVhosts')->andReturn(['organization_1']);
+        $scheduler->shouldReceive('getOrderedQueues')->andReturn(['q']);
+
+        $consumer = $this->makeWaitingConsumer($storage, $manager, $scheduler);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Too many connection attempts');
+        $consumer->initConnectionPublic();
+    }
+
     public function test_vhost_that_stays_down_does_not_block_the_next_one(): void
     {
         // Ordered by last processed: organization_1 never gets processed, so it would stay first for every consumer.
