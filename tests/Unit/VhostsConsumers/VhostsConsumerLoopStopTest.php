@@ -22,6 +22,7 @@ use Salesmessage\LibRabbitMQ\Services\FailedJobWriter;
 use Salesmessage\LibRabbitMQ\Services\InternalStorageManager;
 use Salesmessage\LibRabbitMQ\Services\Scheduler\VhostSchedulerInterface;
 use Salesmessage\LibRabbitMQ\Tests\Mocks\TestBatchableJob;
+use Salesmessage\LibRabbitMQ\Tests\Support\RecordsProcessedBatches;
 use Salesmessage\LibRabbitMQ\VhostsConsumers\AbstractVhostsConsumer;
 use Salesmessage\LibRabbitMQ\VhostsConsumers\DirectConsumer;
 use Salesmessage\LibRabbitMQ\VhostsConsumers\QueueConsumer;
@@ -40,15 +41,18 @@ class VhostsConsumerLoopStopTest extends TestCase
     public static function stops(): array
     {
         return [
-            'SIGTERM while collecting' => [10, 2, 'sigterm'],
-            '--max-time while collecting' => [10, 2, 'max-time'],
-            'SIGTERM before a drained queue is processed' => [10, 3, 'sigterm'],
-            'SIGTERM before a full batch is processed' => [2, 2, 'sigterm'],
+            'SIGTERM while collecting' => [10, 2, 'sigterm', true],
+            '--max-time while collecting' => [10, 2, 'max-time', true],
+            'SIGTERM before a drained queue is processed' => [10, 3, 'sigterm', true],
+            'SIGTERM before a full batch is processed' => [2, 2, 'sigterm', true],
+            '--max-time before a drained queue is processed' => [10, 3, 'max-time', false],
+            '--max-time before a full batch is processed' => [2, 2, 'max-time', false],
+            '--max-jobs equal to the batch size' => [2, 1, 'max-jobs', false],
         ];
     }
 
     #[DataProvider('stops')]
-    public function test_direct_consumer_returns_the_collected_batch_on_stop(int $batchSize, int $triggerAt, string $trigger): void
+    public function test_direct_consumer_returns_or_processes_the_collected_batch_on_stop(int $batchSize, int $triggerAt, string $trigger, bool $returned): void
     {
         $options = new WorkerOptions(memory: 1024, sleep: 0);
         $channel = $this->channel();
@@ -67,11 +71,11 @@ class VhostsConsumerLoopStopTest extends TestCase
         );
 
         $this->assertSame(0, $this->runDaemon($consumer, $options));
-        $this->assertSame(['nack 2 multiple requeue'], array_values(preg_grep('/^nack/', $this->channelCalls)));
+        $this->assertOutcome($returned, $consumer);
     }
 
     #[DataProvider('stops')]
-    public function test_queue_consumer_cancels_its_subscription_and_returns_the_collected_batch_on_stop(int $batchSize, int $triggerAt, string $trigger): void
+    public function test_queue_consumer_returns_or_processes_the_collected_batch_on_stop(int $batchSize, int $triggerAt, string $trigger, bool $returned): void
     {
         $options = new WorkerOptions(memory: 1024, sleep: 0);
         $channel = $this->channel();
@@ -98,23 +102,41 @@ class VhostsConsumerLoopStopTest extends TestCase
         );
 
         $this->assertSame(0, $this->runDaemon($consumer, $options));
+        $this->assertOutcome($returned, $consumer);
 
-        $nack = array_search('nack 2 multiple requeue', $this->channelCalls, true);
-        $cancel = array_search('cancel tag_'.self::VHOST.' nowait', $this->channelCalls, true);
-        $this->assertNotFalse($nack);
-        $this->assertNotFalse($cancel);
-        $this->assertLessThan($nack, $cancel);
-        $this->assertCount(1, preg_grep('/^nack/', $this->channelCalls));
+        if ($returned) {
+            $nack = array_search('nack 2 multiple requeue', $this->channelCalls, true);
+            $cancel = array_search('cancel tag_'.self::VHOST.' nowait', $this->channelCalls, true);
+            $this->assertNotFalse($cancel);
+            $this->assertLessThan($nack, $cancel);
+        }
     }
 
-    private function trigger(string $trigger, AbstractVhostsConsumer $consumer, WorkerOptions $options): void
+    private function assertOutcome(bool $returned, AbstractVhostsConsumer $consumer): void
     {
-        if ($trigger === 'sigterm') {
-            $consumer->shouldQuit = true;
+        $nacks = array_values(preg_grep('/^nack/', $this->channelCalls));
+        if ($returned) {
+            $this->assertSame(['nack 2 multiple requeue'], $nacks);
+            $this->assertSame([], $consumer->processedBatches);
 
             return;
         }
 
+        $this->assertSame([], $nacks);
+        $this->assertSame([[1, 2]], $consumer->processedBatches);
+    }
+
+    private function trigger(string $trigger, AbstractVhostsConsumer $consumer, WorkerOptions $options): void
+    {
+        match ($trigger) {
+            'sigterm' => $consumer->shouldQuit = true,
+            'max-jobs' => $options->maxJobs = self::COLLECTED_MESSAGES,
+            'max-time' => $this->exceedMaxTime($consumer, $options),
+        };
+    }
+
+    private function exceedMaxTime(AbstractVhostsConsumer $consumer, WorkerOptions $options): void
+    {
         $options->maxTime = 1;
         $this->setProperty($consumer, 'startTime', hrtime(true) / 1e9 - 10);
     }
@@ -153,7 +175,7 @@ class VhostsConsumerLoopStopTest extends TestCase
         $scheduler = Mockery::mock(VhostSchedulerInterface::class);
         $scheduler->shouldReceive('reserve');
 
-        $consumer = new $class(
+        $arguments = [
             Mockery::mock(InternalStorageManager::class),
             Mockery::mock(LoggerInterface::class)->shouldIgnoreMissing(),
             $manager,
@@ -163,7 +185,16 @@ class VhostsConsumerLoopStopTest extends TestCase
             Mockery::mock(DeduplicationService::class),
             $deliveryLimit,
             Mockery::mock(FailedJobWriter::class),
-        );
+        ];
+        $consumer = $class === DirectConsumer::class
+            ? new class(...$arguments) extends DirectConsumer
+            {
+                use RecordsProcessedBatches;
+            }
+        : new class(...$arguments) extends QueueConsumer
+        {
+            use RecordsProcessedBatches;
+        };
         $consumer->setFiltersDto(new ConsumeVhostsFiltersDto('g', [], '', [], ''));
         $consumer->setScheduler($scheduler);
         $consumer->setBatchSize($batchSize);
