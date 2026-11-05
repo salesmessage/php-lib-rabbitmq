@@ -1218,10 +1218,11 @@ php artisan lib-rabbitmq:consume-vhosts test-group-1 rabbitmq_vhosts --name=mq-v
 
 ## Testing
 
-Setup RabbitMQ using `docker-compose`:
+The tests are split into two suites. `Unit` needs no services. `Broker` needs RabbitMQ 4.3 or later on port 5672
+and an AMQProxy whose upstream is down on port 5679; start both with `docker compose`:
 
 ```bash
-docker compose up -d
+docker compose up -d rabbitmq amqproxy-upstream-down
 ```
 
 To run the test suite you can use the following commands:
@@ -1233,9 +1234,15 @@ composer test
 # To run only style tests.
 composer test:style
 
-# To run only unit tests.
+# To run both test suites.
 composer test:unit
+
+# To run one suite.
+vendor/bin/phpunit --testsuite Unit
+vendor/bin/phpunit --testsuite Broker
 ```
+
+CI (`.github/workflows/ci.yml`) runs both suites on PHP 8.2 and 8.3 with Laravel 12.
 
 Scheduler and storage tests run against an in-memory Redis fake by default.
 To run the same tests against a live Redis instead:

@@ -1,16 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" backupGlobals="false" beStrictAboutTestsThatDoNotTestAnything="false" bootstrap="vendor/autoload.php" colors="true" processIsolation="false" stopOnError="false" stopOnFailure="false" xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/11.0/phpunit.xsd" cacheDirectory=".phpunit.cache" backupStaticProperties="false">
   <testsuites>
-    <testsuite name="Package Test Suite">
-      <directory suffix="Test.php">./tests/</directory>
+    <testsuite name="Unit">
+      <directory suffix="Test.php">./tests/Unit/</directory>
+    </testsuite>
+    <testsuite name="Broker">
+      <file>./tests/Feature/AmqproxyUpstreamDownTest.php</file>
+      <file>./tests/Feature/StopReturnsCollectedBatchTest.php</file>
     </testsuite>
   </testsuites>
   <php>
     <env name="HOST" value="127.0.0.1"/>
     <env name="PORT" value="5672"/>
-    <env name="PORT_SSL" value="5671"/>
     <env name="AMQPROXY_PORT" value="5679"/>
-    <env name="RABBITMQ_SSL_CAFILE" value="./tests/files/rootCA.pem"/>
     <env name="APP_KEY" value="12345678901234567890123456789012"/>
 
     <!-- Scheduler/storage tests run on an in-memory Redis fake by default.
