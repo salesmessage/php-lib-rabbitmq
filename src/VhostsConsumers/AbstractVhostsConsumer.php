@@ -1310,4 +1310,45 @@ abstract class AbstractVhostsConsumer extends Consumer
 
         parent::kill($status, $options, $reason);
     }
+
+    public function stop($status = 0, $options = null, $reason = null)
+    {
+        $this->returnCollectedBatch($status);
+
+        return parent::stop($status, $options, $reason);
+    }
+
+    /**
+     * @throws MutexTimeout
+     */
+    protected function returnCollectedBatch(int $status): void
+    {
+        $messages = array_merge(...array_values($this->batchMessages));
+        if (empty($messages)) {
+            return;
+        }
+        $this->batchMessages = [];
+
+        usort($messages, static fn (AMQPMessage $a, AMQPMessage $b): int => $a->getDeliveryTag() <=> $b->getDeliveryTag());
+        $lastMessage = end($messages);
+
+        $this->connectionMutex->lock(static::MAIN_HANDLER_LOCK);
+        try {
+            $lastMessage->nack(true, true);
+
+            $this->logInfo('stop.batch_returned', [
+                'messages_count' => count($messages),
+                'status_code' => $status,
+            ]);
+        } catch (\Throwable $exception) {
+            $this->logWarning('stop.batch_return_failed', [
+                'messages_count' => count($messages),
+                'status_code' => $status,
+                'message' => $exception->getMessage(),
+                'error_class' => get_class($exception),
+            ]);
+        } finally {
+            $this->connectionMutex->unlock(static::MAIN_HANDLER_LOCK);
+        }
+    }
 }
