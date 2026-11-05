@@ -56,12 +56,17 @@ class StopReturnsCollectedBatchTest extends TestCase
     public function test_stopped_worker_returns_its_batch_without_raising_the_delivery_count(): void
     {
         $body = json_encode(['data' => ['commandName' => TestJob::class]]);
+        $this->channel->confirm_select();
         for ($i = 0; $i < self::MESSAGES_COUNT; $i++) {
             $this->channel->basic_publish(new AMQPMessage($body), '', $this->queue);
         }
+        $this->channel->wait_for_pending_acks(5);
+
+        $collected = $this->getMessages();
+        $this->assertCount(self::MESSAGES_COUNT, $collected);
 
         $consumer = BatchCollectingConsumer::make();
-        $consumer->collect(...$this->getMessages());
+        $consumer->collect(...$collected);
         $consumer->stop(0);
 
         $redelivered = $this->getMessages();
