@@ -30,9 +30,9 @@ class StopReturnsCollectedBatchTest extends TestCase
 
         $this->connection = new AMQPStreamConnection(getenv('HOST'), (int) getenv('PORT'), 'guest', 'guest');
         $version = (string) ($this->connection->getServerProperties()['version'][1] ?? '0');
-        if (version_compare($version, '4.0', '<')) {
+        if (version_compare($version, '4.3', '<')) {
             $this->connection->close();
-            $this->markTestSkipped("RabbitMQ $version raises x-delivery-count on a basic.nack requeue as well; 4.x does not.");
+            $this->markTestSkipped("RabbitMQ $version raises x-delivery-count on a basic.nack requeue as well; 4.3 and later do not.");
         }
 
         $this->channel = $this->connection->channel();

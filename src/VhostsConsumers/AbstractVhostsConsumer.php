@@ -1334,9 +1334,10 @@ abstract class AbstractVhostsConsumer extends Consumer
 
         $this->connectionMutex->lock(static::MAIN_HANDLER_LOCK);
         try {
+            $this->stopConsuming();
             $lastMessage->nack(true, true);
 
-            $this->logInfo('stop.batch_returned', [
+            $this->logWarning('stop.batch_returned', [
                 'messages_count' => count($messages),
                 'status_code' => $status,
             ]);

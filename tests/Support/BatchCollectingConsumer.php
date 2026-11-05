@@ -19,6 +19,9 @@ use Salesmessage\LibRabbitMQ\VhostsConsumers\AbstractVhostsConsumer;
 
 class BatchCollectingConsumer extends AbstractVhostsConsumer
 {
+    /** @var list<string> */
+    public array $calls = [];
+
     public static function make(): self
     {
         $events = Mockery::mock(Dispatcher::class);
@@ -54,5 +57,8 @@ class BatchCollectingConsumer extends AbstractVhostsConsumer
         return null;
     }
 
-    protected function stopConsuming(): void {}
+    protected function stopConsuming(): void
+    {
+        $this->calls[] = 'stopConsuming';
+    }
 }

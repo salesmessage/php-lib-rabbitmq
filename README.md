@@ -632,8 +632,9 @@ requeued message runs again until the row is written or the delivery limit write
 
 When a `lib-rabbitmq:consume-vhosts` worker stops (`--max-time`, `--max-jobs`, `--memory`, `queue:restart` or
 SIGTERM), the messages it has collected for a batch but not processed yet are requeued with `basic.nack`. A stop never
-comes while a batch is processed: the batch is finished and acked first. On RabbitMQ 4.x a `basic.nack` requeue does
-not raise `x-delivery-count`, so stops do not bring a message closer to `quorum.delivery_limit`. A worker that is
+comes while a batch is processed: the batch is finished and acked first. On RabbitMQ 4.3 and later a `basic.nack`
+requeue does not raise `x-delivery-count`, so stops do not bring a message closer to `quorum.delivery_limit`; on
+older brokers every requeue raises it. A worker that is
 killed (SIGKILL, out of memory, the batch timeout) returns nothing itself: the broker requeues its unacked messages
 when the channel closes and raises `x-delivery-count`, as it does for `basic.reject`.
 

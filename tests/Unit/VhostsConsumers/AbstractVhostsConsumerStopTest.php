@@ -16,20 +16,24 @@ class AbstractVhostsConsumerStopTest extends TestCase
 {
     use MockeryPHPUnitIntegration;
 
-    public function test_stop_requeues_the_collected_batch_once_up_to_the_last_delivery(): void
+    public function test_stop_cancels_consuming_and_requeues_the_collected_batch_once_up_to_the_last_delivery(): void
     {
-        $channel = Mockery::mock(AMQPChannel::class);
-        $channel->shouldReceive('basic_nack')->once()->with(3, true, true);
-
         $consumer = BatchCollectingConsumer::make();
+        $channel = Mockery::mock(AMQPChannel::class);
+        $channel->shouldReceive('basic_nack')->once()->with(3, true, true)
+            ->andReturnUsing(function () use ($consumer): void {
+                $consumer->calls[] = 'basic_nack';
+            });
+
         $consumer->collect(
             $this->message($channel, 1, TestJob::class),
-            $this->message($channel, 3, TestEncryptedJob::class),
-            $this->message($channel, 2, TestJob::class),
+            $this->message($channel, 2, TestEncryptedJob::class),
+            $this->message($channel, 3, TestJob::class),
         );
 
         $this->assertSame(0, $consumer->stop(0));
         $this->assertSame(0, $consumer->stop(0));
+        $this->assertSame(['stopConsuming', 'basic_nack'], $consumer->calls);
     }
 
     public function test_stop_without_collected_messages_only_stops(): void
