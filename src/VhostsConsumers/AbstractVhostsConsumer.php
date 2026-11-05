@@ -1318,6 +1318,20 @@ abstract class AbstractVhostsConsumer extends Consumer
         return parent::stop($status, $options, $reason);
     }
 
+    protected function isStopSignalled(): bool
+    {
+        if (! $this->shouldQuit) {
+            return false;
+        }
+
+        $this->stopStatusCode = static::EXIT_SUCCESS;
+        $this->logWarning('daemon.consuming_stop', [
+            'status_code' => $this->stopStatusCode,
+        ]);
+
+        return true;
+    }
+
     /**
      * @throws MutexTimeout
      */

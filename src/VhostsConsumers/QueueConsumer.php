@@ -79,6 +79,10 @@ class QueueConsumer extends AbstractVhostsConsumer
 
                 $this->stopConsuming();
 
+                if ($this->isStopSignalled()) {
+                    return $this->stop($this->stopStatusCode, $this->workerOptions);
+                }
+
                 $this->processBatch($connection);
 
                 $goAhead = $this->goAheadOrWait($this->workerOptions->sleep);
@@ -144,6 +148,10 @@ class QueueConsumer extends AbstractVhostsConsumer
 
             if ($this->jobsProcessed >= $this->batchSize) {
                 $this->stopConsuming();
+
+                if ($this->shouldQuit) {
+                    return;
+                }
 
                 $this->processBatch($connection);
 

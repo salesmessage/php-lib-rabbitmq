@@ -78,6 +78,10 @@ class DirectConsumer extends AbstractVhostsConsumer
 
                 $this->stopConsuming();
 
+                if ($this->isStopSignalled()) {
+                    return $this->stop($this->stopStatusCode, $this->workerOptions);
+                }
+
                 $this->processBatch($connection);
 
                 $goAhead = $this->goAheadOrWait($this->workerOptions->sleep);
@@ -98,6 +102,10 @@ class DirectConsumer extends AbstractVhostsConsumer
                 $this->logInfo('daemon.consuming_batch_full');
 
                 $this->stopConsuming();
+
+                if ($this->isStopSignalled()) {
+                    return $this->stop($this->stopStatusCode, $this->workerOptions);
+                }
 
                 $this->processBatch($connection);
 

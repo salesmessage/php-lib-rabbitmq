@@ -631,12 +631,16 @@ message requeued, and the exception is then reported instead of thrown, so a tim
 requeued message runs again until the row is written or the delivery limit writes it.
 
 When a `lib-rabbitmq:consume-vhosts` worker stops (`--max-time`, `--max-jobs`, `--memory`, `queue:restart` or
-SIGTERM), the messages it has collected for a batch but not processed yet are requeued with `basic.nack`. A stop never
-comes while a batch is processed: the batch is finished and acked first. On RabbitMQ 4.3 and later a `basic.nack`
-requeue does not raise `x-delivery-count`, so stops do not bring a message closer to `quorum.delivery_limit`; on
-older brokers every requeue raises it. A worker that is
-killed (SIGKILL, out of memory, the batch timeout) returns nothing itself: the broker requeues its unacked messages
-when the channel closes and raises `x-delivery-count`, as it does for `basic.reject`.
+SIGTERM), the messages it has collected for a batch but not processed yet are requeued with `basic.nack`. After a
+SIGTERM this also holds for a batch that has just filled up or whose queue has just run empty. A batch that is already
+being processed is finished and acked first. On RabbitMQ 4.3 and later a `basic.nack` requeue does not raise
+`x-delivery-count`, so these returns do not bring a message closer to `quorum.delivery_limit`; on older brokers every
+requeue raises it. The queue consumer (a `consumer_type` other than `direct`) also holds deliveries prefetched past
+the collected batch: they go back when the channel closes and raise `x-delivery-count`. Keep `--max-jobs` at 0 or at
+least the group's `batch_size`: a lower value can stop every worker before its batch is full, and the same messages
+are then returned again and again. A worker that is killed (SIGKILL, out of memory, the batch timeout) returns nothing
+itself: the broker requeues its unacked messages when the channel closes and raises `x-delivery-count`, as it does for
+`basic.reject`.
 
 Producers can write a job that could not be published with
 `Salesmessage\LibRabbitMQ\Services\FailedJobWriter::write($connectionName, $queue, $payload, $exception)`.
