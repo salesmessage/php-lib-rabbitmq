@@ -1346,9 +1346,10 @@ abstract class AbstractVhostsConsumer extends Consumer
         usort($messages, static fn (AMQPMessage $a, AMQPMessage $b): int => $a->getDeliveryTag() <=> $b->getDeliveryTag());
         $lastMessage = end($messages);
 
-        $this->connectionMutex->lock(static::MAIN_HANDLER_LOCK);
         try {
             $this->stopConsuming();
+
+            $this->connectionMutex->lock(static::MAIN_HANDLER_LOCK);
             $lastMessage->nack(true, true);
 
             $this->logWarning('stop.batch_returned', [
