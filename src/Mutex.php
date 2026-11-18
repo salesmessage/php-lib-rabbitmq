@@ -42,7 +42,7 @@ final class Mutex
         }
     }
 
-    public function lock(string $initiator, float $timeout = null): void
+    public function lock(string $initiator, ?float $timeout = null): void
     {
         if ($this->availableLocksPool === null) {
             return;

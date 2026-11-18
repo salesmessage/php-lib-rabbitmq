@@ -190,7 +190,7 @@ class FakeRedisConnection extends PredisConnection
      * Executes the queued commands immediately against this fake and returns
      * their responses, mirroring what a real pipeline resolves to.
      */
-    public function pipeline(callable $callback = null): array
+    public function pipeline(?callable $callback = null): array
     {
         $pipe = new class($this) {
             /** @var array<int, mixed> */
