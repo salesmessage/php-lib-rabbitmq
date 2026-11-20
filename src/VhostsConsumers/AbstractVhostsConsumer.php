@@ -116,7 +116,7 @@ abstract class AbstractVhostsConsumer extends Consumer
         protected TransportDeduplicationService $transportDeduplicationService,
         protected DeliveryLimitService $deliveryLimitService,
         protected FailedJobWriter $failedJobWriter,
-        callable $resetScope = null,
+        ?callable $resetScope = null,
     ) {
         parent::__construct($manager, $events, $exceptions, $isDownForMaintenance, $logger, $resetScope);
 
