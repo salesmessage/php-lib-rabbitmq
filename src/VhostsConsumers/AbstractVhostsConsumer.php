@@ -233,7 +233,8 @@ abstract class AbstractVhostsConsumer extends Consumer
             if (extension_loaded('swoole')) {
                 $this->logInfo('daemon.AsyncMode.Swoole');
 
-                \Swoole\Runtime::enableCoroutine(true, SWOOLE_HOOK_ALL);
+                // Swoole 6 accepts only the hook flags; Swoole 4/5 treat an int first argument as the flags too
+                \Swoole\Runtime::enableCoroutine(SWOOLE_HOOK_ALL);
                 \Co\run($coroutineContextHandler);
             } elseif (extension_loaded('openswoole')) {
                 $this->logInfo('daemon.AsyncMode.OpenSwoole');
